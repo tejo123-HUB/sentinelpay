@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SentinelPay — Live Fraud Monitoring</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">◈</span>
+      <div>
+        <h1>SentinelPay</h1>
+        <p>Real-time fraud detection &amp; structuring monitor</p>
+      </div>
+    </div>
+    <div class="conn-status" id="conn-status">
+      <span class="dot" id="conn-dot"></span>
+      <span id="conn-label">Connecting…</span>
+    </div>
+  </header>
+
+  <section class="counters">
+    <div class="stat-card">
+      <span class="stat-label">Total Processed</span>
+      <span class="stat-value" id="count-total">0</span>
+    </div>
+    <div class="stat-card stat-allow">
+      <span class="stat-label">Allowed</span>
+      <span class="stat-value" id="count-allow">0</span>
+    </div>
+    <div class="stat-card stat-stepup">
+      <span class="stat-label">Step-Up</span>
+      <span class="stat-value" id="count-step_up">0</span>
+    </div>
+    <div class="stat-card stat-block">
+      <span class="stat-label">Blocked</span>
+      <span class="stat-value" id="count-block">0</span>
+    </div>
+    <div class="stat-card stat-struct">
+      <span class="stat-label">Structuring Alerts</span>
+      <span class="stat-value" id="count-alerts">0</span>
+    </div>
+  </section>
+
+  <main class="layout">
+    <section class="panel panel-transactions">
+      <div class="panel-header">
+        <h2>Live Transactions</h2>
+        <canvas id="decision-chart" width="90" height="90"></canvas>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Sender</th>
+              <th>Receiver</th>
+              <th>Amount</th>
+              <th>Type</th>
+              <th>Score</th>
+              <th>Decision</th>
+              <th>Reasons</th>
+            </tr>
+          </thead>
+          <tbody id="tx-table-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel panel-alerts">
+      <div class="panel-header">
+        <h2>Structuring / Layering Alerts</h2>
+      </div>
+      <div class="alerts-scroll" id="alerts-list">
+        <p class="empty-state">No structuring alerts yet.</p>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

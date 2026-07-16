@@ -1,0 +1,172 @@
+# SentinelPay — User Manual
+### How It Actually Works, Explained in Plain Language
+
+This document explains SentinelPay for someone who has never seen the code — a judge, a teammate joining late, or you six months from now. It focuses on **what happens in the real world** when a transaction flows through the system, with concrete worked examples.
+
+---
+
+## 1. What Problem Is This Solving, in Plain Terms?
+
+Imagine you run a digital payment gateway (like a UPI app or a wallet). Every second, thousands of small payments flow through your system — someone buying a ₹40 cup of tea, someone paying a ₹200 electricity top-up, someone sending ₹500 to a friend. Somewhere in that flood, a small number of these transactions are fraudulent or are part of a money-laundering operation.
+
+You can't manually review millions of transactions. You also can't afford to slow every single payment down by seconds while a heavyweight fraud check runs — users would abandon the app. And you can't just block anything unusual, because that would also block your genuine customers, which costs you their trust and their business.
+
+**SentinelPay sits in the middle of that payment flow** — between "user hits pay" and "money actually moves" — and makes an instant decision: let it through, ask for extra verification, or stop it, all within milliseconds, without a human ever looking at it in real time.
+
+---
+
+## 2. Who "Uses" This System, and How?
+
+There's no separate app end-users open. Instead, three groups interact with SentinelPay differently:
+
+| Who | What they see | How |
+|---|---|---|
+| **The payment gateway (the system integrating SentinelPay)** | Nothing visual — just an API response | Sends every transaction to `POST /transaction`, gets back a decision in milliseconds, and acts on it (allow the payment / show an OTP screen / reject it) |
+| **A fraud analyst / operations team** | The live dashboard | Watches transactions stream in, sees flagged ones highlighted, investigates structuring alerts |
+| **The end customer paying money** | Nothing directly — but they experience the outcome | A normal payment goes through instantly; a suspicious one might trigger an OTP prompt; a blocked one shows as "transaction declined" |
+
+So in real deployment, SentinelPay is invisible infrastructure — like a security guard checking IDs at a door so fast that honest visitors barely notice, while stopping the ones who shouldn't get through.
+
+---
+
+## 3. The Journey of a Single Transaction (Step by Step)
+
+Here's exactly what happens, in order, every time someone pays:
+
+1. **A payment is initiated.** Say, someone sends ₹300 to a shop through the payment app.
+2. **The gateway calls `POST /transaction`** with details: who's sending, who's receiving, how much, from where, from which device, and what type of transaction it is.
+3. **SentinelPay saves the transaction** to its database immediately, so there's a permanent record regardless of the outcome.
+4. **Five quick rule checks run** (each takes a few milliseconds): Is this person sending money unusually fast? Did they just "teleport" to a new city? Is this amount way bigger than usual for them? Is this an unrecognized device? Is this a strange hour for them to be transacting?
+5. **A fast lookup checks**: is this sender or receiver already flagged as part of a known money-laundering pattern from the background structuring analysis (explained in Section 5)?
+6. **A machine learning model scores the transaction** based on patterns learned from historical fraud data — catching subtler signals the rules might miss.
+7. **All of these combine into one fraud score from 0–100.**
+8. **A decision is made instantly:**
+   - Score under 40 → **Allow** (payment goes through normally)
+   - Score 40–80 → **Step-up** (ask for extra verification, like an OTP)
+   - Score over 80 → **Block** (payment is stopped)
+9. **The gateway receives this decision** in the same instant and acts on it — completing the payment, prompting for OTP, or showing a decline message.
+10. **Everything is logged** to the live dashboard, so a human fraud analyst can see it happen in real time and investigate further if needed.
+
+All of this — steps 3 through 9 — happens in well under a second. The person paying experiences it as instantaneous.
+
+---
+
+## 4. Worked Example #1 — A Normal, Everyday Transaction
+
+**Scenario:** Priya buys a ₹150 coffee from a café she visits every week, using her phone, during her regular lunch hour.
+
+**What SentinelPay sees:**
+- Amount (₹150) is close to Priya's average spend → no anomaly
+- Location matches her recent activity → no impossible travel
+- Device is the one she always uses → no mismatch
+- Time is her normal lunch hour → no odd-hour flag
+- Velocity is normal (she hasn't made other transactions in the last minute) → no flag
+- No structuring pattern involving her account
+
+**Result:** Fraud score ~5/100 → **Allow**. Priya's payment completes instantly; she never knows any of this analysis happened.
+
+---
+
+## 5. Worked Example #2 — A Single Stolen-Card-Style Fraud Attempt
+
+**Scenario:** Someone's payment credentials have been stolen. Within 90 seconds, the attacker makes 5 rapid transactions from a device never seen before, and the last transaction appears to originate 400 km away from where the previous one happened seconds earlier — physically impossible to travel in that time.
+
+**What SentinelPay sees:**
+- **Velocity check** flags it: 5 transactions in under 2 minutes is far above normal.
+- **Impossible travel check** flags it: 400 km in under a minute implies an impossible speed.
+- **Device mismatch check** flags it: this device has never been linked to this account before.
+
+**Result:** These three flags combine into a fraud score well above 80 → **Block**. The gateway immediately declines the transaction and can notify the account holder. The response also includes the reasons, e.g.:
+```json
+{
+  "decision": "block",
+  "fraud_score": 94,
+  "reasons": [
+    "5 transactions in 90 seconds",
+    "412 km location jump in under 60 seconds",
+    "Transaction from a previously unseen device"
+  ]
+}
+```
+This is what makes the system trustworthy — it's not a black box saying "blocked," it's giving a specific, human-readable reason a fraud analyst (or even the account holder, in a notification) can understand immediately.
+
+---
+
+## 6. Worked Example #3 — The Middle Ground (Step-Up Authentication)
+
+**Scenario:** Rahul, who usually spends ₹200–500 per transaction, suddenly makes a ₹4,000 purchase — unusual for him, but not wildly suspicious on its own. It's from his usual device, at a normal hour, and there's no velocity or travel issue.
+
+**What SentinelPay sees:**
+- **Amount anomaly check** flags it: ₹4,000 is well over 3x his usual average.
+- Nothing else is unusual.
+
+**Result:** One moderate flag pushes the score into the 40–80 range → **Step-up**. Instead of blocking Rahul's legitimate (if unusual) purchase outright, the app prompts him for an OTP or biometric confirmation. If he confirms it's really him, the payment completes. This is the system protecting against false positives — Rahul isn't locked out just because he did something slightly unusual once.
+
+---
+
+## 7. Worked Example #4 — The Structuring / Money-Laundering Pattern (the system's signature feature)
+
+This is the scenario that most fraud systems miss entirely, because no single transaction in it looks suspicious on its own.
+
+**Scenario:** An account (Account A) is being used to launder ₹80,000. Instead of one large, obviously suspicious transfer, the money is split into 40 separate transactions of ₹2,000 each — each individually small enough to avoid triggering a single-transaction alert. These are sent to 6 different receiving accounts (B, C, D, E, F, G) within a 10-minute window. Five of those six receiving accounts then withdraw more than 80% of what they received within the next 30 minutes — a classic "mule account" pattern.
+
+**What a naive fraud system would see:** 40 individual ₹2,000 transactions, each unremarkable on its own. Nothing gets flagged. The laundering succeeds.
+
+**What SentinelPay sees:**
+1. The **background structuring job** (running every 5–10 seconds) notices Account A has sent an unusually large *total* (₹80,000) across an unusually large *number* of small transactions (40) within a short window — this trips the **split detection** threshold.
+2. It then checks: how many different accounts did A pay in that window? Six distinct receivers, none of whom A had ever transacted with before — this trips **fan-out detection**.
+3. It then watches those six receiving accounts: five of them withdraw over 80% of what they just received within 30 minutes — this trips **rapid withdrawal correlation**, the "mule account" signal.
+4. All of this gets bundled into a **single structuring alert** — not 40 separate low-value flags, which would be noise a human analyst couldn't act on.
+
+**What shows up on the dashboard:**
+```json
+{
+  "type": "structuring_alert",
+  "sender_id": "A",
+  "receiver_ids": ["B", "C", "D", "E", "F", "G"],
+  "total_amount": 80000,
+  "transaction_count": 40,
+  "withdrawal_ratio": 0.83,
+  "window": "10 minutes"
+}
+```
+A fraud analyst sees one clear, actionable alert: *"₹80,000 structured across 40 transactions from Account A into 6 accounts; 5 of them withdrew 83% of received funds within 30 minutes."* Any future transaction touching Account A or the linked receiver accounts is now automatically pushed toward the "block" tier, even if that individual transaction looks small and unremarkable — because the system now knows it's part of a known pattern.
+
+**Why this matters in real life:** This is exactly the technique real money launderers use to stay under the radar of transaction-by-transaction monitoring (a technique commonly called "smurfing" or "structuring"). Catching it requires looking at *relationships between accounts over time*, not just individual transactions — which is what makes this feature genuinely differentiated, not just another fraud checklist item.
+
+---
+
+## 8. How the Dashboard Is Actually Used (Real-World Workflow)
+
+In a real deployment, a fraud operations analyst would have this dashboard open on a screen throughout their shift:
+
+- A **live table** scrolls with every transaction as it's processed, color-coded green (allow), yellow (step-up), red (block).
+- **Counters** at the top show at a glance: how many transactions processed today, how many flagged, how many blocked, how many stepped up.
+- A **dedicated structuring alerts panel** surfaces laundering patterns as soon as they're detected — this is the panel an analyst would check first, since it represents the highest-value, hardest-to-spot-manually cases.
+- Clicking into any flagged transaction or alert shows the human-readable reasons, so the analyst doesn't have to reverse-engineer *why* something was flagged.
+
+In the hackathon demo specifically, this dashboard is what you'd have projected on screen while your simulator runs — judges watch transactions flow in live, then watch a scripted attack get caught and explained on screen in real time.
+
+---
+
+## 9. What Happens After a Block or Alert, in a Real Deployment?
+
+It's worth being honest about scope here: SentinelPay makes the **real-time decision** (allow/step-up/block) and raises alerts. In a full production system, a few things would typically happen next, which are outside this project's current scope but worth understanding for the pitch:
+
+- **Blocked transactions** would typically notify the account holder and may require manual review before any restriction is lifted.
+- **Structuring alerts** would typically be escalated to a compliance/AML (anti-money-laundering) team for investigation and, in regulated environments, potential reporting to financial authorities.
+- **Step-up outcomes** feed back into the system over time — if a user keeps confirming unusual-but-legitimate transactions, their behavioral baseline (like `avg_transaction_amount`) naturally adjusts, reducing future false positives.
+
+---
+
+## 10. Quick Reference — The Three Outcomes
+
+| Score | Outcome | What the payer experiences | What it usually means |
+|---|---|---|---|
+| < 40 | **Allow** | Payment completes instantly, no interruption | Transaction matches expected behavior |
+| 40–80 | **Step-up** | Prompted for OTP/biometric confirmation | Something is unusual but not clearly fraudulent |
+| > 80 | **Block** | Payment declined immediately | Strong evidence of fraud or a known laundering pattern |
+
+---
+
+*This manual complements `architecture.md` (the technical build spec) and `CLAUDE.md` (the build-automation entrypoint). Update this document if the real-world behavior of the system changes — e.g., if thresholds are retuned, or if the step-up flow changes.*

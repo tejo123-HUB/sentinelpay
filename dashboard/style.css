@@ -1,0 +1,249 @@
+:root {
+  --bg: #0b1120;
+  --panel-bg: #131c31;
+  --border: #22314f;
+  --text: #e6ecf5;
+  --text-dim: #8ba0c4;
+  --allow: #34d399;
+  --stepup: #fbbf24;
+  --block: #f87171;
+  --struct: #a78bfa;
+  --accent: #38bdf8;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1.25rem 2rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.brand-mark {
+  font-size: 2rem;
+  color: var(--accent);
+}
+
+.brand h1 {
+  margin: 0;
+  font-size: 1.4rem;
+  letter-spacing: 0.02em;
+}
+
+.brand p {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 0.85rem;
+}
+
+.conn-status {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
+
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--block);
+  transition: background 0.2s ease;
+}
+
+.dot.connected {
+  background: var(--allow);
+  box-shadow: 0 0 8px var(--allow);
+}
+
+.counters {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 1rem;
+  padding: 1.25rem 2rem;
+}
+
+.stat-card {
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.stat-label {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.stat-value {
+  font-size: 1.9rem;
+  font-weight: 600;
+}
+
+.stat-allow .stat-value {
+  color: var(--allow);
+}
+.stat-stepup .stat-value {
+  color: var(--stepup);
+}
+.stat-block .stat-value {
+  color: var(--block);
+}
+.stat-struct .stat-value {
+  color: var(--struct);
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 1rem;
+  padding: 0 2rem 2rem;
+  align-items: start;
+}
+
+.panel {
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.9rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.panel-header h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.table-scroll {
+  max-height: 65vh;
+  overflow-y: auto;
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+th, td {
+  text-align: left;
+  padding: 0.55rem 0.9rem;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+th {
+  position: sticky;
+  top: 0;
+  background: var(--panel-bg);
+  color: var(--text-dim);
+  font-weight: 500;
+  text-transform: uppercase;
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+}
+
+td.reasons {
+  white-space: normal;
+  color: var(--text-dim);
+  max-width: 320px;
+}
+
+tr.decision-allow td.decision-cell {
+  color: var(--allow);
+  font-weight: 600;
+}
+tr.decision-step_up td.decision-cell {
+  color: var(--stepup);
+  font-weight: 600;
+}
+tr.decision-block td.decision-cell {
+  color: var(--block);
+  font-weight: 600;
+}
+
+tr.decision-block {
+  background: rgba(248, 113, 113, 0.06);
+}
+tr.decision-step_up {
+  background: rgba(251, 191, 36, 0.05);
+}
+
+.alerts-scroll {
+  max-height: 65vh;
+  overflow-y: auto;
+  padding: 1rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.empty-state {
+  color: var(--text-dim);
+  font-size: 0.85rem;
+}
+
+.alert-card {
+  border: 1px solid rgba(167, 139, 250, 0.35);
+  background: rgba(167, 139, 250, 0.08);
+  border-radius: 8px;
+  padding: 0.8rem 1rem;
+  font-size: 0.85rem;
+}
+
+.alert-card .alert-chain {
+  font-weight: 600;
+  color: var(--struct);
+  margin-bottom: 0.35rem;
+}
+
+.alert-card .alert-meta {
+  color: var(--text-dim);
+  font-size: 0.78rem;
+  margin-bottom: 0.35rem;
+}
+
+.alert-card .alert-reason {
+  color: var(--text);
+}
+
+@media (max-width: 900px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+  .counters {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
