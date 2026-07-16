@@ -5,7 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>SentinelPay — Live Fraud Monitoring</title>
   <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js" defer></script>
 </head>
 <body>
   <header class="topbar">
@@ -45,7 +47,13 @@
     </div>
   </section>
 
-  <main class="layout">
+  <nav class="tabs" id="view-tabs">
+    <button class="tab-btn active" data-view="live">Live Monitor</button>
+    <button class="tab-btn" data-view="map">Map</button>
+    <button class="tab-btn" data-view="audit">Audit Trail</button>
+  </nav>
+
+  <main class="layout view" id="view-live">
     <section class="panel panel-transactions">
       <div class="panel-header">
         <h2>Live Transactions</h2>
@@ -80,6 +88,73 @@
     </section>
   </main>
 
-  <script src="app.js"></script>
+  <main class="layout-single view hidden" id="view-map">
+    <section class="panel panel-map">
+      <div class="panel-header">
+        <h2>Transaction Origins</h2>
+        <div class="map-legend">
+          <span><i class="legend-dot legend-allow"></i>Allow</span>
+          <span><i class="legend-dot legend-stepup"></i>Step-Up</span>
+          <span><i class="legend-dot legend-block"></i>Block</span>
+        </div>
+      </div>
+      <div id="map-container"></div>
+    </section>
+  </main>
+
+  <main class="layout-single view hidden" id="view-audit">
+    <section class="panel panel-audit-summary">
+      <div class="panel-header">
+        <h2>Decision Trend (last 24h)</h2>
+      </div>
+      <div class="audit-chart-wrap">
+        <canvas id="audit-trend-chart"></canvas>
+      </div>
+    </section>
+
+    <section class="panel panel-audit-table">
+      <div class="panel-header">
+        <h2>Flagged Transaction History</h2>
+        <div class="audit-filters">
+          <select id="audit-decision-filter">
+            <option value="step_up,block" selected>Step-Up + Block</option>
+            <option value="block">Block only</option>
+            <option value="step_up">Step-Up only</option>
+            <option value="allow,step_up,block">All decisions</option>
+          </select>
+          <button id="audit-refresh">Refresh</button>
+        </div>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Sender</th>
+              <th>Receiver</th>
+              <th>Amount</th>
+              <th>Score</th>
+              <th>Decision</th>
+              <th>Reasons</th>
+            </tr>
+          </thead>
+          <tbody id="audit-table-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <!--
+    defer (not a plain script tag) on all three: deferred scripts execute in strict document
+    order after parsing finishes, so this guarantees chart.js/leaflet.js (declared earlier, in
+    <head>, also deferred) have already run and defined window.Chart/window.L by the time
+    app.js/map.js check for them. A plain (non-deferred) script here would execute immediately
+    when the parser reaches it — which happens *before* any deferred script runs, per the HTML
+    spec — so `typeof Chart === 'undefined'` would always be true regardless of network
+    conditions, silently breaking the chart/map every time, not just when offline.
+  -->
+  <script src="app.js" defer></script>
+  <script src="map.js" defer></script>
+  <script src="audit.js" defer></script>
 </body>
 </html>

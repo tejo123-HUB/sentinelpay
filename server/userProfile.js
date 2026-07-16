@@ -96,22 +96,35 @@ function computeTypicalActiveHoursRange(db, senderId) {
  * Updates the sender's rolling average spend (architecture.md Section 10, Task 3 formula) and,
  * once enough history exists, their typical active-hours baseline. Must run after the users
  * row for senderId already exists (see ensureUserExists) and after the current transaction has
- * been counted in transactionCountBeforeInsert.
+ * already been inserted (the count below is read fresh, post-insert).
  *
  * @param {import('node:sqlite').DatabaseSync} db
  * @param {string} senderId
  * @param {{ amount: number, location: {lat,lng}|null }} transaction
- * @param {number} transactionCountBeforeInsert - COUNT(*) for this sender *before* this transaction was inserted
  */
-function updateUserAfterTransaction(db, senderId, transaction, transactionCountBeforeInsert) {
-  const existing = db.prepare('SELECT * FROM users WHERE user_id = ?').get(senderId);
-  const newTransactionCount = transactionCountBeforeInsert + 1;
+function updateUserAfterTransaction(db, senderId, transaction) {
+  // Concurrency note: under the default ML_SERVING_MODE=local, getFraudProbability resolves
+  // via microtask only, so Node's single-threaded event loop can't interleave another
+  // request's handler between this sender's transaction being inserted and this function
+  // running — no real race in the default demo path. But ML_SERVING_MODE=python-service/vertex
+  // do genuine async I/O (a real fetch), which *can* interleave two concurrent requests for the
+  // same sender. The average is therefore computed as a single atomic SQL UPDATE (SQLite
+  // resolves `avg_transaction_amount` to its current value within that one statement, not a
+  // JS-cached value read earlier) rather than a read-in-JS-then-write-back — the previous
+  // version could let two concurrent requests both read the same stale average and have
+  // whichever wrote last completely overwrite the other's contribution. The count is also
+  // read fresh here (after this transaction's own INSERT has already committed), not carried
+  // over from an earlier read taken before the insert.
+  const currentCount = db.prepare('SELECT COUNT(*) AS n FROM transactions WHERE sender_id = ?').get(senderId).n;
 
-  const newAvg =
-    existing.avg_transaction_amount + (transaction.amount - existing.avg_transaction_amount) / newTransactionCount;
+  db.prepare(
+    'UPDATE users SET avg_transaction_amount = avg_transaction_amount + (? - avg_transaction_amount) / ? WHERE user_id = ?'
+  ).run(transaction.amount, currentCount, senderId);
+
+  const existing = db.prepare('SELECT * FROM users WHERE user_id = ?').get(senderId);
 
   let typicalActiveHoursJson = existing.typical_active_hours;
-  if (newTransactionCount >= MIN_HISTORY_FOR_ACTIVE_HOURS) {
+  if (currentCount >= MIN_HISTORY_FOR_ACTIVE_HOURS) {
     typicalActiveHoursJson = JSON.stringify(computeTypicalActiveHoursRange(db, senderId));
   }
 
@@ -122,9 +135,12 @@ function updateUserAfterTransaction(db, senderId, transaction, transactionCountB
     homeLng = transaction.location.lng;
   }
 
-  db.prepare(
-    'UPDATE users SET avg_transaction_amount = ?, typical_active_hours = ?, home_location_lat = ?, home_location_lng = ? WHERE user_id = ?'
-  ).run(newAvg, typicalActiveHoursJson, homeLat, homeLng, senderId);
+  db.prepare('UPDATE users SET typical_active_hours = ?, home_location_lat = ?, home_location_lng = ? WHERE user_id = ?').run(
+    typicalActiveHoursJson,
+    homeLat,
+    homeLng,
+    senderId
+  );
 }
 
 module.exports = {

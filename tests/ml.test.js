@@ -1,5 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const net = require('node:net');
 
 const { getFraudProbability, scoreLocal } = require('../server/ml/mlClient');
 
@@ -59,5 +60,36 @@ test('getFraudProbability: fails open to 0 when ML_SERVING_MODE is an unimplemen
   } finally {
     if (original === undefined) delete process.env.ML_SERVING_MODE;
     else process.env.ML_SERVING_MODE = original;
+  }
+});
+
+test('getFraudProbability: a hung python-service backend times out and fails open, instead of hanging (regression)', async () => {
+  // Accepts the TCP connection but never writes an HTTP response, simulating a wedged
+  // ml/serve.py process — without a fetch timeout this would hang POST /transaction forever.
+  const hungServer = net.createServer((socket) => {
+    /* deliberately never responds */
+    socket.on('error', () => {});
+  });
+  await new Promise((resolve) => hungServer.listen(0, resolve));
+  const port = hungServer.address().port;
+
+  const originalMode = process.env.ML_SERVING_MODE;
+  const originalUrl = process.env.ML_SERVICE_URL;
+  process.env.ML_SERVING_MODE = 'python-service';
+  process.env.ML_SERVICE_URL = `http://127.0.0.1:${port}/predict`;
+
+  try {
+    const start = Date.now();
+    const p = await getFraudProbability(cleanTransaction, cleanHistory);
+    const elapsedMs = Date.now() - start;
+
+    assert.equal(p, 0, 'should fail open to a neutral probability, not hang or throw uncaught');
+    assert.ok(elapsedMs < 2000, `expected the timeout to bound the wait, took ${elapsedMs}ms`);
+  } finally {
+    if (originalMode === undefined) delete process.env.ML_SERVING_MODE;
+    else process.env.ML_SERVING_MODE = originalMode;
+    if (originalUrl === undefined) delete process.env.ML_SERVICE_URL;
+    else process.env.ML_SERVICE_URL = originalUrl;
+    hungServer.close();
   }
 });

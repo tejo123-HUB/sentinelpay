@@ -26,7 +26,10 @@ npm start          # starts the API + dashboard on http://localhost:3000
 ```
 
 That's it — the SQLite database (`sentinelpay.db`) and its schema are created automatically on
-first run. Open `http://localhost:3000` in a browser for the live dashboard.
+first run. Open `http://localhost:3000` in a browser for the live dashboard, which has three
+tabs: **Live Monitor** (real-time transaction table + structuring alerts), **Map** (Leaflet view
+of transaction origins, color-coded by decision), and **Audit Trail** (a trend chart plus a
+filterable history of flagged transactions).
 
 To retrain the ML model (optional — a trained model is already included):
 
@@ -63,9 +66,12 @@ background job (runs every 7s by default) picks it up — usually within one or 
 npm test
 ```
 
-38 tests across the rule engine, structuring engine (including an end-to-end DB integration
-test replicating the Task 6 Definition of Done), scoring/decision layer, ML client, and the
-ingestion API.
+63 tests across the rule engine, structuring engine (including an end-to-end DB integration
+test replicating the Task 6 Definition of Done), scoring/decision layer, ML client, the
+ingestion API, input validation, WebSocket error resilience, and a dashboard script-load-order
+regression guard. See `architecture.md` Section 15.2 for a detailed log of bugs a deep review
+pass found and fixed (including a real security issue), each with a regression test that was
+verified to fail without the fix and pass with it.
 
 ## Measuring latency / false-positive behavior
 

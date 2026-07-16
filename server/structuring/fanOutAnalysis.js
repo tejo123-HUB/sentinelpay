@@ -5,13 +5,16 @@ const MIN_FANOUT = 3; // minimum count of *new* (no prior history) receivers to 
 /**
  * @param {Array<{ receiver_id, amount, timestamp }>} windowTransactions - one sender's transfers
  *   within the split-detection window (see splitDetection.js).
- * @param {Array<{ receiver_id }>} priorTransactions - that same sender's transactions from
- *   before the window, used to determine which receivers are "new".
+ * @param {Iterable<string>} priorReceiverIds - receiver_ids this same sender has *ever*
+ *   transacted with before the window, from the caller's full account history — not just
+ *   whatever happens to be in a recent-transactions lookback (see pipeline.js/backgroundJob.js
+ *   for why that distinction matters: a receiver_id array here, not raw transaction objects,
+ *   deliberately decouples "who is a known contact" from any particular lookback window).
  * @returns {{ receiverIds: string[], newReceiverIds: string[], receiverTotals: Map<string, number>,
  *   passesFanOut: boolean }}
  */
-function analyzeFanOut(windowTransactions, priorTransactions) {
-  const priorReceivers = new Set((priorTransactions || []).map((t) => t.receiver_id));
+function analyzeFanOut(windowTransactions, priorReceiverIds) {
+  const priorReceivers = priorReceiverIds instanceof Set ? priorReceiverIds : new Set(priorReceiverIds || []);
 
   const receiverTotals = new Map();
   for (const t of windowTransactions) {

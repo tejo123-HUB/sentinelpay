@@ -79,8 +79,18 @@ test('fanOutAnalysis: does not flag receivers with established prior history', (
     { receiver_id: 'B', amount: 4000 },
     { receiver_id: 'C', amount: 4000 },
   ];
-  const priorTransactions = [{ receiver_id: 'B' }, { receiver_id: 'C' }];
-  const result = analyzeFanOut(windowTransactions, priorTransactions);
+  const priorReceiverIds = ['B', 'C'];
+  const result = analyzeFanOut(windowTransactions, priorReceiverIds);
+
+  assert.equal(result.passesFanOut, false);
+});
+
+test('fanOutAnalysis: accepts a Set as well as an array for priorReceiverIds', () => {
+  const windowTransactions = [
+    { receiver_id: 'B', amount: 4000 },
+    { receiver_id: 'C', amount: 4000 },
+  ];
+  const result = analyzeFanOut(windowTransactions, new Set(['B', 'C']));
 
   assert.equal(result.passesFanOut, false);
 });
@@ -126,6 +136,29 @@ test('chainTracking: combines results into a single alert row with a human-reada
   assert.equal(alert.transaction_count, 6);
   assert.ok(alert.reason.length > 0);
   assert.match(alert.reason, /mule/);
+});
+
+test('chainTracking: reason cites the minimum mule ratio, not just the first one encountered (regression)', () => {
+  // Regression test: the reason text used to cite muleAccounts[0]'s ratio (Map insertion
+  // order), which isn't necessarily the lowest. With a 99% mule listed first and an 85% mule
+  // second, the old code would claim "2 of 3 receivers withdrew over 99%+" — false for the
+  // second one. The claim must be a true lower bound across everything it's cited for.
+  const alert = buildAlert({
+    senderId: 'A',
+    totalAmount: 24000,
+    count: 6,
+    windowStart: iso(0),
+    windowEnd: iso(450000),
+    receiverIds: ['B', 'C', 'D'],
+    withdrawalResults: [
+      { receiverId: 'B', amountReceived: 8000, amountOut: 7920, withdrawalRatio: 0.99, isMule: true },
+      { receiverId: 'D', amountReceived: 8000, amountOut: 6800, withdrawalRatio: 0.85, isMule: true },
+      { receiverId: 'C', amountReceived: 8000, amountOut: 1000, withdrawalRatio: 0.125, isMule: false },
+    ],
+  });
+
+  assert.match(alert.reason, /over 85%\+/, `expected the reason to cite the minimum (85%), got: ${alert.reason}`);
+  assert.doesNotMatch(alert.reason, /over 99%\+/);
 });
 
 // ---- Full pipeline: the Task 6 Definition of Done ----
@@ -242,6 +275,83 @@ test('backgroundJob.runScanCycle: DoD scenario produces exactly one persisted al
   const createdAgain = runScanCycle(db, nowMs + 5000);
   assert.equal(createdAgain.length, 0);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM structuring_alerts').get().n, 1);
+});
+
+test('backgroundJob.runScanCycle: a genuine long-term contact outside the recent-transactions lookback is not misclassified as a new fan-out receiver (regression)', () => {
+  // Regression test: the fan-out "no prior history" check used to be derived from the same
+  // LOOKBACK_MS-bounded (~45 min) transaction set fetched for split-detection, so a receiver
+  // the sender has genuinely paid for months would look "new" the moment they weren't paid in
+  // the last 45 minutes. Here, sender A has a real 2-hour-old relationship with B (well outside
+  // LOOKBACK_MS) — B must NOT count toward MIN_FANOUT even though the fetch for this scan won't
+  // include that old transaction. Only C and D are genuinely new (2 receivers), which is below
+  // MIN_FANOUT (3), so this must NOT produce a structuring alert.
+  const db = buildTestDb();
+  for (const userId of ['A', 'B', 'C', 'D']) insertUser(db, userId, iso(-3 * 60 * 60 * 1000));
+
+  // A genuine, old relationship — 2 hours before the burst below, well outside the ~45-minute
+  // recent-transactions lookback the background job fetches per scan cycle.
+  insertTransaction(db, {
+    sender_id: 'A',
+    receiver_id: 'B',
+    amount: 500,
+    timestamp: iso(-2 * 60 * 60 * 1000),
+    transaction_type: 'transfer',
+  });
+
+  // The burst: 6 transfers of 4000 to B, C, D (2 each) — meets MIN_SPLIT_COUNT/MIN_SPLIT_TOTAL.
+  const receivers = ['B', 'C', 'D'];
+  for (let i = 0; i < 6; i += 1) {
+    insertTransaction(db, {
+      sender_id: 'A',
+      receiver_id: receivers[i % 3],
+      amount: 4000,
+      timestamp: iso(i * 30 * 1000),
+      transaction_type: 'transfer',
+    });
+  }
+
+  const created = runScanCycle(db, BASE_TIME + 5 * 30 * 1000);
+
+  assert.equal(created.length, 0, 'B is a genuine old contact; only 2 receivers are truly new, below MIN_FANOUT');
+});
+
+test('backgroundJob.runScanCycle: alert totals are scoped to only the flagged new receivers, not the whole burst (regression)', () => {
+  // Regression test: when a sender's burst includes both an old contact (correctly excluded
+  // from receiver_ids) and enough new receivers to still trip fan-out, the alert's
+  // total_amount/transaction_count used to report the *whole* burst including the old
+  // contact's share — overstating what the flagged receiver_ids actually cover in the
+  // human-readable reason. Here: old contact B gets 1 of the 6 transfers; C, D, E (3 new
+  // receivers, meets MIN_FANOUT) get the other 5. The alert must report only C+D+E's share:
+  // 5 transactions totaling 20,000 — not 6 transactions totaling 24,000.
+  const db = buildTestDb();
+  for (const userId of ['A', 'B', 'C', 'D', 'E']) insertUser(db, userId, iso(-3 * 60 * 60 * 1000));
+
+  insertTransaction(db, {
+    sender_id: 'A',
+    receiver_id: 'B',
+    amount: 500,
+    timestamp: iso(-2 * 60 * 60 * 1000),
+    transaction_type: 'transfer',
+  });
+
+  const burstReceivers = ['B', 'C', 'D', 'E', 'C', 'D'];
+  for (let i = 0; i < burstReceivers.length; i += 1) {
+    insertTransaction(db, {
+      sender_id: 'A',
+      receiver_id: burstReceivers[i],
+      amount: 4000,
+      timestamp: iso(i * 30 * 1000),
+      transaction_type: 'transfer',
+    });
+  }
+
+  const created = runScanCycle(db, BASE_TIME + (burstReceivers.length - 1) * 30 * 1000);
+
+  assert.equal(created.length, 1);
+  const alert = created[0];
+  assert.deepEqual(JSON.parse(alert.receiver_ids).sort(), ['C', 'D', 'E']);
+  assert.equal(alert.transaction_count, 5, 'should count only the 5 transfers to C/D/E, not B\'s');
+  assert.equal(alert.total_amount, 20000, 'should total only C/D/E\'s 20,000, not B\'s extra 4,000');
 });
 
 test('alertLookup.findActiveAlert: fast per-transaction lookup finds sender and receiver hits', () => {
