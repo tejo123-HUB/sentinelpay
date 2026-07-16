@@ -1,107 +1,279 @@
+/* ==========================================================================
+   SentinelPay dashboard — visual design system
+   Dark, layered "modern developer tool" aesthetic (Linear/Vercel/Raycast-
+   adjacent): elevated glass-panel cards with real depth (layered shadows +
+   inset top highlight), a soft mesh-gradient + dot-grid atmosphere behind
+   everything, and a validated, CVD-safe status palette rather than raw
+   neon/candy tones — see the palette note below.
+
+   Palette note: allow/step-up/block/struct were run through the dataviz
+   skill's validate_palette.js against this file's actual dark surface
+   (#0f1626), not eyeballed. Pure red vs. pure green cannot be made fully
+   distinguishable under simulated deuteranopia/protanopia (that's the
+   literal definition of red-green color blindness — no amount of hue
+   tuning fixes it), so allow/block land in the documented WARN band
+   (worst adjacent ΔE 7.9, floor is 6) rather than a full PASS. Per the
+   skill's own mitigation for that band: never rely on hue alone — every
+   decision in this UI is *also* always spelled out in text (table cells,
+   stat-card labels, alert reasons), never a bare color dot with nothing
+   else. That secondary encoding is what makes the WARN band acceptable
+   here. Separately, --block (the categorical-mark step) is too dark to
+   clear WCAG AA text contrast at small/bold sizes — see --block-text below
+   for why a second red step exists. Full validator runs + reasoning: see
+   architecture.md Section 15.8.
+   ========================================================================== */
+
 :root {
-  --bg: #0b1120;
-  --panel-bg: #131c31;
-  --border: #22314f;
-  --text: #e6ecf5;
-  --text-dim: #8ba0c4;
-  --allow: #34d399;
-  --stepup: #fbbf24;
-  --block: #f87171;
-  --struct: #a78bfa;
-  --accent: #38bdf8;
+  /* Layered dark surfaces — each step up is a lighter, "closer" plane */
+  --bg-void: #05070d;
+  --surface-1: #0f1626;
+  --surface-2: #141d33;
+  --surface-3: #1a2440;
+
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.16);
+
+  --text: #eef2fb;
+  --text-dim: #8b9bc0;
+  --text-faint: #5b6b8c;
+
+  /* Validated status/data palette — see file header. Used directly as both
+     mark and text color everywhere it clears WCAG AA text contrast (4.5:1)
+     against --surface-1 at the sizes it's actually rendered at — allow
+     (6.21:1), stepup (5.70:1), and struct (5.78:1) all do. --block does not
+     (3.90:1 — only clears the *categorical-mark* 3:1 floor the palette
+     validator checks, not small/bold text's stricter bar), so --block-text
+     is a second, lighter step of the same red reserved for the two places
+     it's rendered as actual text (a stat-tile value, a decision badge
+     label) — 5.97:1. --block itself stays the muted, CVD-validated step
+     for every *mark* context (map dots, chart slices, the alert/row accent
+     tints) where staying visually distinct from --allow under simulated
+     color blindness matters more than raw legibility. */
+  --allow: #22ac74;
+  --stepup: #b8891b;
+  --block: #cc4646;
+  --block-text: #ef6a6a;
+  --struct: #9085e9;
+  --accent: #3987e5;
+
+  --radius-lg: 16px;
+  --radius-md: 12px;
+  --radius-sm: 8px;
+
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.45);
+  --shadow-md: 0 6px 18px -4px rgba(0, 0, 0, 0.5), 0 2px 5px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 24px 48px -16px rgba(0, 0, 0, 0.6), 0 4px 12px rgba(0, 0, 0, 0.35);
+  --inset-top: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 * {
   box-sizing: border-box;
 }
 
+::selection {
+  background: rgba(57, 135, 229, 0.35);
+  color: #fff;
+}
+
+/* Thin, dark-themed scrollbars — a small but very "developer tool" detail */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.16) transparent;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background-color: rgba(255, 255, 255, 0.14);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+  border-radius: 8px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(255, 255, 255, 0.22);
+  background-clip: padding-box;
+}
+
 body {
   margin: 0;
-  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
-  background: var(--bg);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell,
+    'Helvetica Neue', sans-serif;
   color: var(--text);
   min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+
+  /* Atmosphere: a few soft color washes plus a faint dot-grid, fixed behind
+     the scrolling content — the "developer tool at night" backdrop. */
+  background-color: var(--bg-void);
+  background-image: radial-gradient(circle, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    radial-gradient(ellipse 900px 560px at 12% -8%, rgba(57, 135, 229, 0.16), transparent 60%),
+    radial-gradient(ellipse 760px 520px at 92% 4%, rgba(144, 133, 233, 0.12), transparent 62%),
+    radial-gradient(ellipse 900px 620px at 50% 120%, rgba(34, 172, 116, 0.08), transparent 62%);
+  background-size: 26px 26px, auto, auto, auto;
+  background-attachment: fixed;
+  background-repeat: repeat, no-repeat, no-repeat, no-repeat;
 }
+
+/* ---- Topbar ---- */
 
 .topbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 1.25rem 2rem;
+  padding: 1.15rem 2rem;
   border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(10, 15, 28, 0.72), rgba(10, 15, 28, 0.3));
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  position: sticky;
+  top: 0;
+  z-index: 20;
 }
 
 .brand {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
+  gap: 0.9rem;
 }
 
 .brand-mark {
-  font-size: 2rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  flex-shrink: 0;
+  font-size: 1.35rem;
+  line-height: 1;
   color: var(--accent);
+  background: linear-gradient(155deg, rgba(57, 135, 229, 0.24), rgba(57, 135, 229, 0.04));
+  border: 1px solid rgba(57, 135, 229, 0.4);
+  border-radius: var(--radius-md);
+  box-shadow: 0 0 24px rgba(57, 135, 229, 0.28), var(--inset-top);
 }
 
 .brand h1 {
   margin: 0;
-  font-size: 1.4rem;
-  letter-spacing: 0.02em;
+  font-size: 1.32rem;
+  font-weight: 700;
+  letter-spacing: -0.015em;
 }
 
 .brand p {
-  margin: 0;
+  margin: 0.15rem 0 0;
   color: var(--text-dim);
-  font-size: 0.85rem;
+  font-size: 0.82rem;
 }
 
 .conn-status {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  font-size: 0.85rem;
+  gap: 0.6rem;
+  font-size: 0.8rem;
+  font-weight: 600;
   color: var(--text-dim);
+  padding: 0.45rem 0.95rem 0.45rem 0.7rem;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  box-shadow: var(--shadow-sm), var(--inset-top);
 }
 
 .dot {
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   background: var(--block);
-  transition: background 0.2s ease;
+  transition: background 0.3s ease;
 }
 
 .dot.connected {
   background: var(--allow);
-  box-shadow: 0 0 8px var(--allow);
+  animation: pulse-live 2.4s ease-in-out infinite;
 }
+
+@keyframes pulse-live {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(34, 172, 116, 0.45);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(34, 172, 116, 0);
+  }
+}
+
+/* ---- Stat cards ---- */
 
 .counters {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
   gap: 1rem;
-  padding: 1.25rem 2rem;
+  padding: 1.5rem 2rem 0.6rem;
 }
 
 .stat-card {
-  background: var(--panel-bg);
+  position: relative;
+  background: linear-gradient(160deg, var(--surface-2), var(--surface-1));
   border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 1rem 1.25rem;
+  border-radius: var(--radius-lg);
+  padding: 1.2rem 1.3rem 1.35rem;
   display: flex;
   flex-direction: column;
-  gap: 0.35rem;
+  gap: 0.4rem;
+  overflow: hidden;
+  box-shadow: var(--shadow-md), var(--inset-top);
+  transition: transform 0.35s var(--ease), box-shadow 0.35s var(--ease), border-color 0.35s var(--ease);
+}
+
+.stat-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, var(--accent), transparent 140%);
+}
+
+.stat-card:hover {
+  transform: perspective(800px) rotateX(2deg) translateY(-4px);
+  box-shadow: var(--shadow-lg), var(--inset-top);
+  border-color: var(--border-strong);
 }
 
 .stat-label {
-  font-size: 0.78rem;
+  font-size: 0.72rem;
   color: var(--text-dim);
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.07em;
+  font-weight: 700;
 }
 
 .stat-value {
-  font-size: 1.9rem;
-  font-weight: 600;
+  font-size: 2.05rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  font-variant-numeric: proportional-nums;
+}
+
+.stat-allow::before {
+  background: linear-gradient(90deg, var(--allow), transparent 140%);
+}
+.stat-stepup::before {
+  background: linear-gradient(90deg, var(--stepup), transparent 140%);
+}
+.stat-block::before {
+  background: linear-gradient(90deg, var(--block), transparent 140%);
+}
+.stat-struct::before {
+  background: linear-gradient(90deg, var(--struct), transparent 140%);
 }
 
 .stat-allow .stat-value {
@@ -111,39 +283,85 @@ body {
   color: var(--stepup);
 }
 .stat-block .stat-value {
-  color: var(--block);
+  color: var(--block-text);
 }
 .stat-struct .stat-value {
   color: var(--struct);
 }
 
-.layout {
-  display: grid;
-  grid-template-columns: 2fr 1fr;
-  gap: 1rem;
-  padding: 0 2rem 2rem;
-  align-items: start;
+/* ---- Tabs ---- */
+
+.tabs {
+  display: flex;
+  gap: 0.4rem;
+  padding: 0.9rem 2rem 0.7rem;
 }
 
+.tab-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-dim);
+  font-size: 0.87rem;
+  font-weight: 600;
+  padding: 0.55rem 1.15rem;
+  cursor: pointer;
+  border-radius: 999px;
+  transition: color 0.2s ease, background 0.2s ease, box-shadow 0.25s var(--ease);
+}
+
+.tab-btn:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.tab-btn.active {
+  color: #f4f8ff;
+  background: linear-gradient(160deg, var(--accent), #2c6fc0);
+  box-shadow: 0 6px 16px -4px rgba(57, 135, 229, 0.5), var(--inset-top);
+}
+
+.tab-btn.active:hover {
+  background: linear-gradient(160deg, var(--accent), #2c6fc0);
+}
+
+/* ---- Panels (shared by all three views) ---- */
+
 .panel {
-  background: var(--panel-bg);
+  background: linear-gradient(165deg, var(--surface-2), var(--surface-1));
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   overflow: hidden;
+  box-shadow: var(--shadow-md), var(--inset-top);
 }
 
 .panel-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0.9rem 1.25rem;
+  gap: 1rem;
+  padding: 1rem 1.4rem;
   border-bottom: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.015);
 }
 
 .panel-header h2 {
   margin: 0;
-  font-size: 1rem;
+  font-size: 0.95rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
 }
+
+/* Gives Chart.js's responsive canvas a fixed box to fill (see the comment on this element in
+   index.html) — without it the donut chart grows to fill most of the panel header instead of
+   staying a compact glance-able indicator next to the title. */
+.decision-chart-frame {
+  position: relative;
+  width: 72px;
+  height: 72px;
+  flex-shrink: 0;
+}
+
+/* ---- Live transactions table ---- */
 
 .table-scroll {
   max-height: 65vh;
@@ -154,12 +372,13 @@ body {
 table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.85rem;
+  font-size: 0.84rem;
 }
 
-th, td {
+th,
+td {
   text-align: left;
-  padding: 0.55rem 0.9rem;
+  padding: 0.65rem 1rem;
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
 }
@@ -167,12 +386,20 @@ th, td {
 th {
   position: sticky;
   top: 0;
-  background: var(--panel-bg);
-  color: var(--text-dim);
-  font-weight: 500;
+  background: var(--surface-1);
+  color: var(--text-faint);
+  font-weight: 700;
   text-transform: uppercase;
-  font-size: 0.72rem;
-  letter-spacing: 0.04em;
+  font-size: 0.68rem;
+  letter-spacing: 0.06em;
+}
+
+tbody tr {
+  transition: background-color 0.15s ease;
+}
+
+tbody tr:hover {
+  background: rgba(255, 255, 255, 0.025);
 }
 
 td.reasons {
@@ -181,30 +408,40 @@ td.reasons {
   max-width: 320px;
 }
 
+/* Decision cells read as small colored badges (background + rounded corners
+   on the cell itself) rather than plain colored text — a step toward the
+   status-palette rule that color always ships with a label, never alone. */
+td.decision-cell {
+  font-weight: 700;
+  border-radius: 6px;
+}
+
 tr.decision-allow td.decision-cell {
   color: var(--allow);
-  font-weight: 600;
+  background: rgba(34, 172, 116, 0.14);
 }
 tr.decision-step_up td.decision-cell {
   color: var(--stepup);
-  font-weight: 600;
+  background: rgba(184, 137, 27, 0.16);
 }
 tr.decision-block td.decision-cell {
-  color: var(--block);
-  font-weight: 600;
+  color: var(--block-text);
+  background: rgba(204, 70, 70, 0.14);
 }
 
 tr.decision-block {
-  background: rgba(248, 113, 113, 0.06);
+  background: rgba(204, 70, 70, 0.045);
 }
 tr.decision-step_up {
-  background: rgba(251, 191, 36, 0.05);
+  background: rgba(184, 137, 27, 0.04);
 }
+
+/* ---- Structuring / layering alert cards ---- */
 
 .alerts-scroll {
   max-height: 65vh;
   overflow-y: auto;
-  padding: 1rem 1.25rem;
+  padding: 1.1rem 1.4rem;
   display: flex;
   flex-direction: column;
   gap: 0.9rem;
@@ -216,17 +453,38 @@ tr.decision-step_up {
 }
 
 .alert-card {
-  border: 1px solid rgba(167, 139, 250, 0.35);
-  background: rgba(167, 139, 250, 0.08);
-  border-radius: 8px;
-  padding: 0.8rem 1rem;
+  position: relative;
+  border: 1px solid rgba(144, 133, 233, 0.3);
+  background: linear-gradient(160deg, rgba(144, 133, 233, 0.11), rgba(144, 133, 233, 0.03));
+  border-radius: var(--radius-md);
+  padding: 0.95rem 1.1rem 0.95rem 1.35rem;
   font-size: 0.85rem;
+  box-shadow: var(--shadow-sm);
+  transition: transform 0.25s var(--ease), box-shadow 0.25s var(--ease);
+}
+
+.alert-card::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0.65rem;
+  bottom: 0.65rem;
+  width: 3px;
+  border-radius: 3px;
+  background: var(--struct);
+  box-shadow: 0 0 12px rgba(144, 133, 233, 0.55);
+}
+
+.alert-card:hover {
+  transform: translateX(3px);
+  box-shadow: var(--shadow-md);
 }
 
 .alert-card .alert-chain {
-  font-weight: 600;
+  font-weight: 700;
   color: var(--struct);
   margin-bottom: 0.35rem;
+  letter-spacing: -0.01em;
 }
 
 .alert-card .alert-meta {
@@ -237,46 +495,31 @@ tr.decision-step_up {
 
 .alert-card .alert-reason {
   color: var(--text);
+  line-height: 1.5;
 }
 
-.tabs {
-  display: flex;
-  gap: 0.5rem;
-  padding: 0 2rem;
-  margin-bottom: 1rem;
-  border-bottom: 1px solid var(--border);
-}
-
-.tab-btn {
-  background: transparent;
-  border: none;
-  color: var(--text-dim);
-  font-size: 0.9rem;
-  padding: 0.7rem 1rem;
-  cursor: pointer;
-  border-bottom: 2px solid transparent;
-  transition: color 0.15s ease, border-color 0.15s ease;
-}
-
-.tab-btn:hover {
-  color: var(--text);
-}
-
-.tab-btn.active {
-  color: var(--accent);
-  border-bottom-color: var(--accent);
-}
+/* ---- Tab views ---- */
 
 .view.hidden {
   display: none;
 }
 
+.layout {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 1.1rem;
+  padding: 0 2rem 2rem;
+  align-items: start;
+}
+
 .layout-single {
   display: flex;
   flex-direction: column;
-  gap: 1rem;
+  gap: 1.1rem;
   padding: 0 2rem 2rem;
 }
+
+/* ---- Map view ---- */
 
 .panel-map {
   display: flex;
@@ -286,6 +529,74 @@ tr.decision-step_up {
 #map-container {
   height: 65vh;
   width: 100%;
+}
+
+/* Leaflet ships its own default (light) chrome via its CDN stylesheet, and OpenStreetMap's
+   default tiles are a light basemap by design — both would clash bright white against the rest
+   of this dark UI otherwise. leaflet.css is loaded before style.css in index.html specifically so
+   the rules below win the cascade without needing !important.
+   Tiles: inverting the whole tile pane then rotating hue 180° is the standard CSS-only way to get
+   a dark map from a light tile source (water still reads blue-ish, land still greenish) without
+   depending on a separate dark-tile CDN/API key. Controls/popups/attribution: re-themed below to
+   match rather than left as stark white boxes. */
+.leaflet-tile-pane {
+  filter: invert(1) hue-rotate(180deg) brightness(0.92) contrast(0.88) saturate(0.65);
+}
+
+.leaflet-control-zoom {
+  border: none;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  box-shadow: var(--shadow-md);
+}
+
+.leaflet-control-zoom a {
+  background: var(--surface-2);
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+}
+
+.leaflet-control-zoom a:hover {
+  background: var(--surface-3);
+  color: var(--accent);
+}
+
+.leaflet-control-attribution {
+  background: rgba(10, 15, 28, 0.78);
+  color: var(--text-faint);
+  border-radius: var(--radius-sm) 0 0 0;
+  padding: 2px 8px;
+}
+
+.leaflet-control-attribution a {
+  color: var(--text-dim);
+}
+
+.leaflet-popup-content-wrapper {
+  background: var(--surface-2);
+  color: var(--text);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  border: 1px solid var(--border);
+}
+
+.leaflet-popup-content {
+  font-size: 0.82rem;
+  line-height: 1.5;
+  margin: 0.7rem 0.9rem;
+}
+
+.leaflet-popup-tip {
+  background: var(--surface-2);
+  box-shadow: none;
+}
+
+.leaflet-container a.leaflet-popup-close-button {
+  color: var(--text-dim);
+}
+
+.leaflet-container a.leaflet-popup-close-button:hover {
+  color: var(--text);
 }
 
 .map-legend {
@@ -313,6 +624,8 @@ tr.decision-step_up {
   background: var(--block);
 }
 
+/* ---- Audit trail view ---- */
+
 .audit-chart-wrap {
   height: 320px;
   padding: 1.25rem;
@@ -324,26 +637,35 @@ tr.decision-step_up {
   align-items: center;
 }
 
-.audit-filters select,
-.audit-filters button {
-  background: var(--bg);
+.audit-filters select {
+  background: var(--surface-1);
   color: var(--text);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 0.4rem 0.7rem;
+  border-radius: var(--radius-sm);
+  padding: 0.45rem 0.75rem;
   font-size: 0.8rem;
 }
 
 .audit-filters button {
   cursor: pointer;
-  background: var(--accent);
-  color: #0b1120;
-  font-weight: 600;
+  background: linear-gradient(160deg, var(--accent), #2c6fc0);
+  color: #f4f8ff;
+  font-weight: 700;
   border: none;
+  border-radius: var(--radius-sm);
+  padding: 0.45rem 0.9rem;
+  font-size: 0.8rem;
+  box-shadow: 0 4px 12px -3px rgba(57, 135, 229, 0.5);
+  transition: transform 0.15s var(--ease), box-shadow 0.15s var(--ease);
 }
 
 .audit-filters button:hover {
-  opacity: 0.9;
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px -3px rgba(57, 135, 229, 0.6);
+}
+
+.audit-filters button:active {
+  transform: translateY(0);
 }
 
 @media (max-width: 900px) {
@@ -353,8 +675,33 @@ tr.decision-step_up {
   .counters {
     grid-template-columns: repeat(2, 1fr);
   }
+  /* 5 stat cards in a 2-column grid otherwise leaves the 5th stranded alone
+     with an empty gap beside it — span it across both columns instead. */
+  .counters .stat-card:last-child {
+    grid-column: span 2;
+  }
   .tabs {
-    padding: 0 1rem;
+    padding: 0.75rem 1rem;
     overflow-x: auto;
+  }
+}
+
+/* The "Live" indicator's pulse (pulse-live, above) runs forever while connected — fine for most
+   users, but a genuine problem for anyone with vestibular/motion sensitivity, who can spend an
+   entire session with this dashboard open next to a perpetually-animating element. Standard
+   reduced-motion pattern: collapse every animation/transition to effectively instant, and freeze
+   the live dot on its "connected" glow state instead of looping it. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .dot.connected {
+    animation: none;
+    box-shadow: 0 0 0 3px rgba(34, 172, 116, 0.35);
   }
 }

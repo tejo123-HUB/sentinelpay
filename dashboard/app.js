@@ -34,6 +34,23 @@ const connLabel = document.getElementById('conn-label');
 
 let decisionChart = null;
 
+// Validated status palette (dataviz skill's validate_palette.js against this dashboard's dark
+// surface #0f1626, see style.css's file header for the full reasoning) — kept as one source of
+// truth with style.css's --allow/--stepup/--block/--struct custom properties, duplicated here
+// only because Chart.js renders to a <canvas>, which can't read CSS custom properties directly.
+const CHART_COLORS = { allow: '#22ac74', stepup: '#b8891b', block: '#cc4646' };
+const CHART_SURFACE = '#0f1626'; // matches style.css's --surface-1, used as the donut's slice-gap ring color
+const CHART_TOOLTIP = {
+  backgroundColor: '#141d33',
+  titleColor: '#eef2fb',
+  bodyColor: '#8b9bc0',
+  borderColor: 'rgba(255,255,255,0.08)',
+  borderWidth: 1,
+  padding: 10,
+  cornerRadius: 8,
+  displayColors: true,
+};
+
 function initChart() {
   // Chart.js loads from a CDN; degrade gracefully (no chart, everything else still works) if
   // the demo machine is offline.
@@ -47,15 +64,21 @@ function initChart() {
       datasets: [
         {
           data: [0, 0, 0],
-          backgroundColor: ['#34d399', '#fbbf24', '#f87171'],
-          borderWidth: 0,
+          backgroundColor: [CHART_COLORS.allow, CHART_COLORS.stepup, CHART_COLORS.block],
+          // A real border (not 0) drawn in the surface color is how Chart.js implements the
+          // "surface gap" between adjacent donut slices (marks-and-anatomy.md) — it isn't an
+          // outline stroke added *around* each mark, it's the surface color showing through
+          // between them, which is the correct mechanism for separating touching marks.
+          borderColor: CHART_SURFACE,
+          borderWidth: 3,
+          hoverOffset: 6,
         },
       ],
     },
     options: {
-      plugins: { legend: { display: false } },
-      cutout: '65%',
-      animation: { duration: 200 },
+      plugins: { legend: { display: false }, tooltip: CHART_TOOLTIP },
+      cutout: '68%',
+      animation: { duration: 300, easing: 'easeOutQuart' },
     },
   });
 }

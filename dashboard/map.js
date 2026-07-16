@@ -5,7 +5,10 @@ const MAP_MAX_MARKERS = 300; // cap DOM/marker growth during a long-running demo
 const MAP_DEFAULT_CENTER = [20.5937, 78.9629]; // India, a reasonable default before any data arrives
 const MAP_DEFAULT_ZOOM = 5;
 
-const DECISION_COLORS = { allow: '#34d399', step_up: '#fbbf24', block: '#f87171' };
+// Validated status palette (dataviz skill's validate_palette.js against this dashboard's dark
+// surface, see style.css's file header) — matches app.js's CHART_COLORS and style.css's
+// --allow/--stepup/--block, duplicated here since map markers are drawn via Leaflet's own JS API.
+const DECISION_COLORS = { allow: '#22ac74', step_up: '#b8891b', block: '#cc4646' };
 
 let map = null;
 let markers = []; // { marker, timestamp } oldest-first, so the oldest is evicted first
