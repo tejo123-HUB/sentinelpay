@@ -1,9 +1,24 @@
 // Broadcasts every scored transaction and every new structuring alert to connected dashboard
 // clients, per the WebSocket /ws contract in architecture.md Section 7.
 const { WebSocketServer } = require('ws');
+const { timingSafeStringEqual, API_KEY } = require('./middleware/apiKeyAuth');
+
+// Same auth requirement as the HTTP API (server/middleware/apiKeyAuth.js): a live transaction
+// feed is at least as sensitive as the REST endpoints it mirrors, so it needs the same gate. The
+// browser WebSocket API has no way to set a custom header on the handshake request, so the key
+// travels as a query param instead (?apiKey=...) — checked here via `verifyClient`, before the
+// upgrade completes, so an unauthenticated caller never gets a connected socket at all.
+function verifyClient(info, callback) {
+  const url = new URL(info.req.url, 'http://localhost');
+  const provided = url.searchParams.get('apiKey');
+  if (!provided || !timingSafeStringEqual(provided, API_KEY)) {
+    return callback(false, 401, 'Unauthorized');
+  }
+  callback(true);
+}
 
 function attachWebSocketServer(server) {
-  const wss = new WebSocketServer({ server, path: '/ws' });
+  const wss = new WebSocketServer({ server, path: '/ws', verifyClient });
 
   // `ws` sockets and the WebSocketServer itself are EventEmitters: an 'error' event with no
   // registered listener throws synchronously at the point ws internally emits it (e.g. an

@@ -4,6 +4,7 @@ const http = require('node:http');
 
 process.env.DB_PATH = ':memory:';
 process.env.PORT = '0';
+process.env.API_KEY = 'test-key-for-automated-tests';
 
 function freshServer() {
   delete require.cache[require.resolve('../server/index')];
@@ -27,7 +28,13 @@ function httpPost(port, path, body) {
   return new Promise((resolve, reject) => {
     const data = JSON.stringify(body);
     const req = http.request(
-      { host: '127.0.0.1', port, path, method: 'POST', headers: { 'Content-Type': 'application/json' } },
+      {
+        host: '127.0.0.1',
+        port,
+        path,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.API_KEY },
+      },
       (res) => {
         let raw = '';
         res.on('data', (chunk) => (raw += chunk));
@@ -48,7 +55,7 @@ test('websocket: an unhandled per-client error event does not crash the server (
     // Confirm the server is responsive before forcing an error.
     assert.equal(await httpGet(port, '/health'), 200);
 
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?apiKey=${encodeURIComponent(process.env.API_KEY)}`);
     await new Promise((resolve, reject) => {
       ws.addEventListener('open', resolve);
       ws.addEventListener('error', reject);
@@ -95,7 +102,7 @@ test('websocket: the transaction broadcast includes full transaction details, no
   const port = server.address().port;
 
   try {
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?apiKey=${encodeURIComponent(process.env.API_KEY)}`);
     await new Promise((resolve, reject) => {
       ws.addEventListener('open', resolve);
       ws.addEventListener('error', reject);

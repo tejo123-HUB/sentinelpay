@@ -58,6 +58,10 @@ CREATE TABLE IF NOT EXISTS structuring_alerts (
 );
 
 CREATE INDEX IF NOT EXISTS idx_structuring_alerts_sender ON structuring_alerts(sender_id);
+-- Added during a full-project review: alertLookup.js's receiver-side check and the background
+-- job's cooldown check both filter/order structuring_alerts by created_at with no supporting
+-- index — fine at demo-table sizes, but a full scan waiting to happen at real volume.
+CREATE INDEX IF NOT EXISTS idx_structuring_alerts_created_at ON structuring_alerts(created_at);
 `;
 
 function initDb(dbPath) {

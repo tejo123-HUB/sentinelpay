@@ -17,7 +17,7 @@ Usage:
 import argparse
 import json
 import math
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 MODEL_PATH = Path(__file__).parent / "model_export" / "model.json"
@@ -89,7 +89,13 @@ def main():
         raise SystemExit(f"Model not found at {MODEL_PATH} - run `python ml/train_model.py` first")
 
     Handler.model = load_model()
-    server = HTTPServer(("127.0.0.1", args.port), Handler)
+    # ThreadingHTTPServer, not HTTPServer: the plain single-threaded server processes one
+    # /predict request at a time, so under concurrent load (this is a real, documented fallback
+    # path for ML_SERVING_MODE=python-service, not dead code) requests queue up and are more
+    # likely to blow mlClient.js's 100ms fetch timeout, causing extra fail-open (probability 0)
+    # scoring than necessary. Handler.model is set once here, before serve_forever, and never
+    # mutated afterwards, so concurrent read-only access from multiple request threads is safe.
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     print(f"ml/serve.py listening on http://127.0.0.1:{args.port} (POST /predict, GET /health)")
     server.serve_forever()
 

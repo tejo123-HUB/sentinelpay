@@ -1,5 +1,11 @@
 const VALID_TRANSACTION_TYPES = ['transfer', 'withdrawal', 'deposit'];
 const MAX_ID_LENGTH = 128; // sender_id/receiver_id/device_id/merchant_id — generous but bounded
+// Sanity cap, not a business rule: `amount` was previously only checked for > 0 and finite, so a
+// pathological value (e.g. 1e300) would pass through untouched into avg_transaction_amount and
+// every dashboard total. Set far above any plausible micro-transaction (architecture.md's own
+// examples top out around ₹80,000 for a whole structuring burst) so it never interferes with
+// real traffic, single-transaction or structuring.
+const MAX_AMOUNT = 10_000_000;
 
 /**
  * Validates and normalizes a POST /transaction request body.
@@ -21,8 +27,8 @@ function validateTransactionInput(body) {
   if (sender_id === receiver_id) {
     return { valid: false, error: 'sender_id and receiver_id must be different' };
   }
-  if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) {
-    return { valid: false, error: 'amount is required and must be a positive number' };
+  if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0 || amount > MAX_AMOUNT) {
+    return { valid: false, error: `amount is required and must be a positive number, at most ${MAX_AMOUNT}` };
   }
   if (typeof timestamp !== 'string' || Number.isNaN(new Date(timestamp).getTime())) {
     return { valid: false, error: 'timestamp is required and must be a valid ISO 8601 date string' };
@@ -77,4 +83,4 @@ function validateTransactionInput(body) {
   };
 }
 
-module.exports = { validateTransactionInput, VALID_TRANSACTION_TYPES };
+module.exports = { validateTransactionInput, VALID_TRANSACTION_TYPES, MAX_AMOUNT };

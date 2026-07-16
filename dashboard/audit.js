@@ -31,7 +31,7 @@ function initAuditChart() {
 
 async function refreshAuditSummary() {
   try {
-    const res = await fetch('/audit/summary?hours=24&bucketMinutes=60');
+    const res = await window.sentinelpayAuthFetch('/audit/summary?hours=24&bucketMinutes=60');
     const data = await res.json();
     if (!auditChart) return;
 
@@ -53,7 +53,7 @@ async function refreshAuditTable() {
   if (!select || !tbody) return;
 
   try {
-    const res = await fetch(`/transactions?decision=${encodeURIComponent(select.value)}&limit=100`);
+    const res = await window.sentinelpayAuthFetch(`/transactions?decision=${encodeURIComponent(select.value)}&limit=100`);
     const transactions = await res.json();
 
     tbody.innerHTML = '';

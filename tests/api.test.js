@@ -4,6 +4,7 @@ const http = require('node:http');
 
 process.env.DB_PATH = ':memory:';
 process.env.PORT = '0';
+process.env.API_KEY = 'test-key-for-automated-tests';
 
 function freshServer() {
   delete require.cache[require.resolve('../server/index')];
@@ -19,7 +20,13 @@ function request(server, method, path, body) {
     const port = server.address().port;
     const data = body ? JSON.stringify(body) : null;
     const req = http.request(
-      { host: '127.0.0.1', port, method, path, headers: { 'Content-Type': 'application/json' } },
+      {
+        host: '127.0.0.1',
+        port,
+        method,
+        path,
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.API_KEY },
+      },
       (res) => {
         let raw = '';
         res.on('data', (chunk) => (raw += chunk));
@@ -169,6 +176,78 @@ test('GET /audit/summary buckets transactions by time and decision', async () =>
     assert.ok(res.body.buckets.length >= 1);
     const total = res.body.buckets.reduce((s, b) => s + b.allow + b.step_up + b.block, 0);
     assert.equal(total, 2);
+  } finally {
+    server.close();
+  }
+});
+
+// ---- Security regression: every route requires a valid API key ----
+
+test('POST /transaction: rejects a request with no X-API-Key header', async () => {
+  const { server } = await freshServer();
+  try {
+    const port = server.address().port;
+    const res = await new Promise((resolve, reject) => {
+      const data = JSON.stringify(validTransaction());
+      const req = http.request(
+        { host: '127.0.0.1', port, method: 'POST', path: '/transaction', headers: { 'Content-Type': 'application/json' } },
+        (r) => {
+          let raw = '';
+          r.on('data', (c) => (raw += c));
+          r.on('end', () => resolve({ status: r.statusCode, body: JSON.parse(raw) }));
+        }
+      );
+      req.on('error', reject);
+      req.write(data);
+      req.end();
+    });
+    assert.equal(res.status, 401);
+    assert.equal(typeof res.body.error, 'string');
+  } finally {
+    server.close();
+  }
+});
+
+test('GET /transactions: rejects a request with the wrong X-API-Key', async () => {
+  const { server } = await freshServer();
+  try {
+    const port = server.address().port;
+    const res = await new Promise((resolve, reject) => {
+      http
+        .get({ host: '127.0.0.1', port, path: '/transactions', headers: { 'X-API-Key': 'not-the-right-key' } }, (r) => {
+          let raw = '';
+          r.on('data', (c) => (raw += c));
+          r.on('end', () => resolve({ status: r.statusCode, body: JSON.parse(raw) }));
+        })
+        .on('error', reject);
+    });
+    assert.equal(res.status, 401);
+  } finally {
+    server.close();
+  }
+});
+
+test('GET /health: does not require an API key (liveness check stays open)', async () => {
+  const { server } = await freshServer();
+  try {
+    const port = server.address().port;
+    const status = await new Promise((resolve, reject) => {
+      http.get({ host: '127.0.0.1', port, path: '/health' }, (r) => resolve(r.statusCode)).on('error', reject);
+    });
+    assert.equal(status, 200);
+  } finally {
+    server.close();
+  }
+});
+
+// ---- Validation regression: amount now has a sane upper bound ----
+
+test('POST /transaction: rejects an amount above the sanity cap', async () => {
+  const { server } = await freshServer();
+  try {
+    const res = await request(server, 'POST', '/transaction', validTransaction({ amount: 1e300 }));
+    assert.equal(res.status, 400);
+    assert.match(res.body.error, /amount/);
   } finally {
     server.close();
   }
