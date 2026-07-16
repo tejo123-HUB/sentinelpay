@@ -685,3 +685,23 @@ tr.decision-step_up {
     overflow-x: auto;
   }
 }
+
+/* The "Live" indicator's pulse (pulse-live, above) runs forever while connected — fine for most
+   users, but a genuine problem for anyone with vestibular/motion sensitivity, who can spend an
+   entire session with this dashboard open next to a perpetually-animating element. Standard
+   reduced-motion pattern: collapse every animation/transition to effectively instant, and freeze
+   the live dot on its "connected" glow state instead of looping it. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .dot.connected {
+    animation: none;
+    box-shadow: 0 0 0 3px rgba(34, 172, 116, 0.35);
+  }
+}
