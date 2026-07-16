@@ -98,13 +98,6 @@ tech stack (kept in sync with the code — check there before assuming a package
 
 MIT — see [LICENSE](LICENSE).
 
-## Committing and pushing to GitHub
+## Repository
 
-This directory is `git init`-ed but nothing has been committed yet. To publish:
-
-```bash
-git add -A
-git commit -m "Initial SentinelPay implementation"
-git remote add origin <your-repo-url>
-git push -u origin main
-```
+Public on GitHub: https://github.com/tejo123-HUB/sentinelpay

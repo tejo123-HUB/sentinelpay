@@ -503,7 +503,7 @@ All thresholds must be named constants at the top of their file, not magic numbe
 - [x] Simulator can reliably trigger and visibly resolve: (a) a clean transaction (`--scenario=normal`), (b) a single-transaction fraud block (`--scenario=fraud`, verified score 100/block), (c) a step-up/challenge case (verified in the normal stream and in `tests/scoring.test.js`), (d) a full structuring alert (`--scenario=structuring`, verified reliable across repeated runs).
 - [x] Real latency numbers measured and recorded (Section 11, Risk 3): mean 12.7ms / p50 12.0ms / p95 21.5ms / p99 26.4ms / max 50.7ms over 500 real requests.
 - [x] This document updated with details that changed during implementation: `node:sqlite` instead of `better-sqlite3` (Section 9), local ML inference instead of a live Vertex AI/Flask sidecar (Section 9), final rule weights (Section 10 Task 7 area / `server/scoring.js`), the `structuring_alerts.reason` schema addition (Section 6), and the false-positive claim resolution (Section 11, Risk 4).
-- [ ] Code committed to git and pushed to GitHub. A clear README covering setup and how to run the demo exists (`README.md`). The working directory is `git init`-ed but nothing has been committed yet or pushed to a remote — do that explicitly before the deadline.
+- [x] Code committed to git and pushed to GitHub: https://github.com/tejo123-HUB/sentinelpay (public, MIT licensed, sole contributor). A clear README covering setup and how to run the demo exists (`README.md`).
 - Stretch tasks not built: Task 10 (geographic map view) and Task 11 (audit trail / analytics view) — both explicitly marked stretch-only in Section 10 and not required for the Section 15 Definition of Done.
 
 ### 15.1 Post-build senior review (found and fixed, same session)
