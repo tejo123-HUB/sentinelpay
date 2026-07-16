@@ -23,6 +23,23 @@ function httpGet(port, path) {
   });
 }
 
+function httpPost(port, path, body) {
+  return new Promise((resolve, reject) => {
+    const data = JSON.stringify(body);
+    const req = http.request(
+      { host: '127.0.0.1', port, path, method: 'POST', headers: { 'Content-Type': 'application/json' } },
+      (res) => {
+        let raw = '';
+        res.on('data', (chunk) => (raw += chunk));
+        res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(raw) }));
+      }
+    );
+    req.on('error', reject);
+    req.write(data);
+    req.end();
+  });
+}
+
 test('websocket: an unhandled per-client error event does not crash the server (regression)', async () => {
   const { app, server } = await freshServer();
   const port = server.address().port;
@@ -60,6 +77,59 @@ test('websocket: an unhandled per-client error event does not crash the server (
     await new Promise((resolve) => setTimeout(resolve, 50));
     assert.equal(uncaught, false, 'the error event should have been handled, not left uncaught');
     assert.equal(await httpGet(port, '/health'), 200, 'server must still be alive and responsive');
+
+    ws.close();
+  } finally {
+    server.close();
+  }
+});
+
+test('websocket: the transaction broadcast includes full transaction details, not just the HTTP response fields (regression)', async () => {
+  // Regression test: the WS broadcast used to be exactly the HTTP response shape
+  // ({transaction_id, fraud_score, decision, reasons}) — matching architecture.md's original
+  // (too-minimal) documented contract, but missing everything the dashboard's live table and
+  // map view actually need to render a row/marker (sender_id, receiver_id, amount, location,
+  // etc). Every live transaction rendered as blank dashes in the table, and the map could
+  // never plot a live transaction at all.
+  const { server } = await freshServer();
+  const port = server.address().port;
+
+  try {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+    await new Promise((resolve, reject) => {
+      ws.addEventListener('open', resolve);
+      ws.addEventListener('error', reject);
+    });
+    await new Promise((resolve) => {
+      ws.addEventListener('message', function onFirst() {
+        ws.removeEventListener('message', onFirst);
+        resolve();
+      });
+    }); // the initial "connected" welcome message
+
+    const messagePromise = new Promise((resolve) => {
+      ws.addEventListener('message', (event) => resolve(JSON.parse(event.data)), { once: true });
+    });
+
+    const { status } = await httpPost(port, '/transaction', {
+      sender_id: 'u_ws_full_1',
+      receiver_id: 'u_ws_full_2',
+      amount: 321,
+      timestamp: '2026-07-18T10:00:00Z',
+      location: { lat: 16.5062, lng: 80.648 },
+      device_id: 'd_ws_full',
+      transaction_type: 'transfer',
+    });
+    assert.equal(status, 201);
+
+    const message = await messagePromise;
+    assert.equal(message.type, 'transaction');
+    assert.equal(message.data.sender_id, 'u_ws_full_1');
+    assert.equal(message.data.receiver_id, 'u_ws_full_2');
+    assert.equal(message.data.amount, 321);
+    assert.deepEqual(message.data.location, { lat: 16.5062, lng: 80.648 });
+    assert.equal(message.data.transaction_type, 'transfer');
+    assert.ok(message.data.transaction_id);
 
     ws.close();
   } finally {

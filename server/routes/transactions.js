@@ -119,9 +119,29 @@ router.post('/transaction', async (req, res, next) => {
 
     const responseBody = { transaction_id: transactionId, fraud_score: score, decision, reasons };
 
+    // The WS broadcast carries the full transaction, not just the POST response shape: the
+    // live dashboard table (sender/receiver/amount/type/time columns) and the map view
+    // (location) both need it, and every field here was already known before this handler
+    // even queried anything, so there's no extra cost to including it. Architecture.md
+    // Section 7 originally documented the WS payload as "same as POST /transaction response"
+    // — a spec gap, not a deliberate minimalism: with only {transaction_id, fraud_score,
+    // decision, reasons} on the wire, every live row in the dashboard's table rendered blank
+    // dashes for sender/receiver/amount/type (app.js's fallbacks silently masked it), and the
+    // map could never plot a single live transaction (no location field to plot). Fixed here;
+    // architecture.md Section 7 updated to match reality.
     const wss = req.app.locals.wss;
     if (wss && typeof wss.broadcast === 'function') {
-      wss.broadcast('transaction', responseBody);
+      wss.broadcast('transaction', {
+        ...responseBody,
+        sender_id: input.sender_id,
+        receiver_id: input.receiver_id,
+        amount: input.amount,
+        timestamp: input.timestamp,
+        location: input.location,
+        device_id: input.device_id,
+        merchant_id: input.merchant_id,
+        transaction_type: input.transaction_type,
+      });
     }
 
     res.status(201).json(responseBody);

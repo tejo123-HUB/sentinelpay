@@ -269,9 +269,10 @@ Task 11 (audit trail): time-bucketed counts of `allow`/`step_up`/`block` over th
 ### WebSocket `/ws`
 Broadcasts every processed transaction and every new structuring alert to connected dashboard clients as they happen:
 ```json
-{ "type": "transaction", "data": { ...same as POST /transaction response... } }
+{ "type": "transaction", "data": { "transaction_id": "...", "fraud_score": ..., "decision": "...", "reasons": [...], "sender_id": "...", "receiver_id": "...", "amount": ..., "timestamp": "...", "location": { "lat": ..., "lng": ... }, "device_id": "...", "merchant_id": "...", "transaction_type": "..." } }
 { "type": "structuring_alert", "data": { "sender_id": "...", "receiver_ids": [...], "total_amount": ..., "withdrawal_ratio": ... } }
 ```
+**Deviation from the original spec (Section 15.3):** the `transaction` payload is the full transaction, not just the `POST /transaction` response fields as originally documented here. See Section 15.3 for why — the original "same as POST response" contract left the dashboard's live table and map view with no sender/receiver/amount/location data for any transaction that arrived over the WebSocket rather than the initial `GET /transactions` load.
 
 ---
 
@@ -547,6 +548,22 @@ A follow-up request ("review deeply, fix all problems, add any missing feature, 
 Also fixed while touching this code: the same two bugs from the *previous* review pass (Section 15.1) — the unrealistic simulator GPS jitter and the structuring `windowEnd` bug — remained fixed and were re-verified; no regressions.
 
 `npm test`: 63 tests passing (up from 48), all fixes verified live where practical (forced DB failures, adversarial timestamps, hung TCP servers, real WebSocket error injection) rather than only unit-tested in isolation.
+
+### 15.3 Third pass: WebSocket payload gap affecting the core dashboard, plus two smaller fixes
+
+A further "fix all the issues" request prompted another independent review agent, scoped to the fixes from Section 15.2 and the two new dashboard files (`map.js`, `audit.js`). That agent hit a session/rate limit partway through and terminated early, but it left one confirmed finding before stopping; the rest of this pass was completed manually.
+
+**Agent's finding (fixed):** `dashboard/audit.js`'s throttled live-refresh handler had a comment claiming to keep "the trend chart/table" fresh while the audit tab is open, but only ever called `refreshAuditTable()` — never `refreshAuditSummary()` (the trend chart). The chart only updated on manual tab-open or the Refresh button, not from live traffic. Fixed: the throttled handler now calls both.
+
+**Found manually while verifying the agent's finding (the most significant bug of this pass):** tracing why the trend-chart bug existed led to checking what data the live `sentinelpay:transaction` event actually carries — and it turned out the WebSocket broadcast for `type: "transaction"` was exactly the `POST /transaction` HTTP response shape (`{transaction_id, fraud_score, decision, reasons}`), matching what this document's Section 7 originally specified ("same as POST /transaction response"), but missing `sender_id`, `receiver_id`, `amount`, `timestamp`, `location`, `device_id`, `merchant_id`, `transaction_type` entirely. This is a real bug in the **original Task 9 dashboard**, not just the new features:
+- Every row added to the live transactions table via WebSocket (as opposed to the initial `GET /transactions` load) rendered blank `—` placeholders for sender, receiver, amount, and type — `app.js`'s `|| '—'` fallbacks masked this as if it were just "no data" rather than a bug, so it went unnoticed through the original build and both prior review passes.
+- `dashboard/map.js` could never plot a single *live* transaction — `plotTransaction()` requires `tx.location`, which was always `undefined` from a WebSocket event. The map only ever showed its one-time historical seed load.
+
+Root cause: this document's own Section 7 documented too minimal a WS contract, and the implementation matched that spec exactly — a spec gap, not a careless implementation deviation. **Fix:** `server/routes/transactions.js`'s WS broadcast now sends the full transaction (everything already available in `input`, at zero extra query cost) alongside the existing response fields; the HTTP response itself is unchanged. Section 7 above updated to document the real contract. Verified two ways: `tests/websocket.test.js`'s new "the transaction broadcast includes full transaction details" test (confirmed to fail with `sender_id: undefined` against the old code, pass against the fix), and a live raw-WebSocket-client check against a running server.
+
+**Found while fixing the above (map.js):** enriching the live broadcast surfaced a latent race in `map.js` that the previous (undefined-`location`, always-skipped) behavior had accidentally been masking: `loadInitialMapData()` fetches the last 200 transactions once, asynchronously, when the Map tab is first opened; if a live transaction arrives over the WebSocket while that fetch is still in flight, it would get plotted immediately by the live handler *and* again when the history fetch resolves (since by then the DB already contains it too) — a duplicate marker. Fixed with a `plottedTransactionIds` Set keyed on `transaction_id`, checked before plotting and cleaned up on marker eviction (so it doesn't grow unbounded past `MAP_MAX_MARKERS`).
+
+`npm test`: 64 tests passing (up from 63).
 
 ---
 

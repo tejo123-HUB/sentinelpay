@@ -10,6 +10,12 @@ const DECISION_COLORS = { allow: '#34d399', step_up: '#fbbf24', block: '#f87171'
 let map = null;
 let markers = []; // { marker, timestamp } oldest-first, so the oldest is evicted first
 let mapInitAttempted = false;
+// Guards against plotting the same transaction twice: a live WebSocket event can arrive and
+// get plotted while loadInitialMapData()'s fetch of "last 200 transactions" is still in
+// flight (it's a real network round-trip, not instant) — by the time that fetch resolves, the
+// DB already contains the just-plotted live transaction too, so it would otherwise be plotted
+// a second time.
+const plottedTransactionIds = new Set();
 
 function markerColor(decision) {
   return DECISION_COLORS[decision] || '#8ba0c4';
@@ -44,6 +50,10 @@ function initMap() {
 
 function plotTransaction(tx) {
   if (!map || !tx.location || tx.location.lat == null || tx.location.lng == null) return;
+  if (tx.transaction_id) {
+    if (plottedTransactionIds.has(tx.transaction_id)) return;
+    plottedTransactionIds.add(tx.transaction_id);
+  }
 
   const marker = L.circleMarker([tx.location.lat, tx.location.lng], {
     radius: tx.decision === 'block' ? 8 : 6,
@@ -61,10 +71,11 @@ function plotTransaction(tx) {
     }`
   );
 
-  markers.push({ marker, timestamp: tx.timestamp });
+  markers.push({ marker, timestamp: tx.timestamp, transactionId: tx.transaction_id });
   while (markers.length > MAP_MAX_MARKERS) {
     const oldest = markers.shift();
     map.removeLayer(oldest.marker);
+    if (oldest.transactionId) plottedTransactionIds.delete(oldest.transactionId);
   }
 }
 

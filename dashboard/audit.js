@@ -120,6 +120,7 @@ document.addEventListener('sentinelpay:transaction', () => {
   auditRefreshPending = true;
   setTimeout(() => {
     auditRefreshPending = false;
+    refreshAuditSummary();
     refreshAuditTable();
   }, AUDIT_LIVE_REFRESH_THROTTLE_MS);
 });
