@@ -75,15 +75,15 @@
         <!--
           Chart.js's `responsive: true` (the default) resizes the canvas to fill its immediate
           parent's box, ignoring the width/height *attributes* below (those only set the canvas's
-          internal drawing resolution before Chart.js takes over) — without a parent that has an
-          actual fixed CSS size, the donut grows to fill however much space .panel-header happens
-          to have, which on a wide panel is most of the header. This wrapper gives Chart.js a
-          fixed 90x90 box to fill instead — the standard, documented pattern (see style.css's
-          .decision-chart-frame), rather than fighting Chart.js's own JS-set inline canvas styles
-          with CSS !important.
+          initial intrinsic resolution before Chart.js takes over on first render) — without a
+          parent that has an actual fixed CSS size, the donut grows to fill however much space
+          .panel-header happens to have, which on a wide panel is most of the header. This wrapper
+          gives Chart.js a fixed 72x72 box to fill instead (see style.css's .decision-chart-frame
+          for the actual size — the standard, documented Chart.js pattern), rather than fighting
+          its own JS-set inline canvas styles with CSS !important.
         -->
         <div class="decision-chart-frame">
-          <canvas id="decision-chart" width="90" height="90"></canvas>
+          <canvas id="decision-chart" width="72" height="72"></canvas>
         </div>
       </div>
       <div class="table-scroll">

@@ -17,7 +17,10 @@
    decision in this UI is *also* always spelled out in text (table cells,
    stat-card labels, alert reasons), never a bare color dot with nothing
    else. That secondary encoding is what makes the WARN band acceptable
-   here. Full validator run + reasoning: see the PR description.
+   here. Separately, --block (the categorical-mark step) is too dark to
+   clear WCAG AA text contrast at small/bold sizes — see --block-text below
+   for why a second red step exists. Full validator runs + reasoning: see
+   architecture.md Section 15.8.
    ========================================================================== */
 
 :root {
@@ -34,12 +37,22 @@
   --text-dim: #8b9bc0;
   --text-faint: #5b6b8c;
 
-  /* Validated status/data palette — see file header. Used consistently for
-     every context (marks, badges, stat values) rather than a separate
-     "vibrant text" variant, so there is exactly one source of truth. */
+  /* Validated status/data palette — see file header. Used directly as both
+     mark and text color everywhere it clears WCAG AA text contrast (4.5:1)
+     against --surface-1 at the sizes it's actually rendered at — allow
+     (6.21:1), stepup (5.70:1), and struct (5.78:1) all do. --block does not
+     (3.90:1 — only clears the *categorical-mark* 3:1 floor the palette
+     validator checks, not small/bold text's stricter bar), so --block-text
+     is a second, lighter step of the same red reserved for the two places
+     it's rendered as actual text (a stat-tile value, a decision badge
+     label) — 5.97:1. --block itself stays the muted, CVD-validated step
+     for every *mark* context (map dots, chart slices, the alert/row accent
+     tints) where staying visually distinct from --allow under simulated
+     color blindness matters more than raw legibility. */
   --allow: #22ac74;
   --stepup: #b8891b;
   --block: #cc4646;
+  --block-text: #ef6a6a;
   --struct: #9085e9;
   --accent: #3987e5;
 
@@ -270,7 +283,7 @@ body {
   color: var(--stepup);
 }
 .stat-block .stat-value {
-  color: var(--block);
+  color: var(--block-text);
 }
 .stat-struct .stat-value {
   color: var(--struct);
@@ -412,7 +425,7 @@ tr.decision-step_up td.decision-cell {
   background: rgba(184, 137, 27, 0.16);
 }
 tr.decision-block td.decision-cell {
-  color: var(--block);
+  color: var(--block-text);
   background: rgba(204, 70, 70, 0.14);
 }
 
@@ -518,17 +531,14 @@ tr.decision-step_up {
   width: 100%;
 }
 
-/* Leaflet ships its own default (light) chrome via its CDN stylesheet — this
-   mutes the OSM tiles for a dark-map look (no separate dark tile provider
-   needed, staying dependency-light) and re-themes the zoom/attribution/popup
-   controls to match rather than clashing bright white against the rest of
-   the UI. leaflet.css is loaded before style.css in index.html specifically
-   so these rules win the cascade without needing !important. */
-/* OpenStreetMap's default tiles are a light basemap by design — inverting the whole tile pane
-   then rotating hue 180° is the standard CSS-only way to get a dark map from a light tile source
-   (restores roughly natural-looking colors — water still reads blue-ish, land still greenish —
-   while the overall tone matches the rest of the dark UI) without depending on a separate
-   dark-tile CDN/API key. */
+/* Leaflet ships its own default (light) chrome via its CDN stylesheet, and OpenStreetMap's
+   default tiles are a light basemap by design — both would clash bright white against the rest
+   of this dark UI otherwise. leaflet.css is loaded before style.css in index.html specifically so
+   the rules below win the cascade without needing !important.
+   Tiles: inverting the whole tile pane then rotating hue 180° is the standard CSS-only way to get
+   a dark map from a light tile source (water still reads blue-ish, land still greenish) without
+   depending on a separate dark-tile CDN/API key. Controls/popups/attribution: re-themed below to
+   match rather than left as stark white boxes. */
 .leaflet-tile-pane {
   filter: invert(1) hue-rotate(180deg) brightness(0.92) contrast(0.88) saturate(0.65);
 }
@@ -664,6 +674,11 @@ tr.decision-step_up {
   }
   .counters {
     grid-template-columns: repeat(2, 1fr);
+  }
+  /* 5 stat cards in a 2-column grid otherwise leaves the 5th stranded alone
+     with an empty gap beside it — span it across both columns instead. */
+  .counters .stat-card:last-child {
+    grid-column: span 2;
   }
   .tabs {
     padding: 0.75rem 1rem;
