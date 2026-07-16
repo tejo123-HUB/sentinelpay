@@ -32,9 +32,14 @@ function buildAlert(input) {
     `${count} transactions totaling ${totalAmount.toFixed(2)} from ${senderId} split across ${receiverIds.length} receivers within the window`,
   ];
   if (muleAccounts.length > 0) {
+    // The lower bound across all cited mules, not muleAccounts[0] (an arbitrary Map-insertion-
+    // order pick) — "over X%+" must be true of *every* account it's claimed for, not just the
+    // first one encountered, or the human-readable reason can overstate the pattern (e.g.
+    // claiming "2 receivers withdrew over 99%+" when one only reached 85%).
+    const minMuleRatio = Math.min(...muleAccounts.map((r) => r.withdrawalRatio));
     reasonParts.push(
       `${muleAccounts.length} of ${receiverIds.length} receivers withdrew over ${Math.round(
-        muleAccounts[0].withdrawalRatio * 100
+        minMuleRatio * 100
       )}%+ of received funds within ${Math.round(require('./withdrawalCorrelation').WITHDRAWAL_WINDOW_MS / 60000)} minutes (mule pattern, chain depth ${chainDepth})`
     );
   }

@@ -37,7 +37,23 @@ function runScanCycle(db, nowMs = Date.now()) {
     .prepare('SELECT sender_id, created_at FROM structuring_alerts WHERE created_at >= ?')
     .all(alertLookbackIso);
 
-  const newAlerts = runStructuringScan(transactions, nowMs, existingAlerts);
+  // Unbounded (full account history, not just the LOOKBACK_MS-bounded `transactions` above):
+  // "is this receiver new to this sender" must be answered from the real relationship history,
+  // not from whatever happens to still be inside the last ~45 minutes. Reusing the bounded set
+  // here was the actual bug — two people who've paid each other for months would look like a
+  // brand-new fan-out receiver the moment the sender did anything resembling a quick burst of
+  // transfers to them. One indexed query per candidate sender (idx_transactions_sender), not a
+  // full-table scan — cheap even though it's unbounded, since split candidates are rare (at
+  // most a handful of senders qualify per scan cycle).
+  const priorReceiverStmt = db.prepare(
+    'SELECT DISTINCT receiver_id FROM transactions WHERE sender_id = ? AND timestamp < ?'
+  );
+  const getPriorReceiverIds = (senderId, beforeMs) => {
+    const rows = priorReceiverStmt.all(senderId, new Date(beforeMs).toISOString());
+    return new Set(rows.map((r) => r.receiver_id));
+  };
+
+  const newAlerts = runStructuringScan(transactions, nowMs, existingAlerts, getPriorReceiverIds);
 
   if (newAlerts.length > 0) {
     const insertStmt = db.prepare(insertAlertStmtSql);

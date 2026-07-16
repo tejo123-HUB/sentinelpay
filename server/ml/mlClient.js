@@ -9,6 +9,7 @@ const path = require('node:path');
 const extractFeatures = require('./features');
 
 const MODEL_PATH = path.join(__dirname, '..', '..', 'ml', 'model_export', 'model.json');
+const ML_SERVICE_TIMEOUT_MS = 100; // budget for the python-service fallback call, well inside the <150ms end-to-end target
 
 let cachedModel = null;
 function loadModel() {
@@ -38,10 +39,14 @@ async function scoreViaHttpService(transaction, userHistory) {
   const url = process.env.ML_SERVICE_URL || 'http://127.0.0.1:8000/predict';
   const features = extractFeatures(transaction, userHistory);
 
+  // Without a timeout, a hung/unreachable-but-not-yet-refused ml/serve.py could block
+  // POST /transaction indefinitely — this is a real (documented) fallback mode, not dead code,
+  // so it needs the same real-time guarantee the rest of the pipeline has.
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ features }),
+    signal: AbortSignal.timeout(ML_SERVICE_TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`ML service responded with status ${res.status}`);
   const data = await res.json();

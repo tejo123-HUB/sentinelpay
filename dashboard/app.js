@@ -181,11 +181,34 @@ function connect() {
     if (message.type === 'transaction') {
       addTransactionRow(message.data);
       updateCounters(message.data.decision);
+      // Other view modules (map.js, audit.js) hook into the same live feed via this event
+      // rather than opening their own WebSocket connection.
+      document.dispatchEvent(new CustomEvent('sentinelpay:transaction', { detail: message.data }));
     } else if (message.type === 'structuring_alert') {
       addAlertCard(message.data);
+      document.dispatchEvent(new CustomEvent('sentinelpay:structuring_alert', { detail: message.data }));
     }
   });
 }
 
+// ---- Tab navigation between Live Monitor / Map / Audit Trail ----
+function initTabs() {
+  const buttons = document.querySelectorAll('.tab-btn');
+  buttons.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      buttons.forEach((b) => b.classList.remove('active'));
+      btn.classList.add('active');
+
+      const targetView = btn.dataset.view;
+      document.querySelectorAll('.view').forEach((view) => {
+        view.classList.toggle('hidden', view.id !== `view-${targetView}`);
+      });
+
+      document.dispatchEvent(new CustomEvent('sentinelpay:view-shown', { detail: { view: targetView } }));
+    });
+  });
+}
+
+initTabs();
 initChart();
 loadInitialData().then(connect);

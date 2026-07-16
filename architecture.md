@@ -95,13 +95,13 @@ A real-time scoring API that:
    - **Full version:** train the model, deploy it to Vertex AI, call it live from the API.
    - **Fallback version:** train and run the model locally (still real, still scikit-learn), and present the Vertex AI edge-deployment step as "designed for, demoed locally" in the architecture slide — you still show a working ML component and an honest, well-reasoned GCP integration story.
 
-### 4.2 Stretch Features (if time permits)
+### 4.2 Stretch Features — both now built
 
-8. **Geographic Visualization**
-   Live map view (e.g., Leaflet.js) plotting transaction origins, with flagged transactions pinned in red for instant visual impact during the demo.
+8. **Geographic Visualization** ✅ built
+   Live map view (Leaflet.js) plotting transaction origins, with flagged transactions pinned in red for instant visual impact during the demo. `dashboard/map.js`, a "Map" tab in the dashboard nav. Lazily initializes on first view (Leaflet needs a visible container), seeds from `GET /transactions?limit=200`, then plots live transactions via the same WebSocket feed as the live table. Degrades gracefully (a message in the panel, nothing else breaks) if the Leaflet CDN script didn't load.
 
-9. **Audit Trail & Analytics View**
-   Historical view of flagged transactions over time, useful for showing "improvement over time" or trend analysis to judges.
+9. **Audit Trail & Analytics View** ✅ built
+   Historical view of flagged transactions over time, useful for showing "improvement over time" or trend analysis to judges. `dashboard/audit.js` + an "Audit Trail" dashboard tab: a Chart.js trend line (allow/step-up/block counts per hour, via the new `GET /audit/summary` endpoint) plus a filterable table of historical flagged transactions (via `GET /transactions?decision=...`, a new optional filter on the existing endpoint).
 
 ---
 
@@ -257,18 +257,22 @@ Accepts a single transaction and returns a decision **synchronously** — scorin
 }
 ```
 
-### `GET /transactions?limit=50`
-Returns recent transactions with their decisions, for the dashboard's live table.
+### `GET /transactions?limit=50&decision=block,step_up`
+Returns recent transactions with their decisions and flag reasons, for the dashboard's live table and the Task 11 audit trail. `decision` (optional, comma-separated, one or more of `allow`/`step_up`/`block`) filters the results — added when building the audit trail (Section 15.2).
 
 ### `GET /alerts`
 Returns active structuring/layering alerts (grouped, not per-transaction).
 
+### `GET /audit/summary?hours=24&bucketMinutes=60`
+Task 11 (audit trail): time-bucketed counts of `allow`/`step_up`/`block` over the given lookback window, for the trend chart. Added in Section 15.2. Returns `{ hours, bucketMinutes, totalTransactions, buckets: [{ bucket_start, allow, step_up, block }, ...] }`.
+
 ### WebSocket `/ws`
 Broadcasts every processed transaction and every new structuring alert to connected dashboard clients as they happen:
 ```json
-{ "type": "transaction", "data": { ...same as POST /transaction response... } }
+{ "type": "transaction", "data": { "transaction_id": "...", "fraud_score": ..., "decision": "...", "reasons": [...], "sender_id": "...", "receiver_id": "...", "amount": ..., "timestamp": "...", "location": { "lat": ..., "lng": ... }, "device_id": "...", "merchant_id": "...", "transaction_type": "..." } }
 { "type": "structuring_alert", "data": { "sender_id": "...", "receiver_ids": [...], "total_amount": ..., "withdrawal_ratio": ... } }
 ```
+**Deviation from the original spec (Section 15.3):** the `transaction` payload is the full transaction, not just the `POST /transaction` response fields as originally documented here. See Section 15.3 for why — the original "same as POST response" contract left the dashboard's live table and map view with no sender/receiver/amount/location data for any transaction that arrived over the WebSocket rather than the initial `GET /transactions` load.
 
 ---
 
@@ -305,6 +309,8 @@ sentinelpay/
 ├── dashboard/
 │   ├── index.html
 │   ├── app.js
+│   ├── map.js                   ← Task 10, Leaflet map view (added in the review pass, Section 15.2)
+│   ├── audit.js                 ← Task 11, audit trail trend chart + table (added in the review pass, Section 15.2)
 │   └── style.css
 ├── ml/
 │   ├── train_model.py
@@ -312,11 +318,17 @@ sentinelpay/
 │   ├── requirements.txt
 │   └── model_export/
 ├── simulator/
-│   └── simulate_transactions.js ← generates normal + fraud + structuring demo traffic
+│   ├── simulate_transactions.js ← generates normal + fraud + structuring demo traffic
+│   └── benchmark.js             ← Task 12, latency + false-positive measurement
 └── tests/
     ├── rules.test.js
     ├── structuring.test.js
-    └── scoring.test.js
+    ├── scoring.test.js
+    ├── ml.test.js
+    ├── validate.test.js
+    ├── api.test.js
+    ├── websocket.test.js
+    └── dashboard.test.js
 ```
 
 **Implementation note (final):** a few files were added beyond this original list, all straightforward extractions/additions rather than deviations from anything binding:
@@ -327,7 +339,7 @@ sentinelpay/
 - `server/structuring/pipeline.js` — the pure orchestration of the four structuring detectors, kept separate from `backgroundJob.js`'s impure DB/scheduling wrapper so it's directly unit-testable (see Task 6 DoD tests).
 - `server/structuring/alertLookup.js` — the fast per-transaction structuring-alert lookup described in Task 6 but not given its own filename in the original plan.
 - `simulator/benchmark.js` — the Task 12 latency/false-positive measurement script.
-- `tests/api.test.js`, `tests/ml.test.js` — additional test coverage for the ingestion API and ML client, beyond the three test files originally listed.
+- `tests/api.test.js`, `tests/ml.test.js`, `tests/validate.test.js`, `tests/websocket.test.js`, `tests/dashboard.test.js` — additional test coverage (ingestion API incl. the timestamp-security regression, ML client incl. the timeout regression, input validation, WebSocket error resilience, and a script-load-order regression guard) beyond the three test files originally listed.
 
 ---
 
@@ -436,9 +448,9 @@ All thresholds must be named constants at the top of their file, not magic numbe
 
 **Task 9 (finish)** — structuring alert panel showing sender → receivers → withdrawal chain, if not already done.
 
-**Task 10 — Geographic Map View** *(stretch, only if ahead of schedule)* — Leaflet.js map plotting transaction origins, flagged in red.
+**Task 10 — Geographic Map View** ✅ built (added in the post-launch review pass) — Leaflet.js map plotting transaction origins, flagged in red. `dashboard/map.js`.
 
-**Task 11 — Audit Trail View** *(stretch, only if ahead of schedule)* — historical view of past flags/alerts.
+**Task 11 — Audit Trail View** ✅ built (added in the post-launch review pass) — historical view of past flags/alerts, with a trend chart. `dashboard/audit.js`, `GET /audit/summary`, `GET /transactions?decision=`.
 
 **Task 12 — Demo Prep & Polish**
 - Measure real latency: log timing around the scoring pipeline for ≥500 simulated transactions; replace the "<150ms target" in this doc with a real measured number.
@@ -504,7 +516,7 @@ All thresholds must be named constants at the top of their file, not magic numbe
 - [x] Real latency numbers measured and recorded (Section 11, Risk 3): mean 12.7ms / p50 12.0ms / p95 21.5ms / p99 26.4ms / max 50.7ms over 500 real requests.
 - [x] This document updated with details that changed during implementation: `node:sqlite` instead of `better-sqlite3` (Section 9), local ML inference instead of a live Vertex AI/Flask sidecar (Section 9), final rule weights (Section 10 Task 7 area / `server/scoring.js`), the `structuring_alerts.reason` schema addition (Section 6), and the false-positive claim resolution (Section 11, Risk 4).
 - [x] Code committed to git and pushed to GitHub: https://github.com/tejo123-HUB/sentinelpay (public, MIT licensed, sole contributor). A clear README covering setup and how to run the demo exists (`README.md`).
-- Stretch tasks not built: Task 10 (geographic map view) and Task 11 (audit trail / analytics view) — both explicitly marked stretch-only in Section 10 and not required for the Section 15 Definition of Done.
+- [x] Stretch tasks: Task 10 (geographic map view) and Task 11 (audit trail / analytics view) — both built in the post-launch review pass (Section 15.2). Neither was required for this Definition of Done, but both are now complete.
 
 ### 15.1 Post-build senior review (found and fixed, same session)
 
@@ -514,7 +526,44 @@ A second pass over the finished build, specifically looking for correctness/secu
 2. **Unhandled promise rejection could crash the whole server on one bad request (reliability).** Express 4 (unlike Express 5) does not automatically forward errors thrown or rejected after an `await` inside an async route handler to error-handling middleware — confirmed by reproducing it directly (`process.on('unhandledRejection', ...)` fired, and by default modern Node terminates the process on an unhandled rejection). `POST /transaction`'s handler had no try/catch around its `await getFraudProbability(...)` and subsequent DB writes, so a single DB error would have taken the entire fraud-detection API down instead of failing just that request. Fixed by wrapping the handler body in try/catch + `next(err)`; verified with a forced DB-failure test that now correctly returns 500 and leaves the server running. Also added a process-level `unhandledRejection` logger in `server/index.js` as a last-resort safety net. GET handlers were unaffected — Express 4 does correctly catch synchronous throws in non-async handlers (verified separately).
 3. **A flaky WebSocket client could turn a successfully-processed transaction into an HTTP 500 (reliability).** `websocket.js`'s `broadcast()` called `client.send()` for every connected client with no per-client isolation; one throwing client would propagate the exception back into `POST /transaction`'s synchronous tail — *after* the DB write had already succeeded — incorrectly failing the HTTP response for a transaction that was actually scored and stored correctly. Fixed by wrapping each `client.send()` in its own try/catch.
 
-All fixes verified: `npm test` passes (48 tests, up from 39 — added `tests/validate.test.js` and the structuring `windowEnd` regression test), and each fix was manually reproduced-then-verified-fixed live (forced DB failure, adversarial `sender_id` payload end-to-end) rather than assumed.
+All fixes verified: `npm test` passed (48 tests at the time, up from 39 — added `tests/validate.test.js` and the structuring `windowEnd` regression test), and each fix was manually reproduced-then-verified-fixed live (forced DB failure, adversarial `sender_id` payload end-to-end) rather than assumed.
+
+### 15.2 Second review pass: Tasks 10/11 built, independent deep review, 8 more findings fixed
+
+A follow-up request ("review deeply, fix all problems, add any missing feature, push a new branch") prompted two things in parallel: building the two stretch features (Section 4.2), and an independent code-review agent given the full codebase (not just a diff) and explicitly told to hunt for security/reliability/correctness bugs rather than style issues. Its process note first: it flagged that its own early file reads of `server/routes/transactions.js` and `dashboard/app.js` had returned stale/truncated content, re-read everything, and cross-checked with line counts before finalizing findings — worth recording as a reminder that tooling can silently hand back stale reads.
+
+**Built (Tasks 10/11):** `dashboard/map.js` (Leaflet map, lazy-init on tab show, live-updates via the same WebSocket feed as the live table, capped marker count) and `dashboard/audit.js` (Chart.js trend line + filterable flagged-transaction table) — both routed through a new tab-navigation bar in `dashboard/index.html`, backed by two new endpoints (`GET /audit/summary`, and a `decision` filter added to the existing `GET /transactions`). While building these, found and fixed a real bug affecting the *original* Task 9 dashboard too: `app.js`/`map.js`/`audit.js` were loaded as plain (non-deferred) `<script>` tags, which execute immediately when the HTML parser reaches them — *before* the `defer`red Chart.js/Leaflet CDN scripts (declared earlier, in `<head>`) actually run, per the HTML spec's defer-execution-order guarantee. That meant `typeof Chart === 'undefined'` was always true at init time, regardless of network conditions — the donut chart had silently never rendered since it was first built. Fixed by adding `defer` to all three app scripts too, so they execute in the same strict document-order queue as the CDN scripts. Guarded with a new `tests/dashboard.test.js` that asserts the `defer` attribute and script declaration order directly against `index.html`, so this can't silently regress.
+
+**Review agent findings, most severe first (all fixed, all with a regression test that was verified to fail without the fix and pass with it):**
+
+1. **Critical — client-controlled `timestamp` defeated every time-window fraud check, including the structuring-alert "always block" guarantee.** `POST /transaction`'s `timestamp` field was validated for shape only, then used directly as the `nowMs` anchor for the structuring-alert activity-window lookup (`alertLookup.js`), the velocity/impossible-travel windows, and the recent-transactions lookback. A future-dated `timestamp` shifted the alert-lookup's cutoff forward past every real alert's `created_at`, letting an account with an active structuring alert evade the mandatory block by simply claiming a far-future time. Reproduced directly (a seeded active alert + a 5-years-future `timestamp` → `'allow'` instead of `'block'`) before fixing. **Fix:** `routes/transactions.js` now overwrites `input.timestamp` with server-received time (`new Date().toISOString()`) immediately after validation, before any downstream use — the client's claimed value is checked for shape but never trusted for scoring. Since this system scores synchronously in real time, server-received and true event time are milliseconds apart for any honest caller, so this costs nothing for legitimate traffic. The DB now stores server-received time, not the client's claim. Tests: `tests/api.test.js`, "a future-dated client timestamp cannot bypass an active structuring alert" and "the stored timestamp is server-received time, not the client-supplied value."
+2. **High — an unhandled WebSocket `'error'` event could crash the entire process.** `ws` sockets are `EventEmitter`s; an `'error'` event with no listener throws synchronously, outside any of this app's own try/catch (it's `ws`'s internal dispatch). Neither the `WebSocketServer` instance nor individual client connections had an `'error'` listener — the same failure class already fixed once for `broadcast()`'s `client.send()`, just one level lower (the socket's own error event, not a failed send). **Fix:** added `wss.on('error', ...)` and per-connection `ws.on('error', ...)` in `server/websocket.js`. Test: `tests/websocket.test.js`, which reaches into the real server-side `ws` instance and force-emits an `'error'` event, then confirms the server is still alive and responsive.
+3. **Medium/high — the structuring engine's "no prior history" check was bounded to ~45 minutes, not real history.** `backgroundJob.js` fetches transactions within `LOOKBACK_MS` (~45 min, sized for split-detection performance) and `fanOutAnalysis.js`'s "is this receiver new" check was derived from that same bounded set — so two people who've transacted for months would look like a brand-new fan-out receiver the moment the sender did anything resembling a quick burst of transfers to them (e.g. splitting a dinner bill 3 ways), a false positive in the project's core differentiator. **Fix:** `fanOutAnalysis.js` now takes a `priorReceiverIds` Set/array directly (not transaction objects), and `pipeline.js` accepts an injectable `getPriorReceiverIds(senderId, beforeMs)` callback; `backgroundJob.js` supplies a real implementation backed by an unbounded, indexed (`idx_transactions_sender`) per-candidate query — cheap because split candidates are rare, not a full-table scan. Test: `tests/structuring.test.js`, "a genuine long-term contact outside the recent-transactions lookback is not misclassified as a new fan-out receiver."
+4. **Medium — no timeout on the ML `python-service` HTTP call.** `mlClient.js`'s `scoreViaHttpService` awaited `fetch()` with no timeout; a hung `ml/serve.py` (a real, documented fallback path, not dead code) could block `POST /transaction` indefinitely. **Fix:** added `signal: AbortSignal.timeout(100)` (well inside the <150ms budget). Test: `tests/ml.test.js`, "a hung python-service backend times out and fails open, instead of hanging" — a raw TCP server that accepts the connection but never responds, confirming resolution within the timeout window.
+5. **Medium (conditional on non-default ML mode) — a lost-update race in the running-average calculation.** `updateUserAfterTransaction` read `avg_transaction_amount` in JS, computed the new value, then wrote it back — under `ML_SERVING_MODE=python-service`/`vertex` (genuine async I/O, a real yield point unlike the default `local` mode), two concurrent requests for the same sender could both read the same stale average and have whichever wrote last silently discard the other's contribution. **Fix:** the average update is now a single atomic SQL statement (`avg = avg + (amount - avg) / count`), so each write resolves against SQLite's *current* value rather than a JS-cached one — no data loss even under a race, though the count-based precision can be minutely off under true concurrency (an accepted, documented trade-off, not a data-loss bug anymore). The transaction count is also read fresh (after this transaction's own insert), not carried over from an earlier pre-insert read.
+6. **Low/medium — a structuring alert's `total_amount`/`transaction_count` could overstate what its `receiver_ids` actually covers.** When a sender's burst included both an already-known receiver (correctly excluded from `receiver_ids`) and enough new receivers to still trip fan-out, the alert reported totals for the *whole* burst, inflating the human-readable reason CLAUDE.md requires to be accurate. **Fix:** `pipeline.js` now scopes `totalAmount`/`count` to only the transactions going to the flagged (new) receivers. Test: `tests/structuring.test.js`, "alert totals are scoped to only the flagged new receivers, not the whole burst."
+7. **Low — the mule-ratio cited in an alert's reason wasn't necessarily true of all cited mules.** `chainTracking.js` used `muleAccounts[0].withdrawalRatio` (`Map` insertion order) as if it were a lower bound, e.g. claiming "2 receivers withdrew over 99%+" when one only reached 85%. **Fix:** use `Math.min(...)` across all cited mules, so the percentage is a true lower bound. Test: `tests/structuring.test.js`, "reason cites the minimum mule ratio, not just the first one encountered."
+8. **Low — `simulator/benchmark.js` could crash instead of reporting "0 successful requests."** An empty `transactionIds` array (every request failed) produced an invalid `IN ()` SQL clause; separately, a fully unreachable server crashed the loop entirely (uncaught `fetch` rejection) rather than logging per-request failures. **Fix:** guard against zero successful requests with a clear message and non-zero exit instead of proceeding to broken stats/an invalid query; wrap each request in try/catch so a dropped connection doesn't abort the whole run.
+
+Also fixed while touching this code: the same two bugs from the *previous* review pass (Section 15.1) — the unrealistic simulator GPS jitter and the structuring `windowEnd` bug — remained fixed and were re-verified; no regressions.
+
+`npm test`: 63 tests passing (up from 48), all fixes verified live where practical (forced DB failures, adversarial timestamps, hung TCP servers, real WebSocket error injection) rather than only unit-tested in isolation.
+
+### 15.3 Third pass: WebSocket payload gap affecting the core dashboard, plus two smaller fixes
+
+A further "fix all the issues" request prompted another independent review agent, scoped to the fixes from Section 15.2 and the two new dashboard files (`map.js`, `audit.js`). That agent hit a session/rate limit partway through and terminated early, but it left one confirmed finding before stopping; the rest of this pass was completed manually.
+
+**Agent's finding (fixed):** `dashboard/audit.js`'s throttled live-refresh handler had a comment claiming to keep "the trend chart/table" fresh while the audit tab is open, but only ever called `refreshAuditTable()` — never `refreshAuditSummary()` (the trend chart). The chart only updated on manual tab-open or the Refresh button, not from live traffic. Fixed: the throttled handler now calls both.
+
+**Found manually while verifying the agent's finding (the most significant bug of this pass):** tracing why the trend-chart bug existed led to checking what data the live `sentinelpay:transaction` event actually carries — and it turned out the WebSocket broadcast for `type: "transaction"` was exactly the `POST /transaction` HTTP response shape (`{transaction_id, fraud_score, decision, reasons}`), matching what this document's Section 7 originally specified ("same as POST /transaction response"), but missing `sender_id`, `receiver_id`, `amount`, `timestamp`, `location`, `device_id`, `merchant_id`, `transaction_type` entirely. This is a real bug in the **original Task 9 dashboard**, not just the new features:
+- Every row added to the live transactions table via WebSocket (as opposed to the initial `GET /transactions` load) rendered blank `—` placeholders for sender, receiver, amount, and type — `app.js`'s `|| '—'` fallbacks masked this as if it were just "no data" rather than a bug, so it went unnoticed through the original build and both prior review passes.
+- `dashboard/map.js` could never plot a single *live* transaction — `plotTransaction()` requires `tx.location`, which was always `undefined` from a WebSocket event. The map only ever showed its one-time historical seed load.
+
+Root cause: this document's own Section 7 documented too minimal a WS contract, and the implementation matched that spec exactly — a spec gap, not a careless implementation deviation. **Fix:** `server/routes/transactions.js`'s WS broadcast now sends the full transaction (everything already available in `input`, at zero extra query cost) alongside the existing response fields; the HTTP response itself is unchanged. Section 7 above updated to document the real contract. Verified two ways: `tests/websocket.test.js`'s new "the transaction broadcast includes full transaction details" test (confirmed to fail with `sender_id: undefined` against the old code, pass against the fix), and a live raw-WebSocket-client check against a running server.
+
+**Found while fixing the above (map.js):** enriching the live broadcast surfaced a latent race in `map.js` that the previous (undefined-`location`, always-skipped) behavior had accidentally been masking: `loadInitialMapData()` fetches the last 200 transactions once, asynchronously, when the Map tab is first opened; if a live transaction arrives over the WebSocket while that fetch is still in flight, it would get plotted immediately by the live handler *and* again when the history fetch resolves (since by then the DB already contains it too) — a duplicate marker. Fixed with a `plottedTransactionIds` Set keyed on `transaction_id`, checked before plotting and cleaned up on marker eviction (so it doesn't grow unbounded past `MAP_MAX_MARKERS`).
+
+`npm test`: 64 tests passing (up from 63).
 
 ---
 

@@ -35,17 +35,29 @@ async function main() {
   for (let i = 0; i < args.count; i += 1) {
     const tx = generateNormalTransaction();
     const start = performance.now();
-    const { status, body } = await postTransaction(args.baseUrl, tx);
-    const elapsed = performance.now() - start;
+    try {
+      const { status, body } = await postTransaction(args.baseUrl, tx);
+      const elapsed = performance.now() - start;
 
-    if (status === 201) {
-      latencies.push(elapsed);
-      transactionIds.push(body.transaction_id);
-    } else {
-      console.error(`Request ${i} failed (${status}):`, body);
+      if (status === 201) {
+        latencies.push(elapsed);
+        transactionIds.push(body.transaction_id);
+      } else {
+        console.error(`Request ${i} failed (${status}):`, body);
+      }
+    } catch (err) {
+      // e.g. connection refused — the server isn't reachable at all. Report and keep going
+      // rather than letting one dropped connection abort the whole benchmark run.
+      console.error(`Request ${i} errored:`, err.message);
     }
 
     if ((i + 1) % 100 === 0) console.log(`  ...${i + 1}/${args.count} sent`);
+  }
+
+  if (transactionIds.length === 0) {
+    console.error('\nAll requests failed — nothing to report. Is the server running?');
+    process.exitCode = 1;
+    return;
   }
 
   latencies.sort((a, b) => a - b);
