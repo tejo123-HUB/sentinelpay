@@ -4,7 +4,6 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>SentinelPay — Live Fraud Monitoring</title>
-  <link rel="stylesheet" href="style.css" />
   <!--
     Subresource Integrity (SRI) hashes on all three CDN assets below, pinned to exact versions
     (chart.js was previously an unpinned "@4" floating tag): without these, a compromised or
@@ -14,6 +13,12 @@
   -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css"
     integrity="sha384-sHL9NAb7lN7rfvG5lfHpm643Xkcjzp4jFvuavGOndn6pjVqS6ny56CAt3nsEVT4H" crossorigin="anonymous" />
+  <!--
+    style.css loads after leaflet.css (not before, as previously) so its Leaflet dark-theme
+    overrides (.leaflet-control-zoom, .leaflet-popup-content-wrapper, etc.) win the cascade by
+    load order alone — no !important needed to beat Leaflet's own CDN stylesheet.
+  -->
+  <link rel="stylesheet" href="style.css" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1"
     integrity="sha384-jb8JQMbMoBUzgWatfe6COACi2ljcDdZQ2OxczGA3bGNeWe+6DChMTBJemed7ZnvJ" crossorigin="anonymous" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"
@@ -67,7 +72,19 @@
     <section class="panel panel-transactions">
       <div class="panel-header">
         <h2>Live Transactions</h2>
-        <canvas id="decision-chart" width="90" height="90"></canvas>
+        <!--
+          Chart.js's `responsive: true` (the default) resizes the canvas to fill its immediate
+          parent's box, ignoring the width/height *attributes* below (those only set the canvas's
+          internal drawing resolution before Chart.js takes over) — without a parent that has an
+          actual fixed CSS size, the donut grows to fill however much space .panel-header happens
+          to have, which on a wide panel is most of the header. This wrapper gives Chart.js a
+          fixed 90x90 box to fill instead — the standard, documented pattern (see style.css's
+          .decision-chart-frame), rather than fighting Chart.js's own JS-set inline canvas styles
+          with CSS !important.
+        -->
+        <div class="decision-chart-frame">
+          <canvas id="decision-chart" width="90" height="90"></canvas>
+        </div>
       </div>
       <div class="table-scroll">
         <table>

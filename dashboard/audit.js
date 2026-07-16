@@ -3,6 +3,28 @@
 let auditChart = null;
 let auditInitialized = false;
 
+// Same validated status palette as app.js's CHART_COLORS (dataviz skill's validate_palette.js
+// against this dashboard's dark surface, see style.css's file header) — duplicated per file since
+// each renders to its own <canvas> and can't share CSS custom properties.
+const AUDIT_CHART_COLORS = { allow: '#22ac74', stepup: '#b8891b', block: '#cc4646' };
+
+function auditLineDataset(label, color) {
+  return {
+    label,
+    data: [],
+    borderColor: color,
+    backgroundColor: `${color}1a`, // ~10% opacity area wash, per marks-and-anatomy.md's area-fill spec
+    borderWidth: 2, // 2px line, per spec
+    tension: 0.3,
+    pointRadius: 0, // quiet until hovered — the point only appears on interaction
+    pointHoverRadius: 5,
+    pointHoverBackgroundColor: color,
+    pointHoverBorderColor: '#0f1626',
+    pointHoverBorderWidth: 2,
+    pointHitRadius: 10,
+  };
+}
+
 function initAuditChart() {
   if (typeof Chart === 'undefined') return null;
   const ctx = document.getElementById('audit-trend-chart');
@@ -12,19 +34,37 @@ function initAuditChart() {
     data: {
       labels: [],
       datasets: [
-        { label: 'Allow', data: [], borderColor: '#34d399', backgroundColor: '#34d39933', tension: 0.25 },
-        { label: 'Step-Up', data: [], borderColor: '#fbbf24', backgroundColor: '#fbbf2433', tension: 0.25 },
-        { label: 'Block', data: [], borderColor: '#f87171', backgroundColor: '#f8717133', tension: 0.25 },
+        auditLineDataset('Allow', AUDIT_CHART_COLORS.allow),
+        auditLineDataset('Step-Up', AUDIT_CHART_COLORS.stepup),
+        auditLineDataset('Block', AUDIT_CHART_COLORS.block),
       ],
     },
     options: {
       responsive: true,
       maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
       scales: {
-        x: { ticks: { color: '#8ba0c4' }, grid: { color: '#22314f' } },
-        y: { beginAtZero: true, ticks: { color: '#8ba0c4', precision: 0 }, grid: { color: '#22314f' } },
+        x: { ticks: { color: '#5b6b8c', font: { size: 11 } }, grid: { color: 'rgba(255,255,255,0.05)' } },
+        y: {
+          beginAtZero: true,
+          ticks: { color: '#5b6b8c', font: { size: 11 }, precision: 0 },
+          grid: { color: 'rgba(255,255,255,0.05)' },
+        },
       },
-      plugins: { legend: { labels: { color: '#e6ecf5' } } },
+      plugins: {
+        legend: {
+          labels: { color: '#8b9bc0', usePointStyle: true, pointStyle: 'circle', padding: 16, font: { size: 12, weight: '600' } },
+        },
+        tooltip: {
+          backgroundColor: '#141d33',
+          titleColor: '#eef2fb',
+          bodyColor: '#8b9bc0',
+          borderColor: 'rgba(255,255,255,0.08)',
+          borderWidth: 1,
+          padding: 10,
+          cornerRadius: 8,
+        },
+      },
     },
   });
 }
