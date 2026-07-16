@@ -53,12 +53,23 @@ node simulator/simulate_transactions.js --scenario=fraud
 # withdrawals) -> a single grouped structuring alert
 node simulator/simulate_transactions.js --scenario=structuring
 
-# All three in sequence
+# The odd-hour rule, live -> flags a transaction outside the account's usual active hours
+node simulator/simulate_transactions.js --scenario=odd-hour
+
+# All four in sequence
 node simulator/simulate_transactions.js --scenario=all
 ```
 
 The structuring scenario polls `GET /alerts` for you and prints the created alert once the
 background job (runs every 7s by default) picks it up — usually within one or two cycles.
+
+The odd-hour scenario seeds a demo account's historical "typical active hours" baseline
+directly in the database (bypassing the API), then sends one transaction through the real API
+at genuine current time. This is necessary, not a shortcut: `POST /transaction` always scores
+against server-received time (see `architecture.md` Section 15.2), so a manipulated
+client-supplied timestamp can no longer fake "days of history, and it's now 3am" — that's a
+deliberate security fix, and this scenario works around the *inability to fake it live*, not
+around the scoring logic itself, which runs completely unmodified.
 
 ## Tests
 

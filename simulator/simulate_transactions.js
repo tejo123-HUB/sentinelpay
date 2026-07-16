@@ -6,8 +6,12 @@
 //   node simulator/simulate_transactions.js --scenario=normal --count=100 --rate=150
 //   node simulator/simulate_transactions.js --scenario=fraud
 //   node simulator/simulate_transactions.js --scenario=structuring
+//   node simulator/simulate_transactions.js --scenario=odd-hour
 //   node simulator/simulate_transactions.js --scenario=all
 //   node simulator/simulate_transactions.js --scenario=normal --continuous   (Ctrl+C to stop)
+
+const { DatabaseSync } = require('node:sqlite');
+const path = require('node:path');
 
 const BASE_URL = process.env.SIMULATOR_BASE_URL || 'http://127.0.0.1:3000';
 
@@ -221,6 +225,96 @@ async function triggerStructuringScenario(baseUrl) {
   return null;
 }
 
+const ODD_HOUR_WINDOW_A = [1, 9]; // 01:00-09:00 UTC
+const ODD_HOUR_WINDOW_B = [13, 21]; // 13:00-21:00 UTC
+
+function resolveDbPath() {
+  return process.env.DB_PATH || path.join(process.cwd(), 'sentinelpay.db');
+}
+
+// Picks a demo "typical active hours" window that provably excludes the current real hour, so
+// the transaction sent below is guaranteed to land outside it regardless of when this is run.
+function pickOddHourBaselineWindow(currentHourUtc) {
+  const [startA, endA] = ODD_HOUR_WINDOW_A;
+  const inWindowA = currentHourUtc >= startA && currentHourUtc < endA;
+  return inWindowA ? ODD_HOUR_WINDOW_B : ODD_HOUR_WINDOW_A;
+}
+
+// Demonstrates the odd-hour rule live without weakening the timestamp-security fix
+// (architecture.md Section 15.2, finding #1 / Section 15.4): POST /transaction always scores
+// against server-received time, so a live demo can no longer fake "this account has days of
+// daytime history, and it's now 3am" using a client-supplied timestamp within a few seconds —
+// that's the security fix working as intended, not a limitation to route around via the API.
+// Instead, this seeds a realistic-looking historical baseline directly into the demo database
+// (bypassing the API entirely — the same way a real account's baseline would only exist after
+// real accumulated usage, never something POST /transaction itself lets a caller assert), then
+// sends exactly one transaction through the *real* API at genuine current time. The odd-hour
+// check itself still runs unmodified against real server time; only how the account's
+// pre-existing history came to exist is different from organic usage.
+async function triggerOddHourScenario(baseUrl) {
+  const dbPath = resolveDbPath();
+  let db;
+  try {
+    db = new DatabaseSync(dbPath);
+  } catch (err) {
+    console.error(`[odd-hour] could not open the database at ${dbPath}:`, err.message);
+    console.error('[odd-hour] make sure the server has been started at least once (npm start) so the schema exists.');
+    throw err;
+  }
+
+  const sender = randomId('u_oddhour');
+  const receiver = randomId('u_oddhour_target');
+  const nowMs = Date.now();
+  const currentHourUtc = new Date(nowMs).getUTCHours();
+  const baselineWindow = pickOddHourBaselineWindow(currentHourUtc);
+  const accountCreatedAt = new Date(nowMs - 24 * 60 * 60 * 1000).toISOString(); // pretend the account is a day old
+
+  console.log(
+    `[odd-hour] seeding ${sender} with a typical-active-hours baseline of ${baselineWindow[0]}:00-${baselineWindow[1]}:00 UTC ` +
+      `(current hour is ${currentHourUtc}:00 UTC, deliberately excluded)`
+  );
+
+  try {
+    db.prepare(
+      'INSERT OR IGNORE INTO users (user_id, created_at, avg_transaction_amount, typical_active_hours) VALUES (?, ?, ?, ?)'
+    ).run(sender, accountCreatedAt, 150, JSON.stringify([baselineWindow]));
+    db.prepare('INSERT OR IGNORE INTO users (user_id, created_at, avg_transaction_amount) VALUES (?, ?, 0)').run(
+      receiver,
+      accountCreatedAt
+    );
+  } finally {
+    db.close();
+  }
+
+  const result = await postTransaction(baseUrl, {
+    sender_id: sender,
+    receiver_id: receiver,
+    amount: 150,
+    timestamp: new Date().toISOString(), // shape-validated only; the server always scores against its own received time
+    transaction_type: 'transfer',
+  });
+
+  console.log('[odd-hour] live transaction result:', result.body);
+  const flaggedOddHour = Boolean(
+    result.body && result.body.reasons && result.body.reasons.some((r) => /typical active hours/.test(r))
+  );
+  if (flaggedOddHour) {
+    console.log("[odd-hour] OK: transaction was correctly flagged as outside the account's typical active hours");
+    // odd_hour is deliberately the weakest single rule weight (see server/rules/oddHour.js) —
+    // on its own it won't cross the step_up threshold, matching the design intent that no
+    // single mild signal alone should challenge/block a user. The flag firing (above) is what
+    // this scenario demonstrates, not a guaranteed decision tier.
+    if (result.body && result.body.decision === 'allow') {
+      console.log(
+        "[odd-hour] note: decision is still 'allow' — a single odd-hour flag alone isn't enough to trigger step-up by design; see the reason above for the actual signal."
+      );
+    }
+  } else {
+    console.warn('[odd-hour] WARNING: expected an odd-hour flag but did not see one — check server logs');
+  }
+  return result;
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   console.log(`SentinelPay simulator :: scenario=${args.scenario} baseUrl=${args.baseUrl}`);
@@ -231,12 +325,15 @@ async function main() {
     await triggerFraudScenario(args.baseUrl);
   } else if (args.scenario === 'structuring') {
     await triggerStructuringScenario(args.baseUrl);
+  } else if (args.scenario === 'odd-hour') {
+    await triggerOddHourScenario(args.baseUrl);
   } else if (args.scenario === 'all') {
     await runNormalStream(args.baseUrl, 20, args.rate, false);
     await triggerFraudScenario(args.baseUrl);
     await triggerStructuringScenario(args.baseUrl);
+    await triggerOddHourScenario(args.baseUrl);
   } else {
-    console.error(`Unknown scenario "${args.scenario}". Use normal | fraud | structuring | all.`);
+    console.error(`Unknown scenario "${args.scenario}". Use normal | fraud | structuring | odd-hour | all.`);
     process.exitCode = 1;
   }
 }
@@ -254,5 +351,6 @@ module.exports = {
   getAlerts,
   triggerFraudScenario,
   triggerStructuringScenario,
+  triggerOddHourScenario,
   randomId,
 };
