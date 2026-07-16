@@ -10,10 +10,21 @@
 //   node simulator/simulate_transactions.js --scenario=all
 //   node simulator/simulate_transactions.js --scenario=normal --continuous   (Ctrl+C to stop)
 
+require('dotenv').config();
 const { DatabaseSync } = require('node:sqlite');
 const path = require('node:path');
+const { API_KEY, DEFAULT_DEV_API_KEY } = require('../server/middleware/apiKeyAuth');
 
 const BASE_URL = process.env.SIMULATOR_BASE_URL || 'http://127.0.0.1:3000';
+
+// The API now requires X-API-Key on every request (server/middleware/apiKeyAuth.js). This
+// process and the server it's talking to are separate processes, so they only agree on the key
+// automatically via the shared DEFAULT_DEV_API_KEY fallback (when neither side sets API_KEY) or
+// by both loading the same .env (dotenv, above) once a real key is configured — there's no other
+// shared state between them.
+if (API_KEY === DEFAULT_DEV_API_KEY) {
+  console.warn('[simulator] No API_KEY set — using the same insecure default the server falls back to.');
+}
 
 // A pool of synthetic "regular" users with stable homes/devices, so their behavioral
 // baselines (avg_transaction_amount, typical_active_hours, known devices) build up naturally
@@ -58,7 +69,7 @@ function sleep(ms) {
 async function postTransaction(baseUrl, transaction) {
   const res = await fetch(`${baseUrl}/transaction`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY },
     body: JSON.stringify(transaction),
   });
   const body = await res.json().catch(() => null);
@@ -66,7 +77,7 @@ async function postTransaction(baseUrl, transaction) {
 }
 
 async function getAlerts(baseUrl, limit = 20) {
-  const res = await fetch(`${baseUrl}/alerts?limit=${limit}`);
+  const res = await fetch(`${baseUrl}/alerts?limit=${limit}`, { headers: { 'X-API-Key': API_KEY } });
   return res.json();
 }
 

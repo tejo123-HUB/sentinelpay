@@ -81,7 +81,7 @@ function plotTransaction(tx) {
 
 async function loadInitialMapData() {
   try {
-    const res = await fetch('/transactions?limit=200');
+    const res = await window.sentinelpayAuthFetch('/transactions?limit=200');
     const transactions = await res.json();
     for (const tx of [...transactions].reverse()) {
       plotTransaction(tx);

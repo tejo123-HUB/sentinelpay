@@ -8,6 +8,20 @@ const findActiveAlert = require('../structuring/alertLookup');
 const computeFraudScore = require('../scoring');
 const decide = require('../decision');
 const { getFraudProbability } = require('../ml/mlClient');
+// Applied per-route below (`router.post('/transaction', requireApiKey, ...)` etc.), not as
+// `router.use(requireApiKey)` at the top of this file. That distinction matters: server/index.js
+// mounts this whole router at `app.use('/', ...)`, which — same as `router.use()` would — runs
+// for every request that reaches it, whether or not any route inside actually matches. A blanket
+// `router.use(requireApiKey)` here reproduced the exact bug this comment is warning against, just
+// one file lower: it doesn't stop being "every path" just because it moved from index.js into
+// this router. Found live (in a real browser, not curl) after the previous fix: the dashboard's
+// own style.css/app.js/map.js/audit.js — none of which are routes this file defines — were being
+// rejected with 401 before they could ever reach express.static in index.js, since <link>/<script
+// src> tags can't attach the X-API-Key header the way authFetch()'s explicit fetch() calls can.
+// The whole dashboard was unstyled and inert as a result. Scoping the middleware to only the
+// routes that actually need it lets an unmatched path (style.css, a 404, anything) fall through
+// past this router entirely, the same as it would have with no auth middleware in the chain at all.
+const { requireApiKey } = require('../middleware/apiKeyAuth');
 
 const velocity = require('../rules/velocity');
 const impossibleTravel = require('../rules/impossibleTravel');
@@ -42,7 +56,7 @@ const MAX_BUCKET_MINUTES = 24 * 60; // one bucket per day, at most
 // (hanging the client forever, and potentially crashing the whole process on modern Node,
 // which terminates by default on unhandled rejections) instead of reaching the error-handling
 // middleware in index.js.
-router.post('/transaction', async (req, res, next) => {
+router.post('/transaction', requireApiKey, async (req, res, next) => {
   try {
     const db = req.app.locals.db;
 
@@ -153,7 +167,7 @@ router.post('/transaction', async (req, res, next) => {
 // GET /transactions?limit=50&decision=block,step_up — recent transactions for the dashboard's
 // live table and the audit trail view. `decision` (optional, comma-separated) filters to one
 // or more of allow/step_up/block — used by the audit trail to show only flagged transactions.
-router.get('/transactions', (req, res) => {
+router.get('/transactions', requireApiKey, (req, res) => {
   const db = req.app.locals.db;
   const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || DEFAULT_LIST_LIMIT, 1), MAX_LIST_LIMIT);
 
@@ -213,7 +227,7 @@ router.get('/transactions', (req, res) => {
 // GET /audit/summary?hours=24&bucketMinutes=60 — Task 11 (audit trail / analytics view):
 // time-bucketed counts of allow/step_up/block over a lookback window, for a trend chart
 // showing fraud activity over time rather than a single point-in-time snapshot.
-router.get('/audit/summary', (req, res) => {
+router.get('/audit/summary', requireApiKey, (req, res) => {
   const db = req.app.locals.db;
   const hours = Math.min(Math.max(parseInt(req.query.hours, 10) || DEFAULT_AUDIT_HOURS, 1), MAX_AUDIT_HOURS);
   const bucketMinutes = Math.min(
@@ -249,7 +263,7 @@ router.get('/audit/summary', (req, res) => {
 });
 
 // GET /alerts — active structuring/layering alerts, grouped (not per-transaction).
-router.get('/alerts', (req, res) => {
+router.get('/alerts', requireApiKey, (req, res) => {
   const db = req.app.locals.db;
   const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || DEFAULT_LIST_LIMIT, 1), MAX_LIST_LIMIT);
 

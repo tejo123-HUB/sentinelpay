@@ -2,6 +2,19 @@ const MAX_TABLE_ROWS = 150; // cap DOM growth during a long-running demo
 const MAX_ALERT_CARDS = 50;
 const RECONNECT_DELAY_MS = 2000;
 
+// The API now requires an X-API-Key header on every request (server/middleware/apiKeyAuth.js) —
+// server/index.js injects it into this page's own <head> as a <meta> tag at serve time, since
+// there's no login system in this hackathon build for the dashboard to authenticate through
+// otherwise. Exposed on window so map.js/audit.js (loaded after this script, same global scope)
+// can reuse it without each re-reading the DOM.
+const API_KEY = document.querySelector('meta[name="sentinelpay-api-key"]')?.content || '';
+window.SENTINELPAY_API_KEY = API_KEY;
+function authFetch(url, options = {}) {
+  const headers = { ...(options.headers || {}), 'X-API-Key': API_KEY };
+  return fetch(url, { ...options, headers });
+}
+window.sentinelpayAuthFetch = authFetch;
+
 // sender_id/receiver_id/etc. are attacker-controlled (POST /transaction validates only that
 // they're non-empty strings, no character restriction) and get rendered here via innerHTML
 // template strings for layout convenience — every dynamic value must be escaped or a
@@ -135,7 +148,10 @@ function addAlertCard(alert, { prepend = true } = {}) {
 
 async function loadInitialData() {
   try {
-    const [txRes, alertsRes] = await Promise.all([fetch('/transactions?limit=50'), fetch('/alerts?limit=20')]);
+    const [txRes, alertsRes] = await Promise.all([
+      authFetch('/transactions?limit=50'),
+      authFetch('/alerts?limit=20'),
+    ]);
     const transactions = await txRes.json();
     const alerts = await alertsRes.json();
 
@@ -155,7 +171,10 @@ async function loadInitialData() {
 
 function connect() {
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const ws = new WebSocket(`${protocol}//${location.host}/ws`);
+  // The browser WebSocket API can't set custom headers on the handshake, so the API key travels
+  // as a query param instead — checked server-side in websocket.js's verifyClient before the
+  // upgrade completes (see that file for why the WS feed needs the same gate as the REST API).
+  const ws = new WebSocket(`${protocol}//${location.host}/ws?apiKey=${encodeURIComponent(API_KEY)}`);
 
   ws.addEventListener('open', () => {
     connDot.classList.add('connected');

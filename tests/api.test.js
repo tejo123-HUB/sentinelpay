@@ -4,9 +4,16 @@ const http = require('node:http');
 
 process.env.DB_PATH = ':memory:';
 process.env.PORT = '0';
+process.env.API_KEY = 'test-key-for-automated-tests';
 
 function freshServer() {
+  // Also clear rateLimit.js's (and websocket.js's, which captures a reference to it) cache, not
+  // just server/index.js's own — rateLimit.js reads RATE_LIMIT_MAX_PER_MINUTE once at module-load
+  // time into a module-level constant, so a stale cached instance would silently ignore an env
+  // var change made between tests (see the rate-limit regression tests below, which rely on this).
   delete require.cache[require.resolve('../server/index')];
+  delete require.cache[require.resolve('../server/middleware/rateLimit')];
+  delete require.cache[require.resolve('../server/websocket')];
   const { app, server } = require('../server/index');
   return new Promise((resolve) => {
     if (server.listening) return resolve({ app, server });
@@ -14,12 +21,19 @@ function freshServer() {
   });
 }
 
-function request(server, method, path, body) {
+// `headerOverrides` merges over the default headers; setting a key to `undefined` removes it
+// entirely (used by the auth regression tests below to send a request with no X-API-Key at all,
+// rather than each hand-rolling a second raw http.request call).
+function request(server, method, path, body, headerOverrides = {}) {
   return new Promise((resolve, reject) => {
     const port = server.address().port;
     const data = body ? JSON.stringify(body) : null;
+    const headers = { 'Content-Type': 'application/json', 'X-API-Key': process.env.API_KEY, ...headerOverrides };
+    for (const key of Object.keys(headers)) {
+      if (headers[key] === undefined) delete headers[key];
+    }
     const req = http.request(
-      { host: '127.0.0.1', port, method, path, headers: { 'Content-Type': 'application/json' } },
+      { host: '127.0.0.1', port, method, path, headers },
       (res) => {
         let raw = '';
         res.on('data', (chunk) => (raw += chunk));
@@ -30,7 +44,7 @@ function request(server, method, path, body) {
           } catch {
             parsed = raw;
           }
-          resolve({ status: res.statusCode, body: parsed });
+          resolve({ status: res.statusCode, body: parsed, headers: res.headers });
         });
       }
     );
@@ -169,6 +183,174 @@ test('GET /audit/summary buckets transactions by time and decision', async () =>
     assert.ok(res.body.buckets.length >= 1);
     const total = res.body.buckets.reduce((s, b) => s + b.allow + b.step_up + b.block, 0);
     assert.equal(total, 2);
+  } finally {
+    server.close();
+  }
+});
+
+// ---- Security regression: every route requires a valid API key ----
+
+test('POST /transaction: rejects a request with no X-API-Key header', async () => {
+  const { server } = await freshServer();
+  try {
+    const res = await request(server, 'POST', '/transaction', validTransaction(), { 'X-API-Key': undefined });
+    assert.equal(res.status, 401);
+    assert.equal(typeof res.body.error, 'string');
+  } finally {
+    server.close();
+  }
+});
+
+test('GET /transactions: rejects a request with the wrong X-API-Key', async () => {
+  const { server } = await freshServer();
+  try {
+    const res = await request(server, 'GET', '/transactions', null, { 'X-API-Key': 'not-the-right-key' });
+    assert.equal(res.status, 401);
+  } finally {
+    server.close();
+  }
+});
+
+test('GET /health: does not require an API key (liveness check stays open)', async () => {
+  const { server } = await freshServer();
+  try {
+    const res = await request(server, 'GET', '/health', null, { 'X-API-Key': undefined });
+    assert.equal(res.status, 200);
+  } finally {
+    server.close();
+  }
+});
+
+test('every response carries the standard security headers (regression)', async () => {
+  const { server } = await freshServer();
+  try {
+    const res = await request(server, 'GET', '/health', null, { 'X-API-Key': undefined });
+    assert.equal(res.headers['x-content-type-options'], 'nosniff');
+    assert.equal(res.headers['x-frame-options'], 'DENY');
+    assert.equal(res.headers['referrer-policy'], 'no-referrer');
+    assert.match(res.headers['content-security-policy'], /default-src 'self'/);
+  } finally {
+    server.close();
+  }
+});
+
+// ---- Auth-scoping regression: static dashboard assets must be servable with no API key at all,
+// since <link>/<script src> tags can't attach the X-API-Key header the way authFetch()'s fetch()
+// calls can ----
+
+test('dashboard static assets (style.css, app.js, map.js, audit.js) are servable with no API key (regression)', async () => {
+  // Regression, found live in an actual browser (not curl): requireApiKey was originally mounted
+  // via `app.use('/', requireApiKey, transactionsRouter)` in server/index.js, which runs for
+  // *every* request reaching that layer — not just paths transactionsRouter actually defines a
+  // route for. That rejected the dashboard's own stylesheet and scripts with 401 before they
+  // could ever reach express.static, since browsers don't attach custom headers to <link>/<script
+  // src> loads. The entire dashboard rendered unstyled and inert as a result — no test in this
+  // suite caught it because every existing test talks to the API directly, never loads the actual
+  // HTML page and its sub-resources the way a browser does. Fixed by scoping requireApiKey to
+  // each individual route inside server/routes/transactions.js instead of the whole router mount.
+  const { server } = await freshServer();
+  try {
+    for (const asset of ['/style.css', '/app.js', '/map.js', '/audit.js']) {
+      const res = await request(server, 'GET', asset, null, { 'X-API-Key': undefined });
+      assert.equal(res.status, 200, `expected ${asset} to be servable with no API key, got ${res.status}`);
+    }
+  } finally {
+    server.close();
+  }
+});
+
+test('the dashboard shell (GET /) is servable with no API key, but the API routes it calls still require one (regression)', async () => {
+  const { server } = await freshServer();
+  try {
+    const shell = await request(server, 'GET', '/', null, { 'X-API-Key': undefined });
+    assert.equal(shell.status, 200);
+    assert.match(shell.body, /sentinelpay-api-key/, 'expected the API key to be injected into the served HTML');
+
+    const unauthedApi = await request(server, 'GET', '/transactions', null, { 'X-API-Key': undefined });
+    assert.equal(unauthedApi.status, 401, 'the actual API routes must still require a key even though the shell page does not');
+  } finally {
+    server.close();
+  }
+});
+
+// ---- Rate-limit regression: the limiter actually rejects over-cap traffic over real HTTP, and
+// covers the dashboard-serving routes too, not just the API router it was originally scoped to ----
+
+test('rate limiting rejects with 429 once a single IP exceeds the cap, over a real HTTP connection (regression)', async () => {
+  const originalLimit = process.env.RATE_LIMIT_MAX_PER_MINUTE;
+  process.env.RATE_LIMIT_MAX_PER_MINUTE = '5'; // small on purpose so this test runs fast
+  try {
+    const { server } = await freshServer();
+    try {
+      const results = [];
+      for (let i = 0; i < 7; i += 1) {
+        results.push(await request(server, 'GET', '/transactions'));
+      }
+      const statuses = results.map((r) => r.status);
+      assert.ok(statuses.slice(0, 5).every((s) => s === 200), `expected the first 5 requests to succeed, got ${statuses}`);
+      assert.ok(statuses.slice(5).every((s) => s === 429), `expected requests past the cap to be rejected, got ${statuses}`);
+    } finally {
+      server.close();
+    }
+  } finally {
+    if (originalLimit === undefined) delete process.env.RATE_LIMIT_MAX_PER_MINUTE;
+    else process.env.RATE_LIMIT_MAX_PER_MINUTE = originalLimit;
+  }
+});
+
+test('rate limiting also covers the dashboard-serving routes (GET /), not just the API router (regression)', async () => {
+  // Regression: rate limiting was originally scoped only to `transactionsRouter`, leaving GET /
+  // and GET /index.html (which does real per-request work — reading and templating the dashboard
+  // HTML) completely unthrottled.
+  const originalLimit = process.env.RATE_LIMIT_MAX_PER_MINUTE;
+  process.env.RATE_LIMIT_MAX_PER_MINUTE = '3';
+  try {
+    const { server } = await freshServer();
+    try {
+      const results = [];
+      for (let i = 0; i < 5; i += 1) {
+        results.push(await request(server, 'GET', '/', null, { 'X-API-Key': undefined }));
+      }
+      const statuses = results.map((r) => r.status);
+      assert.ok(statuses.slice(0, 3).every((s) => s === 200), `expected the first 3 requests to succeed, got ${statuses}`);
+      assert.ok(statuses.slice(3).every((s) => s === 429), `expected requests past the cap to be rejected, got ${statuses}`);
+    } finally {
+      server.close();
+    }
+  } finally {
+    if (originalLimit === undefined) delete process.env.RATE_LIMIT_MAX_PER_MINUTE;
+    else process.env.RATE_LIMIT_MAX_PER_MINUTE = originalLimit;
+  }
+});
+
+test('GET /health stays exempt from rate limiting even after the cap is exceeded elsewhere (regression)', async () => {
+  const originalLimit = process.env.RATE_LIMIT_MAX_PER_MINUTE;
+  process.env.RATE_LIMIT_MAX_PER_MINUTE = '2';
+  try {
+    const { server } = await freshServer();
+    try {
+      for (let i = 0; i < 4; i += 1) {
+        await request(server, 'GET', '/transactions'); // exhaust the (shared, per-IP) budget
+      }
+      const health = await request(server, 'GET', '/health', null, { 'X-API-Key': undefined });
+      assert.equal(health.status, 200, '/health must stay reachable regardless of rate-limit state elsewhere');
+    } finally {
+      server.close();
+    }
+  } finally {
+    if (originalLimit === undefined) delete process.env.RATE_LIMIT_MAX_PER_MINUTE;
+    else process.env.RATE_LIMIT_MAX_PER_MINUTE = originalLimit;
+  }
+});
+
+// ---- Validation regression: amount now has a sane upper bound ----
+
+test('POST /transaction: rejects an amount above the sanity cap', async () => {
+  const { server } = await freshServer();
+  try {
+    const res = await request(server, 'POST', '/transaction', validTransaction({ amount: 1e300 }));
+    assert.equal(res.status, 400);
+    assert.match(res.body.error, /amount/);
   } finally {
     server.close();
   }

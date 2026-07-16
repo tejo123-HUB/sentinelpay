@@ -1,7 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { validateTransactionInput } = require('../server/validate');
+const { validateTransactionInput, MAX_AMOUNT } = require('../server/validate');
 
 function baseInput(overrides = {}) {
   return {
@@ -56,6 +56,19 @@ test('validateTransactionInput: rejects sender_id equal to receiver_id', () => {
 test('validateTransactionInput: rejects a non-positive amount', () => {
   const result = validateTransactionInput(baseInput({ amount: 0 }));
   assert.equal(result.valid, false);
+});
+
+test('validateTransactionInput: rejects an amount above the sanity cap (regression)', () => {
+  // Previously only checked amount > 0 and finite, so a pathological value like 1e300 passed
+  // straight through into avg_transaction_amount and every dashboard total with no sanity check.
+  const result = validateTransactionInput(baseInput({ amount: MAX_AMOUNT + 1 }));
+  assert.equal(result.valid, false);
+  assert.match(result.error, /amount/);
+});
+
+test('validateTransactionInput: accepts an amount exactly at the sanity cap', () => {
+  const result = validateTransactionInput(baseInput({ amount: MAX_AMOUNT }));
+  assert.equal(result.valid, true);
 });
 
 test('validateTransactionInput: rejects an invalid transaction_type', () => {

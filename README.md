@@ -31,6 +31,16 @@ tabs: **Live Monitor** (real-time transaction table + structuring alerts), **Map
 of transaction origins, color-coded by decision), and **Audit Trail** (a trend chart plus a
 filterable history of flagged transactions).
 
+**Authentication:** every API route except `GET /health` requires an `X-API-Key` header (the
+dashboard handles this for you automatically). For pure localhost demo use you don't need to set
+anything — the server, the dashboard, and the simulator/benchmark scripts all fall back to the
+same published development-only key with a loud startup warning, **and the server only binds to
+127.0.0.1 while that default key is in use** — it won't be reachable from other devices on your
+network until you set a real `API_KEY`. If you're calling the API directly (`curl`, Postman, etc.)
+or running this anywhere beyond localhost, copy `.env.example` to `.env`, set a real `API_KEY`,
+and optionally `HOST=0.0.0.0` to listen on all interfaces — see `.env.example` for how to generate
+a key, and `architecture.md` Sections 15.6–15.7 for the full reasoning.
+
 To retrain the ML model (optional — a trained model is already included):
 
 ```bash
@@ -77,12 +87,15 @@ around the scoring logic itself, which runs completely unmodified.
 npm test
 ```
 
-63 tests across the rule engine, structuring engine (including an end-to-end DB integration
+84 tests across the rule engine, structuring engine (including an end-to-end DB integration
 test replicating the Task 6 Definition of Done), scoring/decision layer, ML client, the
-ingestion API, input validation, WebSocket error resilience, and a dashboard script-load-order
-regression guard. See `architecture.md` Section 15.2 for a detailed log of bugs a deep review
-pass found and fixed (including a real security issue), each with a regression test that was
-verified to fail without the fix and pass with it.
+ingestion API, input validation, API key auth (including that static dashboard assets stay
+reachable with no key), rate limiting (HTTP and WebSocket), WebSocket error resilience, and a
+dashboard script-load-order regression guard. See `architecture.md` Sections 15.1–15.7 for a
+detailed log of bugs found and fixed across six review passes (including several real security
+issues and one — the dashboard being entirely unstyled and inert — that only showed up by
+actually opening it in a browser), each with a regression test that was verified to fail without
+the fix and pass with it.
 
 ## Measuring latency / false-positive behavior
 

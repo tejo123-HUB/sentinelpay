@@ -3,6 +3,18 @@
 const MIN_HISTORY_FOR_ACTIVE_HOURS = 5; // don't lock in a typical-hours baseline until this many transactions exist
 const RECENT_TRANSACTIONS_LOOKBACK_MS = 24 * 60 * 60 * 1000; // window fetched for rule/ML feature computation
 const RECENT_TRANSACTIONS_LIMIT = 200; // bound on rows fetched per request, keeps the synchronous path fast
+// Found during a full-project security/correctness review: computeTypicalActiveHoursRange used
+// to scan a sender's *entire* lifetime transaction history with no LIMIT, on every single
+// transaction once they passed MIN_HISTORY_FOR_ACTIVE_HOURS — an O(n) query per request growing
+// without bound as a power user's transaction count grew, directly at odds with this system's
+// real-time latency claims. Worse, the range was min/max over all-time history, so it could only
+// ever widen, never narrow: one early off-hour transaction (even a genuine one-off) permanently
+// "unlocked" that hour from ever tripping oddHour.js again for that account — a patient attacker
+// could deliberately transact once at their intended fraud hour early in an account's life
+// specifically to neutralize that signal. Bounding to a rolling window fixes both: the query cost
+// is capped regardless of lifetime volume, and an old outlier hour eventually ages back out.
+const ACTIVE_HOURS_LOOKBACK_MS = 30 * 24 * 60 * 60 * 1000; // only the last 30 days count toward "typical"
+const ACTIVE_HOURS_SAMPLE_LIMIT = 1000; // hard cap on rows scanned even within that window
 
 function mapTransactionRow(row) {
   return {
@@ -82,11 +94,15 @@ function getUserHistory(db, senderId, nowMs) {
   return { user, transactionCount, recentTransactions, knownDeviceIds };
 }
 
-// Contiguous [minHour, maxHour+1) range covering every hour the sender has ever transacted in.
+// Contiguous [minHour, maxHour+1) range covering every hour the sender has transacted in within
+// the last ACTIVE_HOURS_LOOKBACK_MS (not all-time history — see the comment on that constant).
 // Simplification: doesn't handle an overnight-wrapping active window (e.g. 22:00-04:00) — an
 // acceptable trade-off for the hackathon's scope, noted here rather than silently assumed.
-function computeTypicalActiveHoursRange(db, senderId) {
-  const rows = db.prepare('SELECT timestamp FROM transactions WHERE sender_id = ?').all(senderId);
+function computeTypicalActiveHoursRange(db, senderId, nowMs) {
+  const sinceIso = new Date(nowMs - ACTIVE_HOURS_LOOKBACK_MS).toISOString();
+  const rows = db
+    .prepare('SELECT timestamp FROM transactions WHERE sender_id = ? AND timestamp >= ? ORDER BY timestamp DESC LIMIT ?')
+    .all(senderId, sinceIso, ACTIVE_HOURS_SAMPLE_LIMIT);
   if (rows.length === 0) return null;
   const hours = rows.map((r) => new Date(r.timestamp).getUTCHours());
   return [[Math.min(...hours), Math.max(...hours) + 1]];
@@ -100,7 +116,7 @@ function computeTypicalActiveHoursRange(db, senderId) {
  *
  * @param {import('node:sqlite').DatabaseSync} db
  * @param {string} senderId
- * @param {{ amount: number, location: {lat,lng}|null }} transaction
+ * @param {{ amount: number, location: {lat,lng}|null, timestamp: string }} transaction
  */
 function updateUserAfterTransaction(db, senderId, transaction) {
   // Concurrency note: under the default ML_SERVING_MODE=local, getFraudProbability resolves
@@ -125,7 +141,8 @@ function updateUserAfterTransaction(db, senderId, transaction) {
 
   let typicalActiveHoursJson = existing.typical_active_hours;
   if (currentCount >= MIN_HISTORY_FOR_ACTIVE_HOURS) {
-    typicalActiveHoursJson = JSON.stringify(computeTypicalActiveHoursRange(db, senderId));
+    const nowMs = new Date(transaction.timestamp).getTime();
+    typicalActiveHoursJson = JSON.stringify(computeTypicalActiveHoursRange(db, senderId, nowMs));
   }
 
   let homeLat = existing.home_location_lat;
@@ -148,5 +165,7 @@ module.exports = {
   getUserHistory,
   updateUserAfterTransaction,
   mapTransactionRow,
+  computeTypicalActiveHoursRange,
   MIN_HISTORY_FOR_ACTIVE_HOURS,
+  ACTIVE_HOURS_LOOKBACK_MS,
 };
