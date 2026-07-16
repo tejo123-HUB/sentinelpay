@@ -2,13 +2,27 @@
 // clients, per the WebSocket /ws contract in architecture.md Section 7.
 const { WebSocketServer } = require('ws');
 const { timingSafeStringEqual, API_KEY } = require('./middleware/apiKeyAuth');
+const rateLimit = require('./middleware/rateLimit');
 
 // Same auth requirement as the HTTP API (server/middleware/apiKeyAuth.js): a live transaction
 // feed is at least as sensitive as the REST endpoints it mirrors, so it needs the same gate. The
 // browser WebSocket API has no way to set a custom header on the handshake request, so the key
 // travels as a query param instead (?apiKey=...) — checked here via `verifyClient`, before the
 // upgrade completes, so an unauthenticated caller never gets a connected socket at all.
+//
+// Rate-limited too, and checked first: this handshake runs entirely outside Express's middleware
+// chain (the `ws` library intercepts the HTTP upgrade before any app.use() middleware ever sees
+// it), so server/index.js's `rateLimit` middleware never applied here — a gap found on review of
+// the original fix, since a flood of handshake attempts (auth failures or not) was otherwise
+// completely unthrottled. Shares the same per-IP counter as the HTTP API (rateLimit.checkAndRecord)
+// rather than its own independent budget, so splitting a flood across HTTP and WS doesn't
+// effectively double an attacker's allowance.
 function verifyClient(info, callback) {
+  const ip = info.req.socket && info.req.socket.remoteAddress;
+  if (!rateLimit.checkAndRecord(ip)) {
+    return callback(false, 429, 'Too Many Requests');
+  }
+
   const url = new URL(info.req.url, 'http://localhost');
   const provided = url.searchParams.get('apiKey');
   if (!provided || !timingSafeStringEqual(provided, API_KEY)) {

@@ -7,7 +7,12 @@ process.env.PORT = '0';
 process.env.API_KEY = 'test-key-for-automated-tests';
 
 function freshServer() {
+  // Also clear rateLimit.js's (and websocket.js's, which captures a reference to it) cache —
+  // rateLimit.js reads RATE_LIMIT_MAX_PER_MINUTE once at module-load time into a module-level
+  // constant, so a stale cached instance would silently ignore an env var change between tests.
   delete require.cache[require.resolve('../server/index')];
+  delete require.cache[require.resolve('../server/middleware/rateLimit')];
+  delete require.cache[require.resolve('../server/websocket')];
   const { app, server } = require('../server/index');
   return new Promise((resolve) => {
     if (server.listening) return resolve({ app, server });
@@ -18,6 +23,15 @@ function freshServer() {
 function httpGet(port, path) {
   return new Promise((resolve, reject) => {
     http.get({ host: '127.0.0.1', port, path }, (res) => {
+      res.resume();
+      res.on('end', () => resolve(res.statusCode));
+    }).on('error', reject);
+  });
+}
+
+function httpGetWithHeaders(port, path, headers) {
+  return new Promise((resolve, reject) => {
+    http.get({ host: '127.0.0.1', port, path, headers }, (res) => {
       res.resume();
       res.on('end', () => resolve(res.statusCode));
     }).on('error', reject);
@@ -88,6 +102,43 @@ test('websocket: an unhandled per-client error event does not crash the server (
     ws.close();
   } finally {
     server.close();
+  }
+});
+
+test('websocket: the handshake is rate-limited, sharing the same per-IP budget as the HTTP API (regression)', async () => {
+  // Regression: the WS upgrade path runs entirely outside Express's middleware chain (the `ws`
+  // library intercepts the HTTP upgrade before any app.use() middleware ever sees it), so
+  // server/index.js's rate-limit middleware never applied to it at all — a flood of handshake
+  // attempts was completely unthrottled even after rate limiting was added everywhere else.
+  const WsClient = require('ws');
+  const originalLimit = process.env.RATE_LIMIT_MAX_PER_MINUTE;
+  process.env.RATE_LIMIT_MAX_PER_MINUTE = '3';
+  try {
+    const { server } = await freshServer();
+    const port = server.address().port;
+    try {
+      // Exhaust the shared per-IP budget via plain HTTP first, to confirm the WS path is reading
+      // from the *same* counter (server/middleware/rateLimit.js's checkAndRecord), not an
+      // independent one an attacker could bypass by splitting a flood across HTTP and WS.
+      for (let i = 0; i < 3; i += 1) {
+        const status = await httpGetWithHeaders(port, '/transactions', { 'X-API-Key': process.env.API_KEY });
+        assert.equal(status, 200);
+      }
+
+      const rejection = await new Promise((resolve, reject) => {
+        const client = new WsClient(`ws://127.0.0.1:${port}/ws?apiKey=${encodeURIComponent(process.env.API_KEY)}`);
+        client.on('unexpected-response', (req, res) => resolve({ statusCode: res.statusCode }));
+        client.on('open', () => reject(new Error('expected the handshake to be rejected once the budget was exhausted')));
+        client.on('error', () => {}); // an 'unexpected-response'-triggered close also emits 'error'; already handled above
+      });
+
+      assert.equal(rejection.statusCode, 429);
+    } finally {
+      server.close();
+    }
+  } finally {
+    if (originalLimit === undefined) delete process.env.RATE_LIMIT_MAX_PER_MINUTE;
+    else process.env.RATE_LIMIT_MAX_PER_MINUTE = originalLimit;
   }
 });
 
