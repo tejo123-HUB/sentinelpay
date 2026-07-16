@@ -157,9 +157,14 @@ router.get('/transactions', (req, res) => {
   const db = req.app.locals.db;
   const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || DEFAULT_LIST_LIMIT, 1), MAX_LIST_LIMIT);
 
+  // Express parses a repeated query param (?decision=a&decision=b) as an array, not a string —
+  // without normalizing that case here too, it silently fell through the `typeof === 'string'`
+  // check below and returned every transaction unfiltered instead of filtering or erroring.
+  const rawDecisionParam = Array.isArray(req.query.decision) ? req.query.decision.join(',') : req.query.decision;
+
   let decisionFilter = null;
-  if (typeof req.query.decision === 'string' && req.query.decision.trim() !== '') {
-    const requested = req.query.decision.split(',').map((d) => d.trim());
+  if (typeof rawDecisionParam === 'string' && rawDecisionParam.trim() !== '') {
+    const requested = rawDecisionParam.split(',').map((d) => d.trim());
     const valid = requested.filter((d) => VALID_DECISIONS.includes(d));
     if (valid.length === 0) {
       return res.status(400).json({ error: `decision must be one or more of: ${VALID_DECISIONS.join(', ')}` });

@@ -565,6 +565,16 @@ Root cause: this document's own Section 7 documented too minimal a WS contract, 
 
 `npm test`: 64 tests passing (up from 63).
 
+### 15.4 Fourth pass: systematic feature-by-feature live verification, one more real fix
+
+A "deeply check everything is working and every feature properly" request prompted a full, systematic live walkthrough of every feature in Section 4 (not another code-review agent — direct API/WebSocket testing plus code tracing), one at a time: ingestion validation, each of the 5 rule detectors individually, all 3 decision tiers, the dashboard's static files and DOM-ID wiring, the structuring engine end-to-end, the ML classifier (both modes), the map's data dependencies, and the audit trail's endpoints including boundary/edge cases (`hours=0`, negative values, oversized ranges — all clamp correctly, no crashes).
+
+**Found and fixed:** `GET /transactions?decision=` only handled `req.query.decision` as a string. Express parses a *repeated* query param (`?decision=block&decision=allow`) as an array instead, so `typeof === 'string'` silently failed and the endpoint returned every transaction unfiltered rather than filtering on both values or rejecting the request. This was flagged as a known minor gap during the PR #1 review (Section 15's merge) but not fixed until now. Fixed by normalizing an array into a comma-joined string before the existing parsing logic. Verified live (reproduced the unfiltered-results bug with a real repeated-param request) and with a new regression test in `tests/api.test.js` — confirmed to fail against the pre-fix code (using a step_up transaction excluded from the filter, since testing with only allow/block values wouldn't actually distinguish filtered from unfiltered).
+
+**Noted, not a bug:** the odd-hour rule (`oddHour.js`) cannot be demonstrated live via a quick manual test anymore, now that the client-supplied `timestamp` is always overridden with server-received time (Section 15.2, finding #1). A live demo can't fake "this user has a week of daytime history, now it's 3am" within a few seconds of wall-clock time — which is exactly the intended effect of that security fix, not a regression. The rule itself remains correctly implemented and unit-tested (`tests/rules.test.js`); in real usage, where a user's history genuinely accumulates over real time, it works as designed. Worth knowing before a demo: don't script a live odd-hour trigger — it isn't fakeable by design anymore, and that's the point.
+
+`npm test`: 65 tests passing (up from 64). Full live demo (`--scenario=all`) and the entire verification session produced zero server-side errors, warnings, or unhandled exceptions (checked directly against the server log, not just "tests passed").
+
 ---
 
 *Document prepared for Digital Campus 2.0 on Google Cloud — Hack Sprint (24 July 2026). This is the team's single source of truth — keep it up to date as the project evolves.*

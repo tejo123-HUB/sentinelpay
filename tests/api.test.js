@@ -128,6 +128,34 @@ test('GET /transactions?decision= filters correctly and rejects an invalid value
   }
 });
 
+test('GET /transactions?decision= handles a repeated query param, not just a single value (regression)', async () => {
+  // Regression test: Express parses ?decision=block&decision=allow as an array, not a string.
+  // Without normalizing that, the `typeof === 'string'` check silently failed and returned
+  // every transaction unfiltered, instead of filtering by both values or rejecting the request.
+  // Uses a step_up transaction (excluded from the filter below) so an unfiltered response is
+  // actually distinguishable from a correctly-filtered one — asserting only "every result is
+  // block or allow" would pass even on the buggy code if allow happened to be the only decision
+  // present, since allow is itself one of the filtered-for values.
+  const { server } = await freshServer();
+  try {
+    // Same 6-transaction-in-60s burst used elsewhere in this file to reliably trip velocity
+    // and land the last one in step_up.
+    for (let i = 0; i < 6; i += 1) {
+      await request(server, 'POST', '/transaction', validTransaction({ sender_id: 'u_repeat_filter' }));
+    }
+
+    const res = await request(server, 'GET', '/transactions?decision=block&decision=allow');
+    assert.equal(res.status, 200);
+    assert.ok(res.body.length > 0, 'expected at least the allow-decision transactions to be present');
+    assert.ok(
+      res.body.every((t) => t.decision !== 'step_up'),
+      'the step_up transaction must be excluded by the decision=block&decision=allow filter'
+    );
+  } finally {
+    server.close();
+  }
+});
+
 test('GET /audit/summary buckets transactions by time and decision', async () => {
   const { server } = await freshServer();
   try {
