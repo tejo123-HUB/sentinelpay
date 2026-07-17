@@ -24,8 +24,16 @@ function computeMuleScore(db, accountId, nowMs) {
   for (const receipt of receipts) {
     if (!(receipt.amount > 0)) continue;
     const windowEnd = new Date(new Date(receipt.timestamp).getTime() + MULE_DETECTION.MULE_WINDOW_MS).toISOString();
+    // ">=" not ">" on the lower bound: timestamps are server-assigned at millisecond
+    // resolution, so a receipt immediately followed by an outflow (the exact pattern this
+    // function exists to catch) can legitimately land on the same millisecond -- a strict ">"
+    // would silently exclude that outflow from the ratio. A row can never match both sides of
+    // this comparison (validate.js enforces sender_id != receiver_id), so there's no risk of the
+    // receipt counting as its own outflow. Same fix as the same-millisecond race already found
+    // and fixed in outboundContext.js (Section 15.13, finding #3) and getOutboundContext's
+    // merchant-login-takeover query (Section 15.16).
     const outflow = db
-      .prepare('SELECT COALESCE(SUM(amount), 0) AS total FROM transactions WHERE sender_id = ? AND timestamp > ? AND timestamp <= ?')
+      .prepare('SELECT COALESCE(SUM(amount), 0) AS total FROM transactions WHERE sender_id = ? AND timestamp >= ? AND timestamp <= ?')
       .get(accountId, receipt.timestamp, windowEnd);
     if (outflow.total / receipt.amount >= MULE_DETECTION.MULE_WITHDRAWAL_RATIO) {
       qualifyingCycles += 1;

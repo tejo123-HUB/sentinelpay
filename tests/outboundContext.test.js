@@ -254,6 +254,25 @@ test('computeMuleScore: a receiver with no withdrawal-back-out history is not a 
   assert.equal(score.qualifyingCycles, 0);
 });
 
+test('computeMuleScore: still correctly counts an outflow that shares the exact same millisecond as its receipt (regression)', () => {
+  // A fast automated drain (or, as found live, a fast local test run) can produce a receipt and
+  // its immediate outflow at the exact same millisecond -- a strict "timestamp > receipt" bound
+  // would silently exclude that outflow from the ratio, undercounting a genuine mule pattern.
+  const { computeMuleScore } = require('../server/muleScore');
+  const db = buildTestDb();
+  const tiedTimestamp = new Date(NOW_MS - 5 * 60 * 1000).toISOString();
+  insertTransaction(db, { senderId: 'm_biz', receiverId: 'u_fast_mule', amount: 1000, transactionId: 't_receipt', msAgo: 0 });
+  // Overwrite the timestamp directly to force an exact tie -- insertTransaction's own msAgo
+  // parameter can't express "the same millisecond as another row" cleanly.
+  db.prepare('UPDATE transactions SET timestamp = ? WHERE transaction_id = ?').run(tiedTimestamp, 't_receipt');
+  insertTransaction(db, { senderId: 'u_fast_mule', receiverId: 'u_downstream', amount: 950, transactionId: 't_outflow', msAgo: 0 });
+  db.prepare('UPDATE transactions SET timestamp = ? WHERE transaction_id = ?').run(tiedTimestamp, 't_outflow');
+
+  const score = computeMuleScore(db, 'u_fast_mule', NOW_MS);
+
+  assert.equal(score.qualifyingCycles, 1, 'the same-millisecond outflow should still count toward the ratio');
+});
+
 // ---- getOutboundContext: Section 15.16 Features 4/8/10/11 ----
 
 function insertMerchantLogin(db, { merchantId, deviceId, country = null, msAgo }) {

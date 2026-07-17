@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS transactions (
   employee_id TEXT, -- internal staff member who initiated a merchant-side transaction (Section 15.16, Feature 10); optional
   country TEXT, -- ISO country code, for geo-risk scoring (Section 15.16, Feature 14); optional
   ip_address TEXT, -- for geo-risk IP-range scoring (Section 15.16, Feature 14); optional
+  latency_ms REAL, -- scoring-pipeline processing time for this request (Section 15.16, Feature 18 analytics); not a scoring input
   FOREIGN KEY (sender_id) REFERENCES users(user_id),
   FOREIGN KEY (receiver_id) REFERENCES users(user_id)
 );

@@ -98,6 +98,7 @@ const MAX_BUCKET_MINUTES = 24 * 60; // one bucket per day, at most
 // which terminates by default on unhandled rejections) instead of reaching the error-handling
 // middleware in index.js.
 router.post('/transaction', requireApiKey, async (req, res, next) => {
+  const requestStartMs = process.hrtime.bigint(); // Feature 18 analytics: average response latency -- not a scoring input, measured purely for observability
   try {
     const db = req.app.locals.db;
 
@@ -170,11 +171,12 @@ router.post('/transaction', requireApiKey, async (req, res, next) => {
     const decision = decide(score);
 
     const transactionId = `t_${crypto.randomUUID()}`;
+    const latencyMs = Number(process.hrtime.bigint() - requestStartMs) / 1e6;
 
     db.prepare(
       `INSERT INTO transactions
-        (transaction_id, sender_id, receiver_id, amount, timestamp, location_lat, location_lng, device_id, merchant_id, purpose, transaction_type, fraud_score, decision, reference_transaction_id, employee_id, country, ip_address)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        (transaction_id, sender_id, receiver_id, amount, timestamp, location_lat, location_lng, device_id, merchant_id, purpose, transaction_type, fraud_score, decision, reference_transaction_id, employee_id, country, ip_address, latency_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       transactionId,
       input.sender_id,
@@ -192,7 +194,8 @@ router.post('/transaction', requireApiKey, async (req, res, next) => {
       input.reference_transaction_id,
       input.employee_id,
       input.country,
-      input.ip_address
+      input.ip_address,
+      latencyMs
     );
 
     const flagInsert = db.prepare(
