@@ -33,6 +33,7 @@ const investigationNotesRouter = require('./routes/investigationNotes');
 const adminAuditLogRouter = require('./routes/adminAuditLog');
 const casesRouter = require('./routes/cases');
 const notificationsRouter = require('./routes/notifications');
+const customRulesRouter = require('./routes/customRules');
 const { attachWebSocketServer } = require('./websocket');
 const { startStructuringJob } = require('./structuring/backgroundJob');
 const { API_KEY, USING_DEFAULT_API_KEY } = require('./middleware/apiKeyAuth');
@@ -115,6 +116,7 @@ app.use('/', investigationNotesRouter);
 app.use('/', adminAuditLogRouter);
 app.use('/', casesRouter);
 app.use('/', notificationsRouter);
+app.use('/', customRulesRouter);
 app.use(express.static(dashboardDir));
 
 // Malformed JSON body -> 400 with a clear message, instead of falling through to the

@@ -27,6 +27,7 @@ const getOutboundContext = require('../outboundContext');
 const applyOutboundRestrictors = require('../outboundRestrictor');
 const { checkFraudLists } = require('../fraudLists');
 const { dispatchCriticalAlert } = require('../notifications');
+const { evaluateCustomRules } = require('../customRules');
 
 const velocity = require('../rules/velocity');
 const impossibleTravel = require('../rules/impossibleTravel');
@@ -160,9 +161,16 @@ router.post('/transaction', requireApiKey, requireRole('analyst'), async (req, r
       const userHistory = getUserHistory(db, input.sender_id, nowMs);
       const outboundContext = getOutboundContext(db, input, nowMs);
 
+      // Section 16, Category 19: custom rules are DB rows, not files, so they're fetched fresh
+      // per request (not statically imported like RULE_DETECTORS/OUTBOUND_RULE_DETECTORS) --
+      // this is what makes them editable via the API without a redeploy. Only enabled rules are
+      // evaluated; a disabled one is kept (not deleted) so it can be re-enabled later.
+      const enabledCustomRules = db.prepare('SELECT * FROM custom_rules WHERE enabled = 1').all();
+
       ruleResults = [
         ...RULE_DETECTORS.map(({ type, check }) => ({ type, ...check(input, userHistory) })),
         ...OUTBOUND_RULE_DETECTORS.map(({ type, check }) => ({ type, ...check(input, outboundContext) })),
+        ...evaluateCustomRules(input, enabledCustomRules),
       ];
       mlProbability = await getFraudProbability(input, userHistory);
     }

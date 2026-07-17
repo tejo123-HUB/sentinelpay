@@ -188,6 +188,24 @@ CREATE TABLE IF NOT EXISTS case_transactions (
 
 CREATE INDEX IF NOT EXISTS idx_case_transactions_transaction ON case_transactions(transaction_id);
 CREATE INDEX IF NOT EXISTS idx_cases_status ON cases(status);
+
+-- Section 16, Category 19: a real, working no-code rule engine -- new detection rules defined
+-- declaratively via the API, not by writing a new server/rules/*.js file and redeploying.
+-- Evaluated generically (server/customRules.js) against every outbound transaction alongside the
+-- 23 hardcoded detectors.
+CREATE TABLE IF NOT EXISTS custom_rules (
+  rule_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  field TEXT NOT NULL,
+  operator TEXT NOT NULL,
+  value TEXT NOT NULL,
+  weight REAL NOT NULL,
+  severity TEXT NOT NULL CHECK (severity IN ('Low', 'Medium', 'High', 'Critical')),
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_custom_rules_enabled ON custom_rules(enabled);
 `;
 
 function initDb(dbPath) {
