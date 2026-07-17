@@ -26,6 +26,7 @@ const { isBusinessAccount } = require('../businessAccounts');
 const getOutboundContext = require('../outboundContext');
 const applyOutboundRestrictors = require('../outboundRestrictor');
 const { checkFraudLists } = require('../fraudLists');
+const { dispatchCriticalAlert } = require('../notifications');
 
 const velocity = require('../rules/velocity');
 const impossibleTravel = require('../rules/impossibleTravel');
@@ -265,6 +266,17 @@ router.post('/transaction', requireApiKey, requireRole('analyst'), async (req, r
         country: input.country,
         ip_address: input.ip_address,
       });
+    }
+
+    // Section 16, Category 17: Critical Fraud Alerts, dispatched to every configured
+    // notification channel. Deliberately not awaited -- a slow/unreachable Slack/Twilio/SMTP
+    // endpoint must never add latency to the scoring decision itself (the same reasoning that
+    // keeps the structuring engine's heavy analysis off the synchronous per-transaction path).
+    // dispatchCriticalAlert never throws (every channel's own error is caught internally), but
+    // .catch is kept as a defensive backstop against an unexpected synchronous throw.
+    if (severity === 'Critical') {
+      const alertMessage = `[SentinelPay] Critical fraud alert: ${transactionId} (${input.sender_id} -> ${input.receiver_id}, ${input.amount}) blocked at score ${score}. ${reasons.join('; ')}`;
+      dispatchCriticalAlert(alertMessage).catch(() => {});
     }
 
     res.status(201).json(responseBody);
