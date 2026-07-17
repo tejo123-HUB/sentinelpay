@@ -30,6 +30,10 @@ CREATE TABLE IF NOT EXISTS transactions (
   transaction_type TEXT NOT NULL CHECK (transaction_type IN ('transfer', 'withdrawal', 'deposit')),
   fraud_score REAL,
   decision TEXT CHECK (decision IN ('allow', 'step_up', 'block')),
+  reference_transaction_id TEXT, -- links a refund to the purchase it refunds (Section 15.16, Feature 1/3/7); optional
+  employee_id TEXT, -- internal staff member who initiated a merchant-side transaction (Section 15.16, Feature 10); optional
+  country TEXT, -- ISO country code, for geo-risk scoring (Section 15.16, Feature 14); optional
+  ip_address TEXT, -- for geo-risk IP-range scoring (Section 15.16, Feature 14); optional
   FOREIGN KEY (sender_id) REFERENCES users(user_id),
   FOREIGN KEY (receiver_id) REFERENCES users(user_id)
 );
@@ -76,6 +80,37 @@ CREATE TABLE IF NOT EXISTS business_accounts (
   account_id TEXT PRIMARY KEY,
   created_at TEXT NOT NULL
 );
+
+-- Feature 4 (Section 15.16): merchant login metadata, so a takeover attempt (new device/location
+-- immediately followed by a refund/payout/settlement) can be detected. Independent of
+-- transactions -- a login event carries no amount/receiver, just who logged in, from where.
+CREATE TABLE IF NOT EXISTS merchant_login_events (
+  login_id TEXT PRIMARY KEY,
+  merchant_id TEXT NOT NULL,
+  device_id TEXT,
+  browser TEXT,
+  os TEXT,
+  ip_address TEXT,
+  location_lat REAL,
+  location_lng REAL,
+  timestamp TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_merchant_login_events_merchant ON merchant_login_events(merchant_id, timestamp);
+
+-- Feature 8 (Section 15.16): chargeback/dispute events, for friendly-fraud customer risk scoring.
+-- No FK to transactions -- a dispute can reference a transaction the disputing party doesn't
+-- control the lifecycle of, and a missing/unknown transaction_id shouldn't block ingestion.
+CREATE TABLE IF NOT EXISTS disputes (
+  dispute_id TEXT PRIMARY KEY,
+  transaction_id TEXT,
+  customer_id TEXT NOT NULL,
+  dispute_type TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_disputes_customer ON disputes(customer_id);
 `;
 
 function initDb(dbPath) {

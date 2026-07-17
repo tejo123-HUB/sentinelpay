@@ -139,8 +139,8 @@ router.post('/transaction', requireApiKey, async (req, res, next) => {
 
     db.prepare(
       `INSERT INTO transactions
-        (transaction_id, sender_id, receiver_id, amount, timestamp, location_lat, location_lng, device_id, merchant_id, purpose, transaction_type, fraud_score, decision)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        (transaction_id, sender_id, receiver_id, amount, timestamp, location_lat, location_lng, device_id, merchant_id, purpose, transaction_type, fraud_score, decision, reference_transaction_id, employee_id, country, ip_address)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       transactionId,
       input.sender_id,
@@ -154,7 +154,11 @@ router.post('/transaction', requireApiKey, async (req, res, next) => {
       input.purpose,
       input.transaction_type,
       score,
-      decision
+      decision,
+      input.reference_transaction_id,
+      input.employee_id,
+      input.country,
+      input.ip_address
     );
 
     const flagInsert = db.prepare(
@@ -193,6 +197,10 @@ router.post('/transaction', requireApiKey, async (req, res, next) => {
         merchant_id: input.merchant_id,
         purpose: input.purpose,
         transaction_type: input.transaction_type,
+        reference_transaction_id: input.reference_transaction_id,
+        employee_id: input.employee_id,
+        country: input.country,
+        ip_address: input.ip_address,
       });
     }
 
@@ -258,6 +266,10 @@ router.get('/transactions', requireApiKey, (req, res) => {
       transaction_type: row.transaction_type,
       fraud_score: row.fraud_score,
       decision: row.decision,
+      reference_transaction_id: row.reference_transaction_id,
+      employee_id: row.employee_id,
+      country: row.country,
+      ip_address: row.ip_address,
       reasons: reasonsByTransaction.get(row.transaction_id) || [],
     }))
   );

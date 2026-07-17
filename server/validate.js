@@ -7,6 +7,7 @@ const MAX_PURPOSE_LENGTH = 256; // freeform note text, longer than an id but sti
 // examples top out around ₹80,000 for a whole structuring burst) so it never interferes with
 // real traffic, single-transaction or structuring.
 const MAX_AMOUNT = 10_000_000;
+const MAX_COUNTRY_LENGTH = 8; // ISO 3166-1 alpha-2/alpha-3 codes fit comfortably; generous bound, not a strict enum
 
 /**
  * Validates and normalizes a POST /transaction request body.
@@ -17,7 +18,21 @@ function validateTransactionInput(body) {
     return { valid: false, error: 'Request body must be a JSON object' };
   }
 
-  const { sender_id, receiver_id, amount, timestamp, location, device_id, merchant_id, purpose, transaction_type } = body;
+  const {
+    sender_id,
+    receiver_id,
+    amount,
+    timestamp,
+    location,
+    device_id,
+    merchant_id,
+    purpose,
+    transaction_type,
+    reference_transaction_id,
+    employee_id,
+    country,
+    ip_address,
+  } = body;
 
   if (typeof sender_id !== 'string' || sender_id.trim() === '' || sender_id.length > MAX_ID_LENGTH) {
     return { valid: false, error: `sender_id is required and must be a non-empty string of at most ${MAX_ID_LENGTH} characters` };
@@ -71,6 +86,18 @@ function validateTransactionInput(body) {
   if (typeof purpose === 'string' && purpose.length > MAX_PURPOSE_LENGTH) {
     return { valid: false, error: `purpose must be at most ${MAX_PURPOSE_LENGTH} characters` };
   }
+  if (typeof reference_transaction_id === 'string' && reference_transaction_id.length > MAX_ID_LENGTH) {
+    return { valid: false, error: `reference_transaction_id must be at most ${MAX_ID_LENGTH} characters` };
+  }
+  if (typeof employee_id === 'string' && employee_id.length > MAX_ID_LENGTH) {
+    return { valid: false, error: `employee_id must be at most ${MAX_ID_LENGTH} characters` };
+  }
+  if (typeof country === 'string' && country.length > MAX_COUNTRY_LENGTH) {
+    return { valid: false, error: `country must be at most ${MAX_COUNTRY_LENGTH} characters` };
+  }
+  if (typeof ip_address === 'string' && ip_address.length > MAX_ID_LENGTH) {
+    return { valid: false, error: `ip_address must be at most ${MAX_ID_LENGTH} characters` };
+  }
 
   return {
     valid: true,
@@ -84,8 +111,12 @@ function validateTransactionInput(body) {
       merchant_id: typeof merchant_id === 'string' ? merchant_id : null,
       purpose: typeof purpose === 'string' ? purpose : null,
       transaction_type,
+      reference_transaction_id: typeof reference_transaction_id === 'string' ? reference_transaction_id : null,
+      employee_id: typeof employee_id === 'string' ? employee_id : null,
+      country: typeof country === 'string' ? country : null,
+      ip_address: typeof ip_address === 'string' ? ip_address : null,
     },
   };
 }
 
-module.exports = { validateTransactionInput, VALID_TRANSACTION_TYPES, MAX_AMOUNT, MAX_PURPOSE_LENGTH, MAX_ID_LENGTH };
+module.exports = { validateTransactionInput, VALID_TRANSACTION_TYPES, MAX_AMOUNT, MAX_PURPOSE_LENGTH, MAX_ID_LENGTH, MAX_COUNTRY_LENGTH };
