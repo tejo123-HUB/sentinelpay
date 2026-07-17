@@ -25,7 +25,7 @@ function amountAnomaly(transaction, userHistory) {
     };
   }
 
-  return { flagged: false, reason: null, weight: 0 };
+  return { flagged: false, reason: null, weight: 0, severity: null };
 }
 
 amountAnomaly.AMOUNT_ANOMALY_MULTIPLIER = AMOUNT_ANOMALY_MULTIPLIER;

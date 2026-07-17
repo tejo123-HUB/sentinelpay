@@ -23,7 +23,7 @@ function deviceMismatch(transaction, userHistory) {
     };
   }
 
-  return { flagged: false, reason: null, weight: 0 };
+  return { flagged: false, reason: null, weight: 0, severity: null };
 }
 
 deviceMismatch.DEVICE_MISMATCH_WEIGHT = DEVICE_MISMATCH_WEIGHT;

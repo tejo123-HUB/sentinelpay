@@ -33,10 +33,11 @@ function outboundRatioAnomaly(transaction, outboundContext) {
       flagged: true,
       reason: `Outbound total (${outboundTotal.toFixed(2)}) is ${ratio.toFixed(1)}x inbound revenue (${inboundTotal.toFixed(2)}) in the same window`,
       weight: OUTBOUND_RATIO_WEIGHT,
+      severity: 'Medium', // Section 15.16, Feature 17: severity backfilled for uniform explainability
     };
   }
 
-  return { flagged: false, reason: null, weight: 0 };
+  return { flagged: false, reason: null, weight: 0, severity: null };
 }
 
 outboundRatioAnomaly.OUTBOUND_RATIO_THRESHOLD = OUTBOUND_RATIO_THRESHOLD;

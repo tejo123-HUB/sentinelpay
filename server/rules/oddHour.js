@@ -26,7 +26,7 @@ function oddHour(transaction, userHistory) {
     };
   }
 
-  return { flagged: false, reason: null, weight: 0 };
+  return { flagged: false, reason: null, weight: 0, severity: null };
 }
 
 oddHour.ODD_HOUR_WEIGHT = ODD_HOUR_WEIGHT;

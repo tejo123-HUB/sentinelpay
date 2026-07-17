@@ -31,7 +31,7 @@ function payoutToNewReceiver(transaction, outboundContext) {
     };
   }
 
-  return { flagged: false, reason: null, weight: 0 };
+  return { flagged: false, reason: null, weight: 0, severity: null };
 }
 
 payoutToNewReceiver.PAYOUT_NEW_RECEIVER_WEIGHT = PAYOUT_NEW_RECEIVER_WEIGHT;

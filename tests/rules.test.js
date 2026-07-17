@@ -460,6 +460,10 @@ test('outboundRatioAnomaly: flags outbound total far exceeding inbound revenue',
 
   assert.equal(result.flagged, true);
   assert.match(result.reason, /x inbound revenue/);
+  // Regression: this branch's severity was silently dropped by an earlier replace_all edit
+  // that only matched one of the file's two "flagged: true" return statements (see the
+  // ratio-exceeds-threshold branch specifically, distinct from the zero-inbound branch below).
+  assert.equal(result.severity, 'Medium');
 });
 
 test('outboundRatioAnomaly: flags outbound with zero recorded inbound once there is prior outbound history', () => {
@@ -488,6 +492,7 @@ test('outboundRatioAnomaly: does not flag outbound comfortably within inbound re
   const result = outboundRatioAnomaly(transaction, context);
 
   assert.equal(result.flagged, false);
+  assert.equal(result.severity, null);
 });
 
 // ---- outboundFanOutBurst ----
@@ -808,4 +813,53 @@ test('sharedIdentifierRisk: does not flag when neither device nor IP is shared',
   const result = sharedIdentifierRisk({}, { sharedDeviceAccountIds: [], sharedIpAccountIds: [] });
 
   assert.equal(result.flagged, false);
+});
+
+// ---- Regression guard: every `return { flagged: ... }` in every rule file must include a
+// `severity` key. Added after a live-verification pass found 5 detectors (amountAnomaly,
+// deviceMismatch, oddHour, payoutToNewReceiver, outboundRatioAnomaly) where an earlier
+// `replace_all` severity-backfill edit had silently matched only some of a file's multiple
+// return statements (different indentation levels broke the exact-string match), leaving one
+// branch's `severity` undefined instead of a real value or explicit `null`. None of the
+// per-detector unit tests above caught it, because each only exercised the fixture path that
+// happened to hit an already-fixed branch. This is a source-shape check, not a behavioral one --
+// same category as tests/dashboard.test.js's `defer`-attribute check -- specifically so it
+// can't be defeated the same way a per-branch unit test can (by simply not testing that branch).
+const fs = require('node:fs');
+const path = require('node:path');
+
+test('every rule detector file: every return object literal includes a severity key', () => {
+  const rulesDir = path.join(__dirname, '..', 'server', 'rules');
+  const missing = [];
+
+  for (const file of fs.readdirSync(rulesDir)) {
+    if (!file.endsWith('.js')) continue;
+    const rawSource = fs.readFileSync(path.join(rulesDir, file), 'utf-8');
+    // Template-literal interpolations (`${multiple}x the average`) contain literal `{`/`}`
+    // characters that are NOT object-literal braces -- a naive `[^{}]*` match stops at the
+    // first one and silently produces a truncated, always-"passing" match. Verified this the
+    // hard way: an earlier version of this exact test kept passing even with `severity`
+    // deliberately deleted from a flagged branch, because the truncated match never reached far
+    // enough to see it was missing. None of these files nest a nested object/array *inside* an
+    // interpolation (verified by eye across all 23 files, and this is enforced structurally by
+    // Section 14's "flat {flagged, reason, weight, severity} literal" convention), so replacing
+    // every `${...}` span with a brace-free placeholder first is safe and makes plain `[^{}]*`
+    // bracket-matching correct again.
+    const source = rawSource.replace(/\$\{[^}]*\}/g, 'X');
+    const returnObjectPattern = /return\s*\{[^{}]*\}/gs;
+    let match;
+    while ((match = returnObjectPattern.exec(source)) !== null) {
+      // A real `severity:` key, not just the word "severity" appearing anywhere in the match
+      // (e.g. inside a comment) -- caught the hard way while verifying this very test: a first
+      // draft used a bare /severity/ check, which happily matched a `// severity removed for
+      // test` comment left behind by the deliberate-bug reproduction below, so the test kept
+      // passing with no real severity key present at all.
+      if (!/severity\s*:/.test(match[0])) {
+        const lineNumber = source.slice(0, match.index).split('\n').length;
+        missing.push(`${file}:${lineNumber}`);
+      }
+    }
+  }
+
+  assert.deepEqual(missing, [], `expected every return object to include severity, but these are missing it: ${missing.join(', ')}`);
 });

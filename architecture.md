@@ -1006,6 +1006,18 @@ Legend: ✅ built · 🔶 partially covered by something that already exists · 
 
 `npm test`: 254 passing (up from 220 before Section 16 started — new tests across every item above, all in dedicated per-concern test files following this project's existing convention).
 
+### Verification pass: a real bug found by actually checking, not re-reading the table above
+
+A follow-up "verify these features are actually there" request prompted a systematic audit against the running code — file-existence checks, wiring checks (grep-confirming every detector in `server/rules/` is actually imported and registered in `routes/transactions.js`, not just present as an orphaned file), and live `curl` calls against a running server for every new endpoint — rather than re-reading this table and trusting it. It found one real bug:
+
+**`outboundRatioAnomaly.js`'s primary branch (the `ratio > threshold` case — the more common path; the `zero inbound revenue` branch is the rarer one) was missing its `severity` field**, live-confirmed via `curl` (`"severity": null` in a response that should have said `"Medium"`). Root cause: Section 15.16's severity-backfill pass used a `replace_all` edit per file, but this file has *two* differently-indented `return { flagged: false, ... }` statements, and the edit's exact-string match only caught one of them. The same audit found four more instances of the identical mistake — `amountAnomaly.js`, `deviceMismatch.js`, `oddHour.js`, and `payoutToNewReceiver.js` each had one `return` statement (always the final fallback branch) left without a `severity` key. None of the existing per-detector unit tests caught any of these, because each test only exercised whichever branch happened to already be correct.
+
+**Fixed:** all 5 files, all 6 missing instances. **Also added:** a new systematic regression test (`tests/rules.test.js`, "every rule detector file: every return object literal includes a severity key") that scans every file in `server/rules/` for any `return { ... }` object literal lacking a real `severity:` key — a source-shape check (same category as `tests/dashboard.test.js`'s `defer`-attribute check) specifically because it can't be defeated the same way a per-branch behavioral test can, by simply never exercising the broken branch. This test was itself verified against a deliberately-reintroduced copy of the bug before being trusted — a first draft used a bare `/severity/` substring check, which turned out to also match the word "severity" appearing inside a comment (from the first, sloppier bug-reproduction attempt) with no real key present at all; tightened to `/severity\s*:/` and re-verified to fail on the bug and pass on the fix.
+
+Everything else audited came back clean: all 23 rule-detector files present and wired into the pipeline (confirmed via `type:` registration count, not just file existence); the circular-flow and mule-score engines confirmed actually invoked (`require` + call-site grep, not just present as files); every `/analytics/*` endpoint, all four dashboard tabs, `/investigation-notes`, and `/admin-audit-log` all confirmed returning correct live responses against a running server, not just passing in-process tests.
+
+`npm test`: 255 passing (up from 254 — the one new regression-guard test).
+
 ---
 
 *Document prepared for Digital Campus 2.0 on Google Cloud — Hack Sprint (24 July 2026). This is the team's single source of truth — keep it up to date as the project evolves.*
