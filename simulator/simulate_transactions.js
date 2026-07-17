@@ -14,6 +14,8 @@
 //   node simulator/simulate_transactions.js --scenario=odd-hour       (inbound, no longer blocks — see above)
 //   node simulator/simulate_transactions.js --scenario=outbound-fraud
 //   node simulator/simulate_transactions.js --scenario=refund-fraud
+//   node simulator/simulate_transactions.js --scenario=merchant-takeover
+//   node simulator/simulate_transactions.js --scenario=mule
 //   node simulator/simulate_transactions.js --scenario=all
 //   node simulator/simulate_transactions.js --scenario=normal --continuous   (Ctrl+C to stop)
 
@@ -140,6 +142,16 @@ async function postTransaction(baseUrl, transaction) {
 async function getAlerts(baseUrl, limit = 20) {
   const res = await fetch(`${baseUrl}/alerts?limit=${limit}`, { headers: { 'X-API-Key': API_KEY } });
   return res.json();
+}
+
+async function postMerchantLogin(baseUrl, login) {
+  const res = await fetch(`${baseUrl}/merchant-logins`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY },
+    body: JSON.stringify(login),
+  });
+  const body = await res.json().catch(() => null);
+  return { status: res.status, body };
 }
 
 // Fraud/AML rule+ML scoring only runs for transactions whose sender is a registered business
@@ -557,6 +569,89 @@ async function triggerRefundFraudScenario(baseUrl) {
   return result;
 }
 
+// Section 16, Category 22: demonstrates merchantAccountTakeover.js -- a login from a device/
+// country never seen on this business account before, immediately followed by a refund.
+async function triggerMerchantTakeoverScenario(baseUrl) {
+  const sender = randomMerchantAccount();
+  const gateway = randomGateway();
+  const victim = randomId('u_takeover_victim');
+
+  console.log(`[merchant-takeover] scripted account takeover on ${sender}: unrecognized device/country login, then an immediate refund`);
+
+  await postMerchantLogin(baseUrl, { merchant_id: sender, device_id: randomId('d_known'), country: 'IN' });
+  await sleep(200);
+  await postMerchantLogin(baseUrl, { merchant_id: sender, device_id: randomId('d_attacker'), country: 'RU' });
+  await sleep(200);
+
+  const result = await postTransaction(baseUrl, {
+    sender_id: sender,
+    receiver_id: victim,
+    amount: 6000,
+    timestamp: new Date().toISOString(),
+    merchant_id: gateway,
+    purpose: `Refund - order #${Math.floor(100000 + Math.random() * 900000)}`,
+    transaction_type: 'transfer',
+  });
+
+  console.log('[merchant-takeover] result:', result.body);
+  if (result.body && result.body.decision === 'block') {
+    console.log('[merchant-takeover] OK: unrecognized-device login followed by a refund was blocked as expected');
+  } else {
+    console.warn('[merchant-takeover] WARNING: expected a block decision, got:', result.body && result.body.decision);
+  }
+  return result;
+}
+
+// Section 16, Category 22: demonstrates muleReceiverRisk.js -- a receiver with a lifetime
+// receive-then-quickly-drain pattern, flagged when a business account pays them.
+async function triggerMuleScenario(baseUrl) {
+  const sender = randomMerchantAccount();
+  const gateway = randomGateway();
+  const muleAccount = randomId('u_mule');
+
+  console.log(`[mule] scripted mule pattern on ${muleAccount}: receives from outside accounts, quickly drains most of it, twice`);
+
+  for (let i = 0; i < 2; i += 1) {
+    const outsideSender = randomId('u_outside');
+    await postTransaction(baseUrl, {
+      sender_id: outsideSender,
+      receiver_id: muleAccount,
+      amount: 2000,
+      timestamp: new Date().toISOString(),
+      transaction_type: 'transfer',
+    });
+    await sleep(200);
+    await postTransaction(baseUrl, {
+      sender_id: muleAccount,
+      receiver_id: randomId('u_downstream'),
+      amount: 1800,
+      timestamp: new Date().toISOString(),
+      transaction_type: 'transfer',
+    });
+    await sleep(200);
+  }
+
+  // Now the business account pays this mule -- muleReceiverRisk.js should flag it.
+  const result = await postTransaction(baseUrl, {
+    sender_id: sender,
+    receiver_id: muleAccount,
+    amount: 500,
+    timestamp: new Date().toISOString(),
+    merchant_id: gateway,
+    purpose: `Vendor settlement #${Math.floor(1000 + Math.random() * 9000)}`,
+    transaction_type: 'transfer',
+  });
+
+  console.log('[mule] final payout to the mule account result:', result.body);
+  const flaggedMule = Boolean(result.body && result.body.reasons && result.body.reasons.some((r) => /Suspected Mule Account/.test(r)));
+  if (flaggedMule) {
+    console.log('[mule] OK: payout to a suspected mule account was correctly flagged');
+  } else {
+    console.warn('[mule] WARNING: expected a muleReceiverRisk flag, got:', result.body);
+  }
+  return result;
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   console.log(`SentinelPay simulator :: scenario=${args.scenario} baseUrl=${args.baseUrl}`);
@@ -575,6 +670,10 @@ async function main() {
     await triggerOutboundFraudScenario(args.baseUrl);
   } else if (args.scenario === 'refund-fraud') {
     await triggerRefundFraudScenario(args.baseUrl);
+  } else if (args.scenario === 'merchant-takeover') {
+    await triggerMerchantTakeoverScenario(args.baseUrl);
+  } else if (args.scenario === 'mule') {
+    await triggerMuleScenario(args.baseUrl);
   } else if (args.scenario === 'all') {
     await runNormalStream(args.baseUrl, 20, args.rate, false);
     await triggerFraudScenario(args.baseUrl);
@@ -582,9 +681,11 @@ async function main() {
     await triggerOddHourScenario(args.baseUrl);
     await triggerOutboundFraudScenario(args.baseUrl);
     await triggerRefundFraudScenario(args.baseUrl);
+    await triggerMerchantTakeoverScenario(args.baseUrl);
+    await triggerMuleScenario(args.baseUrl);
   } else {
     console.error(
-      `Unknown scenario "${args.scenario}". Use normal | fraud | structuring | odd-hour | outbound-fraud | refund-fraud | all.`
+      `Unknown scenario "${args.scenario}". Use normal | fraud | structuring | odd-hour | outbound-fraud | refund-fraud | merchant-takeover | mule | all.`
     );
     process.exitCode = 1;
   }
@@ -606,6 +707,9 @@ module.exports = {
   triggerOddHourScenario,
   triggerOutboundFraudScenario,
   triggerRefundFraudScenario,
+  triggerMerchantTakeoverScenario,
+  triggerMuleScenario,
+  postMerchantLogin,
   randomId,
   randomGateway,
   randomMerchantAccount,

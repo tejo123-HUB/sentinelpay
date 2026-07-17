@@ -51,7 +51,7 @@ const WATCHLIST_WEIGHT = 15; // added to the score when watchlisted, not a hard 
  * @param {{ active: boolean, alert: object|null }} structuringLookup
  * @param {number} mlProbability - 0-1
  * @param {{ blacklisted: boolean, whitelisted: boolean, watchlisted: boolean, blacklistEntries: object[], whitelistEntries: object[] }} [fraudListCheck]
- * @returns {{ score: number, reasons: string[], riskBreakdown: Array<{type: string, reason: string, weight: number, severity: string}>, severity: string }}
+ * @returns {{ score: number, reasons: string[], riskBreakdown: Array<{type: string, reason: string, weight: number, severity: string}>, severity: string, confidence: number }}
  */
 function computeFraudScore(ruleResults, structuringLookup, mlProbability, fraudListCheck) {
   const flaggedRules = (ruleResults || []).filter((r) => r.flagged);
@@ -118,7 +118,25 @@ function computeFraudScore(ruleResults, structuringLookup, mlProbability, fraudL
     'None'
   );
 
-  return { score: Math.round(score), reasons, riskBreakdown, severity };
+  // Section 16, Category 13: "confidence" measures how much independent corroboration backs
+  // this decision, distinct from `score` (which measures how *risky* the transaction looks). A
+  // single moderate rule flag with no ML/other-detector agreement is a real signal but a
+  // low-confidence one; a direct hit against a known record (blacklist, active structuring
+  // alert) is near-certain regardless of how many other detectors happened to also fire.
+  const isDirectRecordMatch = structuringActive || !!(fraudListCheck && fraudListCheck.blacklisted);
+  const mlAgrees = clampedProbability >= 0.5;
+  let confidence;
+  if (isDirectRecordMatch) {
+    confidence = 99; // a direct match against an already-confirmed record, not an inference
+  } else if (flaggedRules.length === 0) {
+    // Nothing rule-based fired -- confidence here is about how clean the ML signal itself is,
+    // not about corroboration (there's nothing to corroborate).
+    confidence = clampedProbability < 0.2 ? 85 : clampedProbability < 0.5 ? 55 : 40;
+  } else {
+    confidence = Math.min(97, 30 + flaggedRules.length * 18 + (hasCriticalRuleFlag ? 15 : 0) + (mlAgrees ? 10 : 0));
+  }
+
+  return { score: Math.round(score), reasons, riskBreakdown, severity, confidence: Math.round(confidence) };
 }
 
 const SEVERITY_RANK = { None: 0, Low: 1, Medium: 2, High: 3, Critical: 4 };

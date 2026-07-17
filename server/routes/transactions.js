@@ -164,7 +164,7 @@ router.post('/transaction', requireApiKey, async (req, res, next) => {
       mlProbability = await getFraudProbability(input, userHistory);
     }
 
-    let { score, reasons, riskBreakdown, severity } = computeFraudScore(ruleResults, structuringLookup, mlProbability, fraudListCheck);
+    let { score, reasons, riskBreakdown, severity, confidence } = computeFraudScore(ruleResults, structuringLookup, mlProbability, fraudListCheck);
     if (outbound) {
       const reasonCountBeforeRestrictor = reasons.length;
       ({ score, reasons } = applyOutboundRestrictors(score, reasons, input));
@@ -185,8 +185,8 @@ router.post('/transaction', requireApiKey, async (req, res, next) => {
 
     db.prepare(
       `INSERT INTO transactions
-        (transaction_id, sender_id, receiver_id, amount, timestamp, location_lat, location_lng, device_id, merchant_id, purpose, transaction_type, fraud_score, decision, reference_transaction_id, employee_id, country, ip_address, latency_ms)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        (transaction_id, sender_id, receiver_id, amount, timestamp, location_lat, location_lng, device_id, merchant_id, purpose, transaction_type, fraud_score, decision, reference_transaction_id, employee_id, country, ip_address, latency_ms, confidence)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       transactionId,
       input.sender_id,
@@ -205,7 +205,8 @@ router.post('/transaction', requireApiKey, async (req, res, next) => {
       input.employee_id,
       input.country,
       input.ip_address,
-      latencyMs
+      latencyMs,
+      confidence
     );
 
     const flagInsert = db.prepare(
@@ -221,12 +222,15 @@ router.post('/transaction', requireApiKey, async (req, res, next) => {
 
     // Section 15.16, Feature 17: every response includes fraud_score, decision, severity,
     // detector names + human-readable reasons (risk_breakdown), and the plain reasons array
-    // (kept for backward compatibility with existing callers/tests).
+    // (kept for backward compatibility with existing callers/tests). Section 16, Category 13:
+    // `confidence` (0-100) is a separate axis from `fraud_score` -- how much independent
+    // corroboration backs this decision, not how risky the transaction looks.
     const responseBody = {
       transaction_id: transactionId,
       fraud_score: score,
       decision,
       severity,
+      confidence,
       reasons,
       risk_breakdown: riskBreakdown,
     };
@@ -344,6 +348,7 @@ router.get('/transactions', requireApiKey, (req, res) => {
       reasons: reasonsByTransaction.get(row.transaction_id) || [],
       risk_breakdown: breakdownByTransaction.get(row.transaction_id) || [],
       severity: overallSeverity(breakdownByTransaction.get(row.transaction_id) || []),
+      confidence: row.confidence,
     }))
   );
 });

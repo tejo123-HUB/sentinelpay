@@ -184,6 +184,44 @@ test('scoring: no fraudListCheck argument behaves exactly as before (backward co
   assert.equal(severity, 'Low');
 });
 
+// ---- Section 16, Category 13: confidence score ----
+
+test('scoring: a direct blacklist/structuring match has near-certain confidence', () => {
+  const blacklisted = computeFraudScore([], { active: false, alert: null }, 0, { blacklisted: true, blacklistEntries: [{}] });
+  const structuring = computeFraudScore([], { active: true, alert: { reason: 'known ring' } }, 0, undefined);
+
+  assert.equal(blacklisted.confidence, 99);
+  assert.equal(structuring.confidence, 99);
+});
+
+test('scoring: confidence rises with more independently agreeing detectors', () => {
+  const one = computeFraudScore([ruleResult(true, 20, 'a', 'Low', 'rule_a')], { active: false, alert: null }, 0);
+  const three = computeFraudScore(
+    [
+      ruleResult(true, 20, 'a', 'Low', 'rule_a'),
+      ruleResult(true, 20, 'b', 'Low', 'rule_b'),
+      ruleResult(true, 20, 'c', 'Low', 'rule_c'),
+    ],
+    { active: false, alert: null },
+    0
+  );
+
+  assert.ok(three.confidence > one.confidence);
+});
+
+test('scoring: a clean transaction with low ML probability has high confidence in being clean', () => {
+  const { confidence } = computeFraudScore([], { active: false, alert: null }, 0.05);
+
+  assert.ok(confidence >= 80);
+});
+
+test('scoring: an unconfirmed ML-only signal with no rule agreement has lower confidence than a rule-backed one', () => {
+  const mlOnly = computeFraudScore([], { active: false, alert: null }, 0.7);
+  const ruleBacked = computeFraudScore([ruleResult(true, 45, 'amount anomaly', 'Medium', 'amount_anomaly')], { active: false, alert: null }, 0.7);
+
+  assert.ok(ruleBacked.confidence > mlOnly.confidence);
+});
+
 test('decision: threshold boundaries are exact', () => {
   assert.equal(decide(39), 'allow');
   assert.equal(decide(40), 'step_up');

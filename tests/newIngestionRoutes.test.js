@@ -197,6 +197,21 @@ test('POST /transaction: response includes severity and risk_breakdown (Section 
   }
 });
 
+test('POST /transaction: response and GET /transactions both include confidence (Section 16, Category 13)', async () => {
+  const { server } = await freshServer();
+  try {
+    const posted = await request(server, 'POST', '/transaction', validTransaction());
+    assert.equal(posted.status, 201);
+    assert.equal(typeof posted.body.confidence, 'number');
+
+    const list = await request(server, 'GET', '/transactions?limit=10');
+    const found = list.body.find((t) => t.transaction_id === posted.body.transaction_id);
+    assert.equal(found.confidence, posted.body.confidence);
+  } finally {
+    server.close();
+  }
+});
+
 test('POST /transaction: a repeat-dispute customer elevates a refund\'s risk (Section 15.16, Feature 8)', async () => {
   const { server } = await freshServer();
   try {

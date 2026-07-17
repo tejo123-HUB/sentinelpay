@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS transactions (
   country TEXT, -- ISO country code, for geo-risk scoring (Section 15.16, Feature 14); optional
   ip_address TEXT, -- for geo-risk IP-range scoring (Section 15.16, Feature 14); optional
   latency_ms REAL, -- scoring-pipeline processing time for this request (Section 15.16, Feature 18 analytics); not a scoring input
+  confidence REAL, -- 0-100, how much independent corroboration backs the decision (Section 16, Category 13); distinct from fraud_score
   FOREIGN KEY (sender_id) REFERENCES users(user_id),
   FOREIGN KEY (receiver_id) REFERENCES users(user_id)
 );
