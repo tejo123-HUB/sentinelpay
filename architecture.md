@@ -749,6 +749,18 @@ New tests: `tests/outboundContext.test.js` covers the purchase-age gate and `pri
 
 `npm test`: 128 tests passing (up from 122).
 
+### 15.14 Dashboard visual redesign #2 — light "enterprise fintech console" theme
+
+Replaced the dark "developer tool at night" theme (15.8) with a light, white-surface theme — same information architecture and DOM structure, every class name/ID JS depends on unchanged, only the visual system rebuilt:
+
+- **Palette**: chart chrome/ink and the accent blue are the dataviz skill's reference palette values directly (`references/palette.md`), not invented. Re-ran the skill's validator (`validate_palette.js`) against the light surface for the allow/step-up/block/struct quartet: CVD separation and the normal-vision floor both pass, but step-up (amber `#fab219`) fails light-surface contrast outright (1.83:1) — expected, already documented by the skill itself as a designed trade-off. Every status color therefore ships as two steps: a **mark** step (the canonical hue — dots, left-border accents, chart fills beside a legend) and a darker **text** step (badge labels, stat-tile values, hand-picked past 4.5:1 on white) — the same two-step pattern the dark theme used for `--block`/`--block-text` alone, just needed for the whole quartet here since amber fails so much harder on light than on dark.
+- **Typography**: initially the `system-ui` stack (matches the dataviz skill's typeface guidance); upgraded to **IBM Plex Sans/Plex Mono** — IBM's own enterprise/technical design-system typeface, a deliberate choice over the far more common Inter/system-font default, loaded as pinned Fontsource npm packages via jsdelivr (exact versions + SRI hashes in `dashboard/index.html`, only the weights actually used) with the system stack kept as the graceful-degradation fallback if the CDN doesn't load. Google Fonts' own CSS endpoint was ruled out specifically because it varies its response by request user-agent, which is incompatible with a fixed SRI hash — this project SRI-pins every CDN asset (see the very first comment in `index.html`), so the font source had to be one that could carry the same guarantee, not a documented exception to it. Mono is used for identifiers, amounts, scores, and business-account chips — the numeric/ID columns read as tabular data, not prose.
+- **Motion**: a restrained perspective-tilt + lift on stat-card hover, a matching tilt on the brand mark on topbar hover, an eased count-up animation on stat-tile values (skipped on the initial historical-data load — only live updates animate — and under `prefers-reduced-motion`), and a fade/slide-in on new table rows and tab-view switches.
+- **Map**: Leaflet's default light tiles no longer need the dark-theme's `invert()+hue-rotate()` CSS filter — removed entirely; the map now renders OpenStreetMap's natural basemap.
+- **Brand mark**: replaced the Unicode ◈ glyph placeholder with a custom inline SVG shield-check icon (reused as an SVG data-URI favicon), since a Unicode-symbol-as-logo reads as a placeholder rather than a designed mark.
+
+No HTML structural changes beyond the brand-mark markup and a `<link rel="icon">` addition — `dashboard/app.js`/`map.js`/`audit.js` changes are confined to the duplicated chart-color constants (documented at each site as needing to stay in sync with `style.css`'s custom properties, since Chart.js/Leaflet can't read CSS variables) plus the new count-up helper. `npm test`: unaffected (128 passing) — this was a frontend-only change with no server-side surface.
+
 ---
 
 *Document prepared for Digital Campus 2.0 on Google Cloud — Hack Sprint (24 July 2026). This is the team's single source of truth — keep it up to date as the project evolves.*

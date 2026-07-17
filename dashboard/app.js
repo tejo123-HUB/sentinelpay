@@ -51,22 +51,46 @@ function resolveCounterpartyId(tx) {
 
 let decisionChart = null;
 
-// Validated status palette (dataviz skill's validate_palette.js against this dashboard's dark
-// surface #0f1626, see style.css's file header for the full reasoning) — kept as one source of
-// truth with style.css's --allow/--stepup/--block/--struct custom properties, duplicated here
-// only because Chart.js renders to a <canvas>, which can't read CSS custom properties directly.
-const CHART_COLORS = { allow: '#22ac74', stepup: '#b8891b', block: '#cc4646' };
-const CHART_SURFACE = '#0f1626'; // matches style.css's --surface-1, used as the donut's slice-gap ring color
+// Validated status palette (dataviz skill's validate_palette.js against this dashboard's light
+// surface #fcfcfb, see style.css's file header for the full reasoning) — the MARK step, kept as
+// one source of truth with style.css's --allow/--stepup/--block custom properties, duplicated
+// here only because Chart.js renders to a <canvas>, which can't read CSS custom properties
+// directly.
+const CHART_COLORS = { allow: '#0ca30c', stepup: '#fab219', block: '#d03b3b' };
+const CHART_SURFACE = '#fcfcfb'; // matches style.css's --surface, used as the donut's slice-gap ring color
 const CHART_TOOLTIP = {
-  backgroundColor: '#141d33',
-  titleColor: '#eef2fb',
-  bodyColor: '#8b9bc0',
-  borderColor: 'rgba(255,255,255,0.08)',
+  backgroundColor: '#ffffff',
+  titleColor: '#0b0b0b',
+  bodyColor: '#52514e',
+  borderColor: 'rgba(11,11,11,0.1)',
   borderWidth: 1,
   padding: 10,
   cornerRadius: 8,
   displayColors: true,
 };
+
+// Animates a stat-tile value counting up/down to its new total over a short, professional beat
+// rather than snapping — the kind of restrained micro-interaction real ops dashboards use.
+// Skips entirely under prefers-reduced-motion, and skips the very first paint (going from
+// nothing to a value on page load should be instant, not an animated count from zero).
+const COUNT_UP_MS = 420;
+const prefersReducedMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+function animateCount(el, toValue) {
+  const fromValue = Number(el.textContent) || 0;
+  if (prefersReducedMotion || fromValue === toValue) {
+    el.textContent = toValue;
+    return;
+  }
+  const startTime = performance.now();
+  function tick(now) {
+    const progress = Math.min((now - startTime) / COUNT_UP_MS, 1);
+    const eased = 1 - (1 - progress) ** 3; // easeOutCubic
+    const current = Math.round(fromValue + (toValue - fromValue) * eased);
+    el.textContent = current;
+    if (progress < 1) requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+}
 
 function initChart() {
   // Chart.js loads from a CDN; degrade gracefully (no chart, everything else still works) if
@@ -111,13 +135,14 @@ function formatTime(iso) {
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleTimeString();
 }
 
-function updateCounters(decision) {
+function updateCounters(decision, { animate = true } = {}) {
   counts.total += 1;
   if (decision in counts) counts[decision] += 1;
-  document.getElementById('count-total').textContent = counts.total;
-  document.getElementById('count-allow').textContent = counts.allow;
-  document.getElementById('count-step_up').textContent = counts.step_up;
-  document.getElementById('count-block').textContent = counts.block;
+  const setValue = animate ? animateCount : (el, v) => (el.textContent = v);
+  setValue(document.getElementById('count-total'), counts.total);
+  setValue(document.getElementById('count-allow'), counts.allow);
+  setValue(document.getElementById('count-step_up'), counts.step_up);
+  setValue(document.getElementById('count-block'), counts.block);
   updateChart();
 }
 
@@ -156,7 +181,7 @@ function addTransactionRow(tx, { prepend = true } = {}) {
   }
 }
 
-function addAlertCard(alert, { prepend = true } = {}) {
+function addAlertCard(alert, { prepend = true, animate = true } = {}) {
   const emptyState = alertsList.querySelector('.empty-state');
   if (emptyState) emptyState.remove();
 
@@ -185,7 +210,9 @@ function addAlertCard(alert, { prepend = true } = {}) {
   }
 
   counts.alerts += 1;
-  document.getElementById('count-alerts').textContent = counts.alerts;
+  const alertsCountEl = document.getElementById('count-alerts');
+  if (animate) animateCount(alertsCountEl, counts.alerts);
+  else alertsCountEl.textContent = counts.alerts;
 }
 
 async function reloadTransactionTable() {
@@ -305,13 +332,15 @@ async function loadInitialData() {
     const alerts = await alertsRes.json();
 
     // Oldest first, so the running counters/table read top-to-bottom like a live feed once
-    // real-time events start arriving on top.
+    // real-time events start arriving on top. animate: false on this initial batch — the
+    // count-up beat is for a single live update arriving, not a rapid loop over up to 50
+    // historical rows landing in the same tick.
     for (const tx of [...transactions].reverse()) {
       addTransactionRow(tx, { prepend: false });
-      updateCounters(tx.decision);
+      updateCounters(tx.decision, { animate: false });
     }
     for (const alert of [...alerts].reverse()) {
-      addAlertCard(alert, { prepend: false });
+      addAlertCard(alert, { prepend: false, animate: false });
     }
   } catch (err) {
     console.error('Failed to load initial dashboard data:', err);

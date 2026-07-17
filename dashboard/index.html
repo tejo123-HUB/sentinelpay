@@ -4,8 +4,13 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>SentinelPay — Live Fraud Monitoring</title>
+  <link
+    rel="icon"
+    type="image/svg+xml"
+    href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 1 3 4.4v6.4c0 5.9 3.7 10.9 9 12.4 5.3-1.5 9-6.5 9-12.4V4.4L12 1Z' fill='%232a78d6'/%3E%3Cpath d='M7.8 12.1 10.6 14.9 16.2 9.2' fill='none' stroke='%23fff' stroke-width='2.1' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"
+  />
   <!--
-    Subresource Integrity (SRI) hashes on all three CDN assets below, pinned to exact versions
+    Subresource Integrity (SRI) hashes on every CDN asset below, pinned to exact versions
     (chart.js was previously an unpinned "@4" floating tag): without these, a compromised or
     MITM'd jsdelivr response could swap in arbitrary JS/CSS that the browser would execute/apply
     with no warning — SRI makes the browser refuse to load anything that doesn't hash-match.
@@ -14,9 +19,36 @@
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css"
     integrity="sha384-sHL9NAb7lN7rfvG5lfHpm643Xkcjzp4jFvuavGOndn6pjVqS6ny56CAt3nsEVT4H" crossorigin="anonymous" />
   <!--
-    style.css loads after leaflet.css (not before, as previously) so its Leaflet dark-theme
-    overrides (.leaflet-control-zoom, .leaflet-popup-content-wrapper, etc.) win the cascade by
-    load order alone — no !important needed to beat Leaflet's own CDN stylesheet.
+    IBM Plex Sans/Mono — chosen deliberately over the more common Inter/system-font default:
+    it's IBM's own enterprise/technical design-system typeface, reads as a considered choice for
+    a fraud-ops console rather than a generic SaaS-template font. Loaded as pinned Fontsource npm
+    packages via jsdelivr (exact versions below), not fonts.googleapis.com — Google Fonts' CSS
+    endpoint varies its response by requesting user-agent, which is fundamentally incompatible
+    with a fixed SRI hash; these per-weight package files are immutable at their pinned version,
+    so they can carry the same SRI guarantee as every other asset here. Only the weights actually
+    used in style.css are loaded. (SRI on a CSS file's own bytes doesn't extend to the @font-face
+    src files it references, same as leaflet.css above — an accepted, existing limit of CSS SRI
+    in this project, not a lesser standard applied only here.)
+  -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-sans@5.2.8/400.css"
+    integrity="sha384-by8hCwJDxTOUHMGBI4elNkybAoX7Gs45s1pbgL9fdUTDy+tXTA+tZmiU+0LkwckA" crossorigin="anonymous" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-sans@5.2.8/500.css"
+    integrity="sha384-2TCRc0WTBOLzME2XrGv+j2jHDAvpfo6jNj9NfT75iyaGpL8kJUYF1q8ae+3teExy" crossorigin="anonymous" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-sans@5.2.8/600.css"
+    integrity="sha384-1dcQop1Fsaw4/4DmZbwqeTSgod1K+Zkz3QWtbAUGxmw7ECfIGKOHUIRKcGtpdNHx" crossorigin="anonymous" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-sans@5.2.8/700.css"
+    integrity="sha384-qPJdsfDFSUEm7zpIrLO34iZfoIUmSMPLEClNtQBTc49fnzIaDEqKu2ROCMfm32uY" crossorigin="anonymous" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-mono@5.2.7/400.css"
+    integrity="sha384-skmNCjNGr3vAP9enjEtv/Ifs9QVeKfEF6q4rnDaS7YqtsgrCVRjcB7LPcLnQyL9p" crossorigin="anonymous" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-mono@5.2.7/500.css"
+    integrity="sha384-Kc76rmz8/sN1crakstIAL9hO3G6GlkS7LXZxYz6aM3HgNHNuukjqpQ0xmqtD2X1B" crossorigin="anonymous" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-mono@5.2.7/600.css"
+    integrity="sha384-SIw131utm+gqysd9KvooKPhG3B7zIh37znv502JB25XRD2RkN1ePnr2F0BQopSMW" crossorigin="anonymous" />
+  <!--
+    style.css loads after leaflet.css and the font stylesheets (not before, as previously with
+    leaflet) so its Leaflet chrome overrides (.leaflet-control-zoom, .leaflet-popup-content-
+    wrapper, etc.) win the cascade by load order alone — no !important needed to beat Leaflet's
+    own CDN stylesheet.
   -->
   <link rel="stylesheet" href="style.css" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1"
@@ -27,7 +59,18 @@
 <body>
   <header class="topbar">
     <div class="brand">
-      <span class="brand-mark">◈</span>
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path
+            d="M12 2.4 4.6 5.2v5.9c0 5.15 3.28 9.53 7.4 10.5 4.12-.97 7.4-5.35 7.4-10.5V5.2L12 2.4Z"
+            fill="rgba(255,255,255,0.14)"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linejoin="round"
+          />
+          <path d="M8.4 12.1 10.9 14.6 15.7 9.6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+      </span>
       <div>
         <h1>SentinelPay</h1>
         <p>Real-time fraud detection &amp; structuring monitor</p>
