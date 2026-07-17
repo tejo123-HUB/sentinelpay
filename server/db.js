@@ -93,6 +93,7 @@ CREATE TABLE IF NOT EXISTS merchant_login_events (
   ip_address TEXT,
   location_lat REAL,
   location_lng REAL,
+  country TEXT,
   timestamp TEXT NOT NULL,
   created_at TEXT NOT NULL
 );

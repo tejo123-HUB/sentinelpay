@@ -254,6 +254,82 @@ test('computeMuleScore: a receiver with no withdrawal-back-out history is not a 
   assert.equal(score.qualifyingCycles, 0);
 });
 
+// ---- getOutboundContext: Section 15.16 Features 4/8/10/11 ----
+
+function insertMerchantLogin(db, { merchantId, deviceId, country = null, msAgo }) {
+  db.prepare(
+    'INSERT INTO merchant_login_events (login_id, merchant_id, device_id, country, timestamp, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+  ).run(`login_${Math.random().toString(36).slice(2)}`, merchantId, deviceId, country, new Date(NOW_MS - msAgo).toISOString(), new Date(NOW_MS).toISOString());
+}
+
+test('getOutboundContext: takeoverRisk is set for a genuinely new device logging in shortly before this transaction', () => {
+  const db = buildTestDb();
+  insertMerchantLogin(db, { merchantId: 'm_biz', deviceId: 'd_old', country: 'IN', msAgo: 60 * 60 * 1000 });
+  insertMerchantLogin(db, { merchantId: 'm_biz', deviceId: 'd_new', country: 'RU', msAgo: 60 * 1000 });
+
+  const context = getOutboundContext(db, { sender_id: 'm_biz', receiver_id: 'u_1', timestamp: new Date(NOW_MS).toISOString() }, NOW_MS);
+
+  assert.ok(context.takeoverRisk, 'expected a takeover risk to be detected');
+  assert.equal(context.takeoverRisk.currentDevice, 'd_new');
+  assert.equal(context.takeoverRisk.previousDevice, 'd_old');
+  assert.equal(context.takeoverRisk.currentCountry, 'RU');
+  assert.equal(context.takeoverRisk.previousCountry, 'IN');
+});
+
+test('getOutboundContext: takeoverRisk is null when the recent login device was already seen before', () => {
+  const db = buildTestDb();
+  insertMerchantLogin(db, { merchantId: 'm_biz', deviceId: 'd_known', country: 'IN', msAgo: 60 * 60 * 1000 });
+  insertMerchantLogin(db, { merchantId: 'm_biz', deviceId: 'd_known', country: 'IN', msAgo: 60 * 1000 });
+
+  const context = getOutboundContext(db, { sender_id: 'm_biz', receiver_id: 'u_1', timestamp: new Date(NOW_MS).toISOString() }, NOW_MS);
+
+  assert.equal(context.takeoverRisk, null);
+});
+
+test('getOutboundContext: takeoverRisk is null with no logins at all', () => {
+  const db = buildTestDb();
+  const context = getOutboundContext(db, { sender_id: 'm_biz', receiver_id: 'u_1', timestamp: new Date(NOW_MS).toISOString() }, NOW_MS);
+
+  assert.equal(context.takeoverRisk, null);
+});
+
+test('getOutboundContext: disputeCount reflects disputes filed by this counterparty within the lookback window', () => {
+  const db = buildTestDb();
+  db.prepare('INSERT INTO disputes (dispute_id, customer_id, dispute_type, created_at) VALUES (?, ?, ?, ?)').run(
+    'dsp_1', 'u_1', 'chargeback', new Date(NOW_MS - 60 * 1000).toISOString()
+  );
+  db.prepare('INSERT INTO disputes (dispute_id, customer_id, dispute_type, created_at) VALUES (?, ?, ?, ?)').run(
+    'dsp_2', 'u_other', 'chargeback', new Date(NOW_MS - 60 * 1000).toISOString()
+  );
+
+  const context = getOutboundContext(db, { sender_id: 'm_biz', receiver_id: 'u_1', timestamp: new Date(NOW_MS).toISOString() }, NOW_MS);
+
+  assert.equal(context.disputeCount, 1);
+});
+
+test('getOutboundContext: employeeRefundCount/employeeRefundCountToReceiver only populate when employee_id is given', () => {
+  const db = buildTestDb();
+  insertTransaction(db, { senderId: 'm_biz', receiverId: 'u_1', amount: 10, msAgo: 60 * 1000, purpose: 'Refund' });
+
+  const withoutEmployee = getOutboundContext(db, { sender_id: 'm_biz', receiver_id: 'u_1', timestamp: new Date(NOW_MS).toISOString() }, NOW_MS);
+  assert.equal(withoutEmployee.employeeRefundCount, 0);
+});
+
+test('getOutboundContext: crossGatewayIds/crossGatewayTotal scoped to this specific receiver', () => {
+  const db = buildTestDb();
+  insertTransaction(db, { senderId: 'm_biz', receiverId: 'u_1', amount: 5000, msAgo: 60 * 1000, merchantId: 'gw_a' });
+  insertTransaction(db, { senderId: 'm_biz', receiverId: 'u_other', amount: 9999, msAgo: 60 * 1000, merchantId: 'gw_c' }); // different receiver, must not count
+
+  const context = getOutboundContext(
+    db,
+    { sender_id: 'm_biz', receiver_id: 'u_1', merchant_id: 'gw_b', timestamp: new Date(NOW_MS).toISOString() },
+    NOW_MS
+  );
+
+  assert.deepEqual(context.crossGatewayIds, ['gw_a']);
+  assert.equal(context.crossGatewayTotal, 5000);
+});
+
 // ---- applyOutboundRestrictors ----
 
 test('applyOutboundRestrictors: floors the score and adds a reason for an amount above the review threshold', () => {

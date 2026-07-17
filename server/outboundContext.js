@@ -26,7 +26,7 @@ const OUTBOUND_MIN_PURCHASE_AGE_MS = 5 * 60 * 1000;
 // Section 15.16 (Features 1/2/3/7/9): refund-integrity fields, computed alongside the fields
 // above so every outbound detector shares one context object and one calling convention
 // (check(transaction, outboundContext)) rather than each rule querying the DB independently.
-const { REFUND_INTEGRITY } = require('./config');
+const { REFUND_INTEGRITY, MERCHANT_TAKEOVER, FRIENDLY_FRAUD, EMPLOYEE_FRAUD, CROSS_GATEWAY } = require('./config');
 const { computeMuleScore } = require('./muleScore');
 
 /**
@@ -151,6 +151,86 @@ function getOutboundContext(db, transaction, nowMs) {
   // rule file) since it needs direct DB access, same reasoning as every other field above.
   const receiverMuleScore = computeMuleScore(db, counterpartyId, nowMs);
 
+  // Feature 4 (merchant account takeover): the most recent login for this business account
+  // within the takeover window -- and, if there was one, whether its device had ever logged in
+  // for this merchant before that login (a genuinely new device, not just "not used recently").
+  const takeoverWindowSince = new Date(nowMs - MERCHANT_TAKEOVER.TAKEOVER_WINDOW_MS).toISOString();
+  const recentLogin = db
+    .prepare(
+      'SELECT login_id, device_id, ip_address, location_lat, location_lng, country, timestamp FROM merchant_login_events WHERE merchant_id = ? AND timestamp >= ? AND timestamp <= ? ORDER BY timestamp DESC LIMIT 1'
+    )
+    .get(businessId, takeoverWindowSince, transaction.timestamp);
+
+  let takeoverRisk = null;
+  if (recentLogin) {
+    const previousLogin = db
+      .prepare(
+        'SELECT device_id, country FROM merchant_login_events WHERE merchant_id = ? AND timestamp < ? ORDER BY timestamp DESC LIMIT 1'
+      )
+      .get(businessId, recentLogin.timestamp);
+
+    const isNewDevice =
+      !!recentLogin.device_id &&
+      (!previousLogin ||
+        db
+          .prepare('SELECT COUNT(*) AS n FROM merchant_login_events WHERE merchant_id = ? AND device_id = ? AND timestamp < ?')
+          .get(businessId, recentLogin.device_id, recentLogin.timestamp).n === 0);
+
+    if (isNewDevice && previousLogin) {
+      takeoverRisk = {
+        loginTimestamp: recentLogin.timestamp,
+        currentDevice: recentLogin.device_id,
+        previousDevice: previousLogin.device_id,
+        currentCountry: recentLogin.country,
+        previousCountry: previousLogin.country,
+      };
+    }
+  }
+
+  // Feature 8 (friendly fraud): how many disputes has this transaction's counterparty (the
+  // customer, on a refund) filed in the lookback window -- feeds a customer risk score
+  // independent of whether any single dispute was itself fraudulent.
+  const disputeSince = new Date(nowMs - FRIENDLY_FRAUD.DISPUTE_WINDOW_MS).toISOString();
+  const disputeCountRow = db
+    .prepare('SELECT COUNT(*) AS n FROM disputes WHERE customer_id = ? AND created_at >= ? AND created_at <= ?')
+    .get(counterpartyId, disputeSince, transaction.timestamp);
+
+  // Feature 10 (employee fraud): how many refunds has this transaction's employee_id issued
+  // recently, and how many of those went to this same receiver -- only meaningful when the
+  // caller actually supplies employee_id, same optional-field pattern as reference_transaction_id.
+  let employeeRefundCount = 0;
+  let employeeRefundCountToReceiver = 0;
+  if (transaction.employee_id) {
+    const employeeWindowSince = new Date(nowMs - EMPLOYEE_FRAUD.EMPLOYEE_REFUND_WINDOW_MS).toISOString();
+    const employeeRefunds = db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM transactions WHERE employee_id = ? AND LOWER(purpose) LIKE '%refund%' AND timestamp >= ? AND timestamp <= ?"
+      )
+      .get(transaction.employee_id, employeeWindowSince, transaction.timestamp);
+    employeeRefundCount = employeeRefunds.n;
+
+    const employeeRefundsToReceiver = db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM transactions WHERE employee_id = ? AND receiver_id = ? AND LOWER(purpose) LIKE '%refund%' AND timestamp >= ? AND timestamp <= ?"
+      )
+      .get(transaction.employee_id, counterpartyId, employeeWindowSince, transaction.timestamp);
+    employeeRefundCountToReceiver = employeeRefundsToReceiver.n;
+  }
+
+  // Feature 11 (cross-gateway structuring): distinct merchant_id gateways this business account
+  // has already used to pay this specific receiver within the cross-gateway window, and the
+  // cumulative amount across all of them -- spreading payouts to the same receiver across
+  // several gateways is the pattern this detects, mirroring how fan-out spreads across receivers.
+  const crossGatewaySince = new Date(nowMs - CROSS_GATEWAY.CROSS_GATEWAY_WINDOW_MS).toISOString();
+  const crossGatewayRows = db
+    .prepare(
+      'SELECT DISTINCT merchant_id FROM transactions WHERE sender_id = ? AND receiver_id = ? AND merchant_id IS NOT NULL AND timestamp >= ? AND timestamp <= ?'
+    )
+    .all(businessId, counterpartyId, crossGatewaySince, transaction.timestamp);
+  const crossGatewayTotalRow = db
+    .prepare('SELECT COALESCE(SUM(amount), 0) AS total FROM transactions WHERE sender_id = ? AND receiver_id = ? AND timestamp >= ? AND timestamp <= ?')
+    .get(businessId, counterpartyId, crossGatewaySince, transaction.timestamp);
+
   return {
     priorPurchaseTotal: priorPurchase.total,
     priorRefundTotal: priorRefund.total,
@@ -167,6 +247,12 @@ function getOutboundContext(db, transaction, nowMs) {
     referencedPurchaseRefundCount,
     lastActivityTimestamp,
     receiverMuleScore,
+    takeoverRisk,
+    disputeCount: disputeCountRow.n,
+    employeeRefundCount,
+    employeeRefundCountToReceiver,
+    crossGatewayIds: crossGatewayRows.map((r) => r.merchant_id),
+    crossGatewayTotal: crossGatewayTotalRow.total,
   };
 }
 

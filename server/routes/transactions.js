@@ -43,6 +43,10 @@ const newVendorRisk = require('../rules/newVendorRisk');
 const dormantAccountReactivation = require('../rules/dormantAccountReactivation');
 const muleReceiverRisk = require('../rules/muleReceiverRisk');
 const geoRisk = require('../rules/geoRisk');
+const merchantAccountTakeover = require('../rules/merchantAccountTakeover');
+const friendlyFraud = require('../rules/friendlyFraud');
+const employeeFraud = require('../rules/employeeFraud');
+const crossGatewayStructuring = require('../rules/crossGatewayStructuring');
 
 const RULE_DETECTORS = [
   { type: 'velocity', check: velocity },
@@ -68,6 +72,10 @@ const OUTBOUND_RULE_DETECTORS = [
   { type: 'dormant_account_reactivation', check: dormantAccountReactivation },
   { type: 'mule_receiver_risk', check: muleReceiverRisk },
   { type: 'geo_risk', check: geoRisk },
+  { type: 'merchant_account_takeover', check: merchantAccountTakeover },
+  { type: 'friendly_fraud', check: friendlyFraud },
+  { type: 'employee_fraud', check: employeeFraud },
+  { type: 'cross_gateway_structuring', check: crossGatewayStructuring },
 ];
 
 const DEFAULT_LIST_LIMIT = 50;

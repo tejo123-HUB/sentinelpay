@@ -121,14 +121,14 @@ The full spec (verbatim) and design rationale live in Section 15.16; this table 
 | 1 | Refund Account Mismatch Detection | ✅ built | `server/rules/refundAccountMismatch.js` |
 | 2 | Multiple Refund Detection | ✅ built | `server/rules/multipleRefundDetection.js` |
 | 3 | Improve Existing Refund Validation | ✅ built | `server/rules/refundWithoutPurchase.js` (reference-based path) |
-| 4 | Merchant Account Takeover Detection | ⏳ planned | `merchant_login_events` table + new route + detector, not yet built |
+| 4 | Merchant Account Takeover Detection | ✅ built | `server/rules/merchantAccountTakeover.js`, `POST/GET /merchant-logins` |
 | 5 | New Vendor Risk Detection | ✅ built | `server/rules/newVendorRisk.js` |
 | 6 | Circular Money Flow Detection | ⏳ planned | extends `server/structuring/`, not yet built |
 | 7 | Split Refund Detection | ✅ built | `server/rules/splitRefundDetection.js` |
-| 8 | Friendly Fraud Detection | ⏳ planned | `disputes` table + new route + detector, not yet built |
+| 8 | Friendly Fraud Detection | ✅ built | `server/rules/friendlyFraud.js`, `POST/GET /disputes` |
 | 9 | Refund Velocity Detection | ✅ built | `server/rules/refundVelocity.js` |
-| 10 | Employee Fraud Detection | ⏳ planned | `transactions.employee_id` column added; detector not yet built |
-| 11 | Cross Gateway Fraud Detection | ⏳ planned | not yet built (query pattern over existing `merchant_id`) |
+| 10 | Employee Fraud Detection | ✅ built | `server/rules/employeeFraud.js` |
+| 11 | Cross Gateway Fraud Detection | ✅ built | `server/rules/crossGatewayStructuring.js` |
 | 12 | Dormant Account Detection | ✅ built | `server/rules/dormantAccountReactivation.js` |
 | 13 | Mule Account Detection | ✅ built | `server/muleScore.js` + `server/rules/muleReceiverRisk.js` |
 | 14 | Geo Risk Scoring | ✅ built | `server/rules/geoRisk.js` |
@@ -140,7 +140,7 @@ The full spec (verbatim) and design rationale live in Section 15.16; this table 
 | 20 | Testing (100% detector coverage) | 🔄 ongoing | every feature above ships with unit + integration tests as it lands; a final coverage sweep is still pending |
 | 21 | Documentation | 🔄 ongoing | this section + Section 15.16, updated per phase as each feature lands; a final consistency pass is still pending |
 
-Nine detector-level features (1/2/3/5/7/9/12/13/14) plus the config foundation (19) are complete and merged with passing tests as of this table's last update. The remaining features (4/6/8/10/11/15/16/17/18) need either a new data model this system doesn't yet capture (4, 8) or touch the scoring/dashboard/analytics layer broadly (6, 11, 15, 16, 17, 18) — see Section 15.16's phasing for the build order.
+Thirteen detector-level features (1/2/3/4/5/7/8/9/10/11/12/13/14) plus the config foundation (19) are complete and merged with passing tests as of this table's last update. The remaining features (6/15/16/17/18) touch the graph engine, dashboard, and scoring/analytics layer broadly — see Section 15.16's phasing for the build order.
 
 ---
 
@@ -339,6 +339,12 @@ Returns active structuring/layering alerts (grouped, not per-transaction).
 
 ### `GET /business-accounts`, `POST /business-accounts`, `DELETE /business-accounts/:accountId`
 The dashboard's editable registry of the business's own account IDs. There's no schema flag marking an ID as "the business" vs. "a customer" — `merchant_id` identifies which *gateway* a transaction came through, not which party in `sender_id`/`receiver_id` is the business. This registry is what lets the dashboard collapse the Sender/Receiver pair into a single "ID" column showing only the customer: `GET` returns `[{ account_id, created_at }, ...]`; `POST { account_id }` registers one (`INSERT OR IGNORE` — re-adding is a no-op, not an error); `DELETE /business-accounts/:accountId` removes one (idempotent — removing an unregistered ID still returns `204`). Analyst-facing only, like `purpose`/`merchant_id` — not a scoring input.
+
+### `POST /merchant-logins`, `GET /merchant-logins?merchant_id=...&limit=20` (Section 15.16, Feature 4)
+Ingests merchant login/session metadata (`merchant_id`, `device_id`, `browser`, `os`, `ip_address`, `location`, `country`, optional `timestamp`) used by `merchantAccountTakeover.js` to detect an unrecognized-device login shortly before a refund/payout/settlement. Same trust model as `POST /transaction` — a backend-to-backend integration point (in production, sourced from the business's own auth/session system), not something end users call. Unlike `POST /transaction`, a caller-supplied `timestamp` is honored rather than overridden, since seed/demo data legitimately needs to backdate login history and this endpoint moves no money.
+
+### `POST /disputes`, `GET /disputes?customer_id=...&limit=50` (Section 15.16, Feature 8)
+Ingests chargeback/dispute events (`transaction_id` optional, `customer_id`, `dispute_type`) used by `friendlyFraud.js` to score repeat-dispute customers. In production this would arrive via a payment gateway's chargeback webhook; here it's a directly-callable ingestion endpoint, same trust model as the routes above.
 
 ### `GET /audit/summary?hours=24&bucketMinutes=60`
 Task 11 (audit trail): time-bucketed counts of `allow`/`step_up`/`block` over the given lookback window, for the trend chart. Added in Section 15.2. Returns `{ hours, bucketMinutes, totalTransactions, buckets: [{ bucket_start, allow, step_up, block }, ...] }`.

@@ -18,6 +18,10 @@ const newVendorRisk = require('../server/rules/newVendorRisk');
 const dormantAccountReactivation = require('../server/rules/dormantAccountReactivation');
 const muleReceiverRisk = require('../server/rules/muleReceiverRisk');
 const geoRisk = require('../server/rules/geoRisk');
+const merchantAccountTakeover = require('../server/rules/merchantAccountTakeover');
+const friendlyFraud = require('../server/rules/friendlyFraud');
+const employeeFraud = require('../server/rules/employeeFraud');
+const crossGatewayStructuring = require('../server/rules/crossGatewayStructuring');
 
 const BASE_TIME = new Date('2026-07-18T12:00:00Z').getTime();
 
@@ -644,6 +648,123 @@ test('geoRisk: does not flag an ordinary country/IP', () => {
 test('geoRisk: does not flag when country/ip_address are absent', () => {
   const transaction = { country: null, ip_address: null };
   const result = geoRisk(transaction);
+
+  assert.equal(result.flagged, false);
+});
+
+// ---- merchantAccountTakeover (Section 15.16, Feature 4) ----
+
+test('merchantAccountTakeover: flags a transaction following an unrecognized-device login', () => {
+  const transaction = { purpose: 'Refund' };
+  const context = {
+    takeoverRisk: {
+      loginTimestamp: '2026-07-18T10:00:00Z',
+      currentDevice: 'd_new',
+      previousDevice: 'd_old',
+      currentCountry: 'RU',
+      previousCountry: 'IN',
+    },
+  };
+  const result = merchantAccountTakeover(transaction, context);
+
+  assert.equal(result.flagged, true);
+  assert.equal(result.severity, 'Critical');
+  assert.match(result.reason, /previous device: d_old/);
+  assert.match(result.reason, /current device: d_new/);
+});
+
+test('merchantAccountTakeover: does not flag when there is no takeover risk', () => {
+  const transaction = { purpose: 'Refund' };
+  const result = merchantAccountTakeover(transaction, { takeoverRisk: null });
+
+  assert.equal(result.flagged, false);
+});
+
+// ---- friendlyFraud (Section 15.16, Feature 8) ----
+
+test('friendlyFraud: flags a repeat-dispute customer more strongly than an elevated-risk one', () => {
+  const transaction = { purpose: 'Refund' };
+  const repeat = friendlyFraud(transaction, { disputeCount: 3 });
+  const elevated = friendlyFraud(transaction, { disputeCount: 2 });
+
+  assert.equal(repeat.flagged, true);
+  assert.equal(elevated.flagged, true);
+  assert.ok(repeat.weight > elevated.weight);
+});
+
+test('friendlyFraud: does not flag a customer with no dispute history', () => {
+  const transaction = { purpose: 'Refund' };
+  const result = friendlyFraud(transaction, { disputeCount: 0 });
+
+  assert.equal(result.flagged, false);
+});
+
+test('friendlyFraud: ignores non-refund transactions', () => {
+  const transaction = { purpose: 'Payout' };
+  const result = friendlyFraud(transaction, { disputeCount: 10 });
+
+  assert.equal(result.flagged, false);
+});
+
+// ---- employeeFraud (Section 15.16, Feature 10) ----
+
+test('employeeFraud: flags an employee repeatedly refunding the same receiver', () => {
+  const transaction = { purpose: 'Refund', employee_id: 'e_1' };
+  const context = { employeeRefundCount: 1, employeeRefundCountToReceiver: 2 };
+  const result = employeeFraud(transaction, context);
+
+  assert.equal(result.flagged, true);
+  assert.match(result.reason, /repeatedly issued refunds to the same receiver/);
+});
+
+test('employeeFraud: flags an employee issuing an excessive number of refunds overall', () => {
+  const transaction = { purpose: 'Refund', employee_id: 'e_1' };
+  const context = { employeeRefundCount: 9, employeeRefundCountToReceiver: 0 };
+  const result = employeeFraud(transaction, context);
+
+  assert.equal(result.flagged, true);
+  assert.match(result.reason, /unusually high number of refunds/);
+});
+
+test('employeeFraud: does not flag without an employee_id', () => {
+  const transaction = { purpose: 'Refund', employee_id: null };
+  const context = { employeeRefundCount: 9, employeeRefundCountToReceiver: 2 };
+  const result = employeeFraud(transaction, context);
+
+  assert.equal(result.flagged, false);
+});
+
+test('employeeFraud: does not flag a normal, low-volume refund', () => {
+  const transaction = { purpose: 'Refund', employee_id: 'e_2' };
+  const context = { employeeRefundCount: 1, employeeRefundCountToReceiver: 0 };
+  const result = employeeFraud(transaction, context);
+
+  assert.equal(result.flagged, false);
+});
+
+// ---- crossGatewayStructuring (Section 15.16, Feature 11) ----
+
+test('crossGatewayStructuring: flags a large cumulative payout to one receiver spread across gateways', () => {
+  const transaction = { amount: 20000, merchant_id: 'gw_b' };
+  const context = { crossGatewayIds: ['gw_a'], crossGatewayTotal: 15000 };
+  const result = crossGatewayStructuring(transaction, context);
+
+  assert.equal(result.flagged, true);
+  assert.match(result.reason, /Cross gateway transaction structuring detected\./);
+});
+
+test('crossGatewayStructuring: does not flag a single gateway even at high cumulative total', () => {
+  const transaction = { amount: 20000, merchant_id: 'gw_a' };
+  const context = { crossGatewayIds: ['gw_a'], crossGatewayTotal: 15000 };
+  const result = crossGatewayStructuring(transaction, context);
+
+  assert.equal(result.flagged, false);
+});
+
+test('crossGatewayStructuring: does not flag multiple gateways below the total threshold', () => {
+  const transaction = { amount: 100, merchant_id: 'gw_b' };
+  const context = { crossGatewayIds: ['gw_a'], crossGatewayTotal: 200 };
+  const result = crossGatewayStructuring(transaction, context);
 
   assert.equal(result.flagged, false);
 });
