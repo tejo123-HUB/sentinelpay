@@ -57,16 +57,59 @@ test('isBusinessAccount: true once registered, false otherwise', () => {
 
 // ---- getOutboundContext ----
 
+// Purchases must be older than OUTBOUND_MIN_PURCHASE_AGE_MS (5 minutes) to count as "prior
+// purchase" credit -- everything in this test is well outside that window.
+const OLD_ENOUGH_MS = 10 * 60 * 1000; // 10 minutes -- comfortably past the 5-minute purchase-age gate
+
 test('getOutboundContext: priorPurchaseTotal sums only this customer\'s payments to this business account', () => {
   const db = buildTestDb();
-  insertTransaction(db, { senderId: 'u_1', receiverId: 'm_biz', amount: 100, msAgo: 60000 });
-  insertTransaction(db, { senderId: 'u_1', receiverId: 'm_biz', amount: 50, msAgo: 30000 });
-  insertTransaction(db, { senderId: 'u_1', receiverId: 'm_other', amount: 999, msAgo: 20000 }); // different business -- excluded
-  insertTransaction(db, { senderId: 'u_2', receiverId: 'm_biz', amount: 999, msAgo: 10000 }); // different customer -- excluded
+  insertTransaction(db, { senderId: 'u_1', receiverId: 'm_biz', amount: 100, msAgo: OLD_ENOUGH_MS + 60000 });
+  insertTransaction(db, { senderId: 'u_1', receiverId: 'm_biz', amount: 50, msAgo: OLD_ENOUGH_MS + 30000 });
+  insertTransaction(db, { senderId: 'u_1', receiverId: 'm_other', amount: 999, msAgo: OLD_ENOUGH_MS + 20000 }); // different business -- excluded
+  insertTransaction(db, { senderId: 'u_2', receiverId: 'm_biz', amount: 999, msAgo: OLD_ENOUGH_MS + 10000 }); // different customer -- excluded
 
   const context = getOutboundContext(db, { sender_id: 'm_biz', receiver_id: 'u_1', timestamp: new Date(NOW_MS).toISOString() }, NOW_MS);
 
   assert.equal(context.priorPurchaseTotal, 150);
+});
+
+test('getOutboundContext: a purchase younger than the minimum age does not count as prior-purchase credit yet', () => {
+  const db = buildTestDb();
+  // 2 minutes old -- inside the 90-day lookback, but younger than the 5-minute purchase-age gate.
+  insertTransaction(db, { senderId: 'u_1', receiverId: 'm_biz', amount: 500, msAgo: 2 * 60 * 1000 });
+
+  const context = getOutboundContext(db, { sender_id: 'm_biz', receiver_id: 'u_1', timestamp: new Date(NOW_MS).toISOString() }, NOW_MS);
+
+  assert.equal(
+    context.priorPurchaseTotal,
+    0,
+    'a same-burst fabricated purchase should not be usable as immediate refund credit'
+  );
+});
+
+test('getOutboundContext: priorRefundTotal sums refunds already issued to this customer, reducing available credit', () => {
+  const db = buildTestDb();
+  insertTransaction(db, { senderId: 'u_1', receiverId: 'm_biz', amount: 500, msAgo: OLD_ENOUGH_MS + 60000 }); // purchase
+  db.prepare(
+    `INSERT INTO transactions
+      (transaction_id, sender_id, receiver_id, amount, timestamp, purpose, transaction_type, fraud_score, decision)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    't_refund_1',
+    'm_biz',
+    'u_1',
+    500,
+    new Date(NOW_MS - 30000).toISOString(),
+    'Refund - order #1',
+    'transfer',
+    0,
+    'allow'
+  );
+
+  const context = getOutboundContext(db, { sender_id: 'm_biz', receiver_id: 'u_1', timestamp: new Date(NOW_MS).toISOString() }, NOW_MS);
+
+  assert.equal(context.priorPurchaseTotal, 500);
+  assert.equal(context.priorRefundTotal, 500);
 });
 
 test('getOutboundContext: knownOutboundReceiverIds and priorOutboundCount reflect this business account\'s own history', () => {

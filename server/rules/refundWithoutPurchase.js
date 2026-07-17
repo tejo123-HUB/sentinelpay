@@ -7,7 +7,7 @@ const REFUND_WITHOUT_PURCHASE_WEIGHT = 55; // contribution to the 0-100 fraud sc
 
 /**
  * @param {{ amount: number, purpose: string|null }} transaction
- * @param {{ priorPurchaseTotal: number }} outboundContext
+ * @param {{ priorPurchaseTotal: number, priorRefundTotal: number }} outboundContext
  */
 function refundWithoutPurchase(transaction, outboundContext) {
   const purpose = (transaction.purpose || '').toLowerCase();
@@ -16,14 +16,23 @@ function refundWithoutPurchase(transaction, outboundContext) {
   }
 
   const priorPurchaseTotal = (outboundContext && outboundContext.priorPurchaseTotal) || 0;
-  if (priorPurchaseTotal >= transaction.amount) {
+  // Refunds already issued against this same purchase history must reduce what's left to draw
+  // on -- comparing against the gross purchase total alone (the original bug here) let the same
+  // purchase justify refund after refund, since the total never went down.
+  const priorRefundTotal = (outboundContext && outboundContext.priorRefundTotal) || 0;
+  const availableCredit = priorPurchaseTotal - priorRefundTotal;
+  if (availableCredit >= transaction.amount) {
     return { flagged: false, reason: null, weight: 0 };
   }
 
-  const reason =
-    priorPurchaseTotal > 0
-      ? `Refund of ${transaction.amount.toFixed(2)} exceeds this customer's total prior purchases (${priorPurchaseTotal.toFixed(2)}) from this account`
-      : `Refund of ${transaction.amount.toFixed(2)} has no matching prior purchase from this customer`;
+  let reason;
+  if (priorRefundTotal > 0) {
+    reason = `Refund of ${transaction.amount.toFixed(2)} exceeds this customer's remaining purchase credit (${Math.max(availableCredit, 0).toFixed(2)} of ${priorPurchaseTotal.toFixed(2)} total; ${priorRefundTotal.toFixed(2)} already refunded)`;
+  } else if (priorPurchaseTotal > 0) {
+    reason = `Refund of ${transaction.amount.toFixed(2)} exceeds this customer's total prior purchases (${priorPurchaseTotal.toFixed(2)}) from this account`;
+  } else {
+    reason = `Refund of ${transaction.amount.toFixed(2)} has no matching prior purchase from this customer`;
+  }
 
   return { flagged: true, reason, weight: REFUND_WITHOUT_PURCHASE_WEIGHT };
 }

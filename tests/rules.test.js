@@ -199,6 +199,24 @@ test('refundWithoutPurchase: ignores non-refund transactions entirely (e.g. vend
   assert.equal(result.flagged, false);
 });
 
+test('refundWithoutPurchase: flags a second refund against a purchase already fully refunded (regression)', () => {
+  // A single ₹500 purchase must not justify refund after refund -- priorRefundTotal (the first
+  // ₹500 refund already issued) has to reduce the available credit to 0 for the second one.
+  const transaction = { amount: 500, purpose: 'Refund - order #2' };
+  const result = refundWithoutPurchase(transaction, { priorPurchaseTotal: 500, priorRefundTotal: 500 });
+
+  assert.equal(result.flagged, true);
+  assert.match(result.reason, /remaining purchase credit/);
+  assert.match(result.reason, /500\.00 already refunded/);
+});
+
+test('refundWithoutPurchase: allows a refund within what remains after a partial prior refund', () => {
+  const transaction = { amount: 200, purpose: 'Refund - order #2' };
+  const result = refundWithoutPurchase(transaction, { priorPurchaseTotal: 500, priorRefundTotal: 300 });
+
+  assert.equal(result.flagged, false);
+});
+
 // ---- payoutToNewReceiver ----
 
 test('payoutToNewReceiver: flags a payout to a receiver never paid before', () => {

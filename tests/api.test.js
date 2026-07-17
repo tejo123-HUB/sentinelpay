@@ -637,6 +637,97 @@ test('POST /transaction: an active structuring alert still forces block for an i
   }
 });
 
+test('POST /transaction: a same-burst fabricated purchase cannot be immediately used as refund credit (regression)', async () => {
+  const { server } = await freshServer();
+  try {
+    await request(server, 'POST', '/business-accounts', { account_id: 'm_regress_refund' });
+
+    // Fabricate an inbound "purchase" -- unscored, since the sender isn't a business account.
+    const purchase = await request(server, 'POST', '/transaction', {
+      sender_id: 'u_fabricated_customer',
+      receiver_id: 'm_regress_refund',
+      amount: 8000,
+      timestamp: new Date().toISOString(),
+      transaction_type: 'transfer',
+    });
+    assert.equal(purchase.status, 201);
+
+    // Immediately reference it in a matching outbound "refund" -- without the purchase-age
+    // gate, refundWithoutPurchase would see priorPurchaseTotal >= amount and wave this through.
+    const refund = await request(server, 'POST', '/transaction', {
+      sender_id: 'm_regress_refund',
+      receiver_id: 'u_fabricated_customer',
+      amount: 8000,
+      timestamp: new Date().toISOString(),
+      purpose: 'Refund - order #999',
+      transaction_type: 'transfer',
+    });
+
+    assert.equal(refund.status, 201);
+    assert.ok(
+      refund.body.reasons.some((r) => r.includes('no matching prior purchase')),
+      `expected the freshly-fabricated purchase to be too young to count, got reasons: ${JSON.stringify(refund.body.reasons)}`
+    );
+  } finally {
+    server.close();
+  }
+});
+
+test('POST /transaction: a second refund against an already-refunded purchase is flagged (regression)', async () => {
+  const { app, server } = await freshServer();
+  try {
+    await request(server, 'POST', '/business-accounts', { account_id: 'm_regress_double' });
+
+    // POST /transaction always stamps server-received time, so a "purchase from 6 minutes ago"
+    // (old enough to clear the purchase-age gate) has to be seeded directly, the same way the
+    // structuring-alert tests above seed pre-existing state -- not something the real API lets
+    // a caller backdate, by design.
+    const db = app.locals.db;
+    const sixMinutesAgo = new Date(Date.now() - 6 * 60 * 1000).toISOString();
+    db.prepare('INSERT OR IGNORE INTO users (user_id, created_at, avg_transaction_amount) VALUES (?, ?, 0)').run(
+      'u_double_refund_customer',
+      sixMinutesAgo
+    );
+    db.prepare('INSERT OR IGNORE INTO users (user_id, created_at, avg_transaction_amount) VALUES (?, ?, 0)').run(
+      'm_regress_double',
+      sixMinutesAgo
+    );
+    db.prepare(
+      `INSERT INTO transactions
+        (transaction_id, sender_id, receiver_id, amount, timestamp, transaction_type, fraud_score, decision)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run('t_seed_purchase', 'u_double_refund_customer', 'm_regress_double', 500, sixMinutesAgo, 'transfer', 0, 'allow');
+
+    const firstRefund = await request(server, 'POST', '/transaction', {
+      sender_id: 'm_regress_double',
+      receiver_id: 'u_double_refund_customer',
+      amount: 500,
+      timestamp: new Date().toISOString(),
+      purpose: 'Refund - order #1',
+      transaction_type: 'transfer',
+    });
+    assert.equal(firstRefund.status, 201);
+    assert.ok(!firstRefund.body.reasons.some((r) => r.includes('purchase')), 'the first refund, backed by a real purchase, should not be flagged');
+
+    const secondRefund = await request(server, 'POST', '/transaction', {
+      sender_id: 'm_regress_double',
+      receiver_id: 'u_double_refund_customer',
+      amount: 500,
+      timestamp: new Date().toISOString(),
+      purpose: 'Refund - order #2',
+      transaction_type: 'transfer',
+    });
+
+    assert.equal(secondRefund.status, 201);
+    assert.ok(
+      secondRefund.body.reasons.some((r) => r.includes('remaining purchase credit')),
+      `expected the second refund against the same already-refunded purchase to be flagged, got reasons: ${JSON.stringify(secondRefund.body.reasons)}`
+    );
+  } finally {
+    server.close();
+  }
+});
+
 test('POST /transaction: the stored timestamp is server-received time, not the client-supplied value', async () => {
   const { server } = await freshServer();
   try {
