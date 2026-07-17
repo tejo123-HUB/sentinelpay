@@ -33,6 +33,11 @@ const MULE_DETECTION = {
   // A receiver needs at least this many qualifying receive+quick-withdraw cycles before being
   // labeled "Suspected Mule Account" -- one clean withdrawal isn't a pattern.
   MULE_MIN_QUALIFYING_CYCLES: 2,
+  // Bounds the per-receiver query cost regardless of lifetime transaction volume -- same
+  // reasoning as userProfile.js's ACTIVE_HOURS_SAMPLE_LIMIT (Section 15.6, finding #3): an
+  // unbounded scan over an active account's full history would grow the per-transaction latency
+  // without limit as that account's volume grows.
+  MULE_SCORE_MAX_RECEIPTS_SCANNED: 50,
 };
 
 const DORMANT_ACCOUNT = {

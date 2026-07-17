@@ -14,6 +14,10 @@ const refundAccountMismatch = require('../server/rules/refundAccountMismatch');
 const multipleRefundDetection = require('../server/rules/multipleRefundDetection');
 const splitRefundDetection = require('../server/rules/splitRefundDetection');
 const refundVelocity = require('../server/rules/refundVelocity');
+const newVendorRisk = require('../server/rules/newVendorRisk');
+const dormantAccountReactivation = require('../server/rules/dormantAccountReactivation');
+const muleReceiverRisk = require('../server/rules/muleReceiverRisk');
+const geoRisk = require('../server/rules/geoRisk');
 
 const BASE_TIME = new Date('2026-07-18T12:00:00Z').getTime();
 
@@ -506,6 +510,140 @@ test('outboundFanOutBurst: does not flag fewer than the threshold of new receive
   const context = { knownOutboundReceiverIds: [], recentBurstReceiverIds: ['u_a'] };
 
   const result = outboundFanOutBurst(transaction, context);
+
+  assert.equal(result.flagged, false);
+});
+
+// ---- newVendorRisk (Section 15.16, Feature 5) ----
+
+test('newVendorRisk: force-blocks a very high value payment to a new vendor', () => {
+  const transaction = { amount: 300000, receiver_id: 'u_new', purpose: null };
+  const context = { priorOutboundCount: 5, knownOutboundReceiverIds: ['u_a'] };
+  const result = newVendorRisk(transaction, context);
+
+  assert.equal(result.flagged, true);
+  assert.equal(result.reason, 'High value payment to new vendor.');
+  assert.ok(result.weight >= 80, 'weight alone should be enough to force a block');
+});
+
+test('newVendorRisk: step-up tier for a moderately high value payment to a new vendor', () => {
+  const transaction = { amount: 60000, receiver_id: 'u_new', purpose: null };
+  const context = { priorOutboundCount: 5, knownOutboundReceiverIds: ['u_a'] };
+  const result = newVendorRisk(transaction, context);
+
+  assert.equal(result.flagged, true);
+  assert.ok(result.weight >= 40 && result.weight < 80);
+});
+
+test('newVendorRisk: does not flag a small payment to a new vendor', () => {
+  const transaction = { amount: 100, receiver_id: 'u_new', purpose: null };
+  const context = { priorOutboundCount: 5, knownOutboundReceiverIds: ['u_a'] };
+  const result = newVendorRisk(transaction, context);
+
+  assert.equal(result.flagged, false);
+});
+
+test('newVendorRisk: does not flag a large payment to an already-known vendor', () => {
+  const transaction = { amount: 300000, receiver_id: 'u_a', purpose: null };
+  const context = { priorOutboundCount: 5, knownOutboundReceiverIds: ['u_a'] };
+  const result = newVendorRisk(transaction, context);
+
+  assert.equal(result.flagged, false);
+});
+
+test('newVendorRisk: ignores refund-purpose transactions', () => {
+  const transaction = { amount: 300000, receiver_id: 'u_new', purpose: 'Refund' };
+  const context = { priorOutboundCount: 5, knownOutboundReceiverIds: [] };
+  const result = newVendorRisk(transaction, context);
+
+  assert.equal(result.flagged, false);
+});
+
+// ---- dormantAccountReactivation (Section 15.16, Feature 12) ----
+
+test('dormantAccountReactivation: flags a large transaction after 180+ days of inactivity', () => {
+  const transaction = { amount: 20000, timestamp: '2026-07-18T00:00:00Z' };
+  const context = { lastActivityTimestamp: '2026-01-01T00:00:00Z' };
+  const result = dormantAccountReactivation(transaction, context);
+
+  assert.equal(result.flagged, true);
+  assert.match(result.reason, /Dormant account reactivated with abnormal activity\./);
+});
+
+test('dormantAccountReactivation: does not flag a large transaction from a recently active account', () => {
+  const transaction = { amount: 20000, timestamp: '2026-07-18T00:00:00Z' };
+  const context = { lastActivityTimestamp: '2026-07-17T00:00:00Z' };
+  const result = dormantAccountReactivation(transaction, context);
+
+  assert.equal(result.flagged, false);
+});
+
+test('dormantAccountReactivation: does not flag a small transaction even after a long gap', () => {
+  const transaction = { amount: 10, timestamp: '2026-07-18T00:00:00Z' };
+  const context = { lastActivityTimestamp: '2026-01-01T00:00:00Z' };
+  const result = dormantAccountReactivation(transaction, context);
+
+  assert.equal(result.flagged, false);
+});
+
+test('dormantAccountReactivation: does not flag a brand-new account with no prior history', () => {
+  const transaction = { amount: 20000, timestamp: '2026-07-18T00:00:00Z' };
+  const context = { lastActivityTimestamp: null };
+  const result = dormantAccountReactivation(transaction, context);
+
+  assert.equal(result.flagged, false);
+});
+
+// ---- muleReceiverRisk (Section 15.16, Feature 13) ----
+
+test('muleReceiverRisk: flags a receiver with a suspected-mule pattern', () => {
+  const transaction = { receiver_id: 'u_mule' };
+  const context = { receiverMuleScore: { isMule: true, qualifyingCycles: 3 } };
+  const result = muleReceiverRisk(transaction, context);
+
+  assert.equal(result.flagged, true);
+  assert.match(result.reason, /Suspected Mule Account/);
+  assert.equal(result.severity, 'Critical');
+});
+
+test('muleReceiverRisk: does not flag a receiver with no mule pattern', () => {
+  const transaction = { receiver_id: 'u_clean' };
+  const context = { receiverMuleScore: { isMule: false, qualifyingCycles: 0 } };
+  const result = muleReceiverRisk(transaction, context);
+
+  assert.equal(result.flagged, false);
+});
+
+// ---- geoRisk (Section 15.16, Feature 14) ----
+
+test('geoRisk: flags a transaction from a configured high-risk country', () => {
+  const config = require('../server/config');
+  const transaction = { country: config.GEO_RISK.HIGH_RISK_COUNTRIES[0], ip_address: null };
+  const result = geoRisk(transaction);
+
+  assert.equal(result.flagged, true);
+  assert.match(result.reason, /high-risk country/);
+});
+
+test('geoRisk: flags a transaction from a configured high-risk IP prefix', () => {
+  const config = require('../server/config');
+  const transaction = { country: null, ip_address: `${config.GEO_RISK.HIGH_RISK_IP_PREFIXES[0]}42` };
+  const result = geoRisk(transaction);
+
+  assert.equal(result.flagged, true);
+  assert.match(result.reason, /high-risk IP range/);
+});
+
+test('geoRisk: does not flag an ordinary country/IP', () => {
+  const transaction = { country: 'US', ip_address: '10.0.0.1' };
+  const result = geoRisk(transaction);
+
+  assert.equal(result.flagged, false);
+});
+
+test('geoRisk: does not flag when country/ip_address are absent', () => {
+  const transaction = { country: null, ip_address: null };
+  const result = geoRisk(transaction);
 
   assert.equal(result.flagged, false);
 });

@@ -27,6 +27,7 @@ const OUTBOUND_MIN_PURCHASE_AGE_MS = 5 * 60 * 1000;
 // above so every outbound detector shares one context object and one calling convention
 // (check(transaction, outboundContext)) rather than each rule querying the DB independently.
 const { REFUND_INTEGRITY } = require('./config');
+const { computeMuleScore } = require('./muleScore');
 
 /**
  * @param {import('node:sqlite').DatabaseSync} db
@@ -131,6 +132,25 @@ function getOutboundContext(db, transaction, nowMs) {
     referencedPurchaseRefundCount = priorRefundsOnPurchase.n;
   }
 
+  // Feature 12 (dormant account): the most recent transaction touching this business account in
+  // either direction, before this one -- no lookback cap, since a long gap is exactly what this
+  // check is looking for and capping the window would hide it.
+  const lastSenderActivity = db
+    .prepare('SELECT MAX(timestamp) AS t FROM transactions WHERE sender_id = ? AND timestamp <= ?')
+    .get(businessId, transaction.timestamp);
+  const lastReceiverActivity = db
+    .prepare('SELECT MAX(timestamp) AS t FROM transactions WHERE receiver_id = ? AND timestamp <= ?')
+    .get(businessId, transaction.timestamp);
+  const lastActivityTimestamp = [lastSenderActivity.t, lastReceiverActivity.t]
+    .filter(Boolean)
+    .sort()
+    .pop() || null;
+
+  // Feature 13 (mule detection): does this transaction's receiver look like a mule account,
+  // based on its own lifetime receive-then-quickly-drain history? Computed here (not inside a
+  // rule file) since it needs direct DB access, same reasoning as every other field above.
+  const receiverMuleScore = computeMuleScore(db, counterpartyId, nowMs);
+
   return {
     priorPurchaseTotal: priorPurchase.total,
     priorRefundTotal: priorRefund.total,
@@ -145,6 +165,8 @@ function getOutboundContext(db, transaction, nowMs) {
     referencedPurchase,
     referencedPurchaseRefundedTotal,
     referencedPurchaseRefundCount,
+    lastActivityTimestamp,
+    receiverMuleScore,
   };
 }
 

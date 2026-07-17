@@ -39,6 +39,10 @@ const refundAccountMismatch = require('../rules/refundAccountMismatch');
 const multipleRefundDetection = require('../rules/multipleRefundDetection');
 const splitRefundDetection = require('../rules/splitRefundDetection');
 const refundVelocity = require('../rules/refundVelocity');
+const newVendorRisk = require('../rules/newVendorRisk');
+const dormantAccountReactivation = require('../rules/dormantAccountReactivation');
+const muleReceiverRisk = require('../rules/muleReceiverRisk');
+const geoRisk = require('../rules/geoRisk');
 
 const RULE_DETECTORS = [
   { type: 'velocity', check: velocity },
@@ -60,6 +64,10 @@ const OUTBOUND_RULE_DETECTORS = [
   { type: 'multiple_refund_detection', check: multipleRefundDetection },
   { type: 'split_refund_detection', check: splitRefundDetection },
   { type: 'refund_velocity', check: refundVelocity },
+  { type: 'new_vendor_risk', check: newVendorRisk },
+  { type: 'dormant_account_reactivation', check: dormantAccountReactivation },
+  { type: 'mule_receiver_risk', check: muleReceiverRisk },
+  { type: 'geo_risk', check: geoRisk },
 ];
 
 const DEFAULT_LIST_LIMIT = 50;

@@ -112,6 +112,36 @@ A real-time scoring API that:
 9. **Audit Trail & Analytics View** ✅ built
    Historical view of flagged transactions over time, useful for showing "improvement over time" or trend analysis to judges. `dashboard/audit.js` + an "Audit Trail" dashboard tab: a Chart.js trend line (allow/step-up/block counts per hour, via the new `GET /audit/summary` endpoint) plus a filterable table of historical flagged transactions (via `GET /transactions?decision=...`, a new optional filter on the existing endpoint).
 
+### 4.3 21-Feature Extension (Section 15.16) — status tracked here, design detail in the dev log
+
+The full spec (verbatim) and design rationale live in Section 15.16; this table is the canonical status list this doc's own anti-drift rule requires — updated in the same commit as each feature lands, not after the fact.
+
+| # | Feature | Status | Where it lives |
+|---|---|---|---|
+| 1 | Refund Account Mismatch Detection | ✅ built | `server/rules/refundAccountMismatch.js` |
+| 2 | Multiple Refund Detection | ✅ built | `server/rules/multipleRefundDetection.js` |
+| 3 | Improve Existing Refund Validation | ✅ built | `server/rules/refundWithoutPurchase.js` (reference-based path) |
+| 4 | Merchant Account Takeover Detection | ⏳ planned | `merchant_login_events` table + new route + detector, not yet built |
+| 5 | New Vendor Risk Detection | ✅ built | `server/rules/newVendorRisk.js` |
+| 6 | Circular Money Flow Detection | ⏳ planned | extends `server/structuring/`, not yet built |
+| 7 | Split Refund Detection | ✅ built | `server/rules/splitRefundDetection.js` |
+| 8 | Friendly Fraud Detection | ⏳ planned | `disputes` table + new route + detector, not yet built |
+| 9 | Refund Velocity Detection | ✅ built | `server/rules/refundVelocity.js` |
+| 10 | Employee Fraud Detection | ⏳ planned | `transactions.employee_id` column added; detector not yet built |
+| 11 | Cross Gateway Fraud Detection | ⏳ planned | not yet built (query pattern over existing `merchant_id`) |
+| 12 | Dormant Account Detection | ✅ built | `server/rules/dormantAccountReactivation.js` |
+| 13 | Mule Account Detection | ✅ built | `server/muleScore.js` + `server/rules/muleReceiverRisk.js` |
+| 14 | Geo Risk Scoring | ✅ built | `server/rules/geoRisk.js` |
+| 15 | Advanced Merchant Risk Dashboard | ⏳ planned | not yet built |
+| 16 | Risk Scoring Engine (weights + critical force-block) | ⏳ planned | not yet built |
+| 17 | Fraud Explainability (severity on every detector) | ⏳ planned | new detectors already carry `severity`; not yet backfilled onto the original 9 or surfaced in the API response |
+| 18 | Analytics endpoints | ⏳ planned | not yet built |
+| 19 | Configuration (no magic numbers) | ✅ built | `server/config.js` |
+| 20 | Testing (100% detector coverage) | 🔄 ongoing | every feature above ships with unit + integration tests as it lands; a final coverage sweep is still pending |
+| 21 | Documentation | 🔄 ongoing | this section + Section 15.16, updated per phase as each feature lands; a final consistency pass is still pending |
+
+Nine detector-level features (1/2/3/5/7/9/12/13/14) plus the config foundation (19) are complete and merged with passing tests as of this table's last update. The remaining features (4/6/8/10/11/15/16/17/18) need either a new data model this system doesn't yet capture (4, 8) or touch the scoring/dashboard/analytics layer broadly (6, 11, 15, 16, 17, 18) — see Section 15.16's phasing for the build order.
+
 ---
 
 ## 5. GCP Architecture

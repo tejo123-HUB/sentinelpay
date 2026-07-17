@@ -210,6 +210,50 @@ test('getOutboundContext: refundVelocityCount counts all recent refunds from thi
   assert.equal(context.refundVelocityCount, 2);
 });
 
+test('getOutboundContext: lastActivityTimestamp reflects the most recent transaction in either direction', () => {
+  const db = buildTestDb();
+  insertTransaction(db, { senderId: 'u_other', receiverId: 'm_biz', amount: 10, msAgo: 5 * 24 * 60 * 60 * 1000 }); // 5 days ago, business as receiver
+  insertTransaction(db, { senderId: 'm_biz', receiverId: 'u_other2', amount: 10, msAgo: 24 * 60 * 60 * 1000 }); // 1 day ago, business as sender -- more recent
+
+  const context = getOutboundContext(db, { sender_id: 'm_biz', receiver_id: 'u_new', timestamp: new Date(NOW_MS).toISOString() }, NOW_MS);
+
+  assert.equal(context.lastActivityTimestamp, new Date(NOW_MS - 24 * 60 * 60 * 1000).toISOString());
+});
+
+test('getOutboundContext: lastActivityTimestamp is null for an account with no prior transactions', () => {
+  const db = buildTestDb();
+  const context = getOutboundContext(db, { sender_id: 'm_brand_new', receiver_id: 'u_new', timestamp: new Date(NOW_MS).toISOString() }, NOW_MS);
+
+  assert.equal(context.lastActivityTimestamp, null);
+});
+
+test('getOutboundContext: receiverMuleScore reflects the receiver\'s receive-then-drain history', () => {
+  const db = buildTestDb();
+  // u_mule receives 1000, then sends 900 (90%) back out within the mule window, twice.
+  insertTransaction(db, { senderId: 'm_other', receiverId: 'u_mule', amount: 1000, msAgo: 20 * 60 * 1000 });
+  insertTransaction(db, { senderId: 'u_mule', receiverId: 'u_downstream', amount: 900, msAgo: 15 * 60 * 1000 });
+  insertTransaction(db, { senderId: 'm_other2', receiverId: 'u_mule', amount: 1000, msAgo: 10 * 60 * 1000 });
+  insertTransaction(db, { senderId: 'u_mule', receiverId: 'u_downstream2', amount: 950, msAgo: 6 * 60 * 1000 });
+
+  const context = getOutboundContext(db, { sender_id: 'm_biz', receiver_id: 'u_mule', timestamp: new Date(NOW_MS).toISOString() }, NOW_MS);
+
+  assert.equal(context.receiverMuleScore.isMule, true);
+  assert.equal(context.receiverMuleScore.qualifyingCycles, 2);
+});
+
+// ---- computeMuleScore (server/muleScore.js, Section 15.16 Feature 13) ----
+
+test('computeMuleScore: a receiver with no withdrawal-back-out history is not a mule', () => {
+  const { computeMuleScore } = require('../server/muleScore');
+  const db = buildTestDb();
+  insertTransaction(db, { senderId: 'm_biz', receiverId: 'u_clean', amount: 1000, msAgo: 60 * 1000 });
+
+  const score = computeMuleScore(db, 'u_clean', NOW_MS);
+
+  assert.equal(score.isMule, false);
+  assert.equal(score.qualifyingCycles, 0);
+});
+
 // ---- applyOutboundRestrictors ----
 
 test('applyOutboundRestrictors: floors the score and adds a reason for an amount above the review threshold', () => {
