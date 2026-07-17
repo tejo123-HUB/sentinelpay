@@ -37,8 +37,9 @@ Here's exactly what happens, in order, every time money moves:
 2. **The gateway calls `POST /transaction`** with details: who's sending, who's receiving, how much, from where, from which device, and what type of transaction it is.
 3. **SentinelPay saves the transaction** to its database immediately, so there's a permanent record regardless of the outcome.
 4. **A fast lookup always checks**: is this sender or receiver already flagged as part of a known money-laundering pattern from the background structuring analysis (explained in Section 5)? This runs on *every* transaction, no exceptions — a known laundering ring doesn't get a pass just because it's paying the business instead of being paid by it.
-5. **If money is leaving the business** (the sender is one of your registered business accounts — see Section 8), the full behavioral analysis runs: five general-purpose rule checks (is this account sending money unusually fast? did it just "teleport" to a new city? is this amount way bigger than usual? is this an unrecognized device? is this a strange hour?), four checks purpose-built for outbound risk (is this refund backed by a real purchase? is this a receiver we've never paid before? are we paying out far more than we're taking in? are we suddenly fanning out to several new receivers at once?), and a machine learning model catching subtler patterns. A customer simply paying the business skips this step entirely and goes straight to a decision — a stolen card used to pay you is the card network's/payment gateway's problem (chargebacks, CVV checks), not something this system polices.
-6. **All of this combines into one fraud score from 0–100**, plus (for outbound transactions above a configurable amount) a hard floor that guarantees at least a step-up review regardless of score.
+4a. **A second lookup, also on every transaction regardless of direction**: is this sender or receiver on the business's own blacklist, whitelist, or watchlist? A blacklisted account is blocked outright; a watchlisted one gets a moderate score bump; a whitelisted one gets the benefit of the doubt on routine checks — but never on a genuinely new red flag like an account takeover.
+5. **If money is leaving the business** (the sender is one of your registered business accounts — see Section 9), the full behavioral analysis runs: five general-purpose rule checks (is this account sending money unusually fast? did it just "teleport" to a new city? is this amount way bigger than usual? is this an unrecognized device? is this a strange hour?), and thirteen checks purpose-built for outbound risk — refund integrity (backed by a real purchase? sent to the original payer? split across many small refunds? coming too fast?), account/vendor risk (a receiver never paid before, at a risky amount? an account reactivating after months of silence? does the receiver look like a money-mule? is the geography high-risk?), merchant/employee/gateway risk (did this account just log in from an unrecognized device right before this payout? is one employee issuing an unusual number of refunds? is the same receiver being paid through several different gateways to spread out the total?), and two general integrity checks (is this a duplicate of a transaction just sent? does this transaction's device or IP match several unrelated accounts?) — plus a machine learning model catching subtler patterns. A customer simply paying the business skips the direction-specific checks entirely and goes straight to a decision — a stolen card used to pay you is the card network's/payment gateway's problem (chargebacks, CVV checks), not something this system polices.
+6. **All of this combines into one fraud score from 0–100**, plus (for outbound transactions above a configurable amount) a hard floor that guarantees at least a step-up review regardless of score, and any Critical-severity finding (an account takeover, a suspected mule, a blacklist hit) forces a block outright.
 7. **A decision is made instantly:**
    - Score under 40 → **Allow** (payment goes through normally)
    - Score 40–80 → **Step-up** (ask for extra verification, like an OTP)
@@ -133,7 +134,19 @@ A fraud analyst sees one clear, actionable alert: *"₹80,000 structured across 
 
 ---
 
-## 8. How the Dashboard Is Actually Used (Real-World Workflow)
+## 8. Worked Example #5 — Account Takeover, and the Blacklist Overriding a Trusted Relationship
+
+**Scenario:** One of your business's payout accounts is compromised — the attacker logs in from a device and country never seen on this account before, and within minutes issues a large refund to an account you'd previously whitelisted (say, a long-time customer whose routine refunds used to sail through without friction).
+
+**What SentinelPay sees:**
+- **Merchant account takeover check** flags it: this login's device and country don't match any prior login for this business account, and a refund followed within the takeover window.
+- The whitelist entry on the receiving account normally caps the score low, *but the merchant-takeover flag is Critical severity* — and a Critical finding is never suppressed by a whitelist entry, on either side of the transaction. Whitelisting exists to cut friction from routine checks on a known-good relationship, not to blind the system to a genuinely new red flag.
+
+**Result:** Fraud score forced to the block tier regardless of the whitelist, with both facts visible in the reasons — the account takeover, and (implicitly) that the usual whitelist discount didn't apply here. A separate scenario — an account that's actually on the **blacklist** — is simpler and blunter: it's blocked immediately regardless of direction, amount, or any other check, the same way a known structuring ring is. A **watchlisted** account, by contrast, isn't blocked on that basis alone — it just adds a moderate amount to the score and a reason, so an analyst sees the elevated risk without every watchlisted account's transactions being auto-blocked.
+
+---
+
+## 9. How the Dashboard Is Actually Used (Real-World Workflow)
 
 In a real deployment, a fraud operations analyst would have this dashboard open on a screen throughout their shift:
 
@@ -142,12 +155,13 @@ In a real deployment, a fraud operations analyst would have this dashboard open 
 - **Counters** at the top show at a glance: how many transactions processed today, how many flagged, how many blocked, how many stepped up.
 - A **dedicated structuring alerts panel** surfaces laundering patterns as soon as they're detected — this is the panel an analyst would check first, since it represents the highest-value, hardest-to-spot-manually cases.
 - Clicking into any flagged transaction or alert shows the human-readable reasons, so the analyst doesn't have to reverse-engineer *why* something was flagged.
+- An **Analytics tab** gives the same team a step back from the live stream: total/allowed/step-up/blocked counts, fraud percentage, blocked and recovered amounts, a fraud trend chart at hourly/daily/weekly/monthly granularity, a fraud heatmap (which hours/days see the most flagged activity), ranked "top risky" lists across customers, merchants, employees, vendors, devices, IPs, and countries, top mule accounts, and a gateway-by-gateway comparison — plus one-click CSV and PDF export for anything that needs to leave the dashboard (a compliance report, an incident writeup). A dark-mode toggle in the top corner applies across every tab.
 
 In the hackathon demo specifically, this dashboard is what you'd have projected on screen while your simulator runs — judges watch transactions flow in live, then watch a scripted attack get caught and explained on screen in real time.
 
 ---
 
-## 9. What Happens After a Block or Alert, in a Real Deployment?
+## 10. What Happens After a Block or Alert, in a Real Deployment?
 
 It's worth being honest about scope here: SentinelPay makes the **real-time decision** (allow/step-up/block) and raises alerts. In a full production system, a few things would typically happen next, which are outside this project's current scope but worth understanding for the pitch:
 
@@ -157,7 +171,7 @@ It's worth being honest about scope here: SentinelPay makes the **real-time deci
 
 ---
 
-## 10. Quick Reference — The Three Outcomes
+## 11. Quick Reference — The Three Outcomes
 
 | Score | Outcome | What the payer experiences | What it usually means |
 |---|---|---|---|
