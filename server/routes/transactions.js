@@ -35,6 +35,10 @@ const refundWithoutPurchase = require('../rules/refundWithoutPurchase');
 const payoutToNewReceiver = require('../rules/payoutToNewReceiver');
 const outboundRatioAnomaly = require('../rules/outboundRatioAnomaly');
 const outboundFanOutBurst = require('../rules/outboundFanOutBurst');
+const refundAccountMismatch = require('../rules/refundAccountMismatch');
+const multipleRefundDetection = require('../rules/multipleRefundDetection');
+const splitRefundDetection = require('../rules/splitRefundDetection');
+const refundVelocity = require('../rules/refundVelocity');
 
 const RULE_DETECTORS = [
   { type: 'velocity', check: velocity },
@@ -52,6 +56,10 @@ const OUTBOUND_RULE_DETECTORS = [
   { type: 'payout_new_receiver', check: payoutToNewReceiver },
   { type: 'outbound_ratio_anomaly', check: outboundRatioAnomaly },
   { type: 'outbound_fan_out_burst', check: outboundFanOutBurst },
+  { type: 'refund_account_mismatch', check: refundAccountMismatch },
+  { type: 'multiple_refund_detection', check: multipleRefundDetection },
+  { type: 'split_refund_detection', check: splitRefundDetection },
+  { type: 'refund_velocity', check: refundVelocity },
 ];
 
 const DEFAULT_LIST_LIMIT = 50;

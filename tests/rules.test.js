@@ -10,6 +10,10 @@ const refundWithoutPurchase = require('../server/rules/refundWithoutPurchase');
 const payoutToNewReceiver = require('../server/rules/payoutToNewReceiver');
 const outboundRatioAnomaly = require('../server/rules/outboundRatioAnomaly');
 const outboundFanOutBurst = require('../server/rules/outboundFanOutBurst');
+const refundAccountMismatch = require('../server/rules/refundAccountMismatch');
+const multipleRefundDetection = require('../server/rules/multipleRefundDetection');
+const splitRefundDetection = require('../server/rules/splitRefundDetection');
+const refundVelocity = require('../server/rules/refundVelocity');
 
 const BASE_TIME = new Date('2026-07-18T12:00:00Z').getTime();
 
@@ -213,6 +217,186 @@ test('refundWithoutPurchase: flags a second refund against a purchase already fu
 test('refundWithoutPurchase: allows a refund within what remains after a partial prior refund', () => {
   const transaction = { amount: 200, purpose: 'Refund - order #2' };
   const result = refundWithoutPurchase(transaction, { priorPurchaseTotal: 500, priorRefundTotal: 300 });
+
+  assert.equal(result.flagged, false);
+});
+
+// ---- refundWithoutPurchase: reference_transaction_id path (Section 15.16, Feature 3) ----
+
+test('refundWithoutPurchase: flags a refund referencing a purchase that does not exist', () => {
+  const transaction = { amount: 500, purpose: 'Refund - order #9', sender_id: 'm_1', reference_transaction_id: 't_missing' };
+  const result = refundWithoutPurchase(transaction, { referencedPurchase: null });
+
+  assert.equal(result.flagged, true);
+  assert.match(result.reason, /does not exist/);
+  assert.equal(result.severity, 'High');
+});
+
+test('refundWithoutPurchase: flags a referenced purchase not made to this business account', () => {
+  const transaction = { amount: 500, purpose: 'Refund', sender_id: 'm_1', reference_transaction_id: 't_1' };
+  const context = { referencedPurchase: { transaction_id: 't_1', sender_id: 'u_1', receiver_id: 'm_other', amount: 500, merchant_id: null } };
+  const result = refundWithoutPurchase(transaction, context);
+
+  assert.equal(result.flagged, true);
+  assert.match(result.reason, /not made to this business account/);
+});
+
+test('refundWithoutPurchase: flags a referenced purchase made through a different gateway', () => {
+  const transaction = { amount: 500, purpose: 'Refund', sender_id: 'm_1', merchant_id: 'gw_b', reference_transaction_id: 't_1' };
+  const context = {
+    referencedPurchase: { transaction_id: 't_1', sender_id: 'u_1', receiver_id: 'm_1', amount: 500, merchant_id: 'gw_a' },
+    referencedPurchaseRefundedTotal: 0,
+  };
+  const result = refundWithoutPurchase(transaction, context);
+
+  assert.equal(result.flagged, true);
+  assert.match(result.reason, /different gateway|gw_a/);
+});
+
+test('refundWithoutPurchase: flags a refund against an already-fully-refunded referenced purchase', () => {
+  const transaction = { amount: 100, purpose: 'Refund', sender_id: 'm_1', reference_transaction_id: 't_1' };
+  const context = {
+    referencedPurchase: { transaction_id: 't_1', sender_id: 'u_1', receiver_id: 'm_1', amount: 500, merchant_id: null },
+    referencedPurchaseRefundedTotal: 500,
+  };
+  const result = refundWithoutPurchase(transaction, context);
+
+  assert.equal(result.flagged, true);
+  assert.match(result.reason, /already been fully refunded/);
+});
+
+test('refundWithoutPurchase: flags a refund exceeding what remains on the referenced purchase', () => {
+  const transaction = { amount: 300, purpose: 'Refund', sender_id: 'm_1', reference_transaction_id: 't_1' };
+  const context = {
+    referencedPurchase: { transaction_id: 't_1', sender_id: 'u_1', receiver_id: 'm_1', amount: 500, merchant_id: null },
+    referencedPurchaseRefundedTotal: 300,
+  };
+  const result = refundWithoutPurchase(transaction, context);
+
+  assert.equal(result.flagged, true);
+  assert.match(result.reason, /exceeds the remaining refundable amount/);
+});
+
+test('refundWithoutPurchase: allows a valid referenced refund within the remaining amount', () => {
+  const transaction = { amount: 200, purpose: 'Refund', sender_id: 'm_1', merchant_id: 'gw_a', reference_transaction_id: 't_1' };
+  const context = {
+    referencedPurchase: { transaction_id: 't_1', sender_id: 'u_1', receiver_id: 'm_1', amount: 500, merchant_id: 'gw_a' },
+    referencedPurchaseRefundedTotal: 300,
+  };
+  const result = refundWithoutPurchase(transaction, context);
+
+  assert.equal(result.flagged, false);
+});
+
+// ---- refundAccountMismatch (Section 15.16, Feature 1) ----
+
+test('refundAccountMismatch: flags a refund sent to a different account than the original payer', () => {
+  const transaction = { purpose: 'Refund - order #1', receiver_id: 'u_evil', reference_transaction_id: 't_1' };
+  const context = { referencedPurchase: { sender_id: 'u_1', receiver_id: 'm_1', amount: 500 } };
+  const result = refundAccountMismatch(transaction, context);
+
+  assert.equal(result.flagged, true);
+  assert.match(result.reason, /Refund destination does not match original payment account\./);
+  assert.match(result.reason, /original: u_1/);
+  assert.match(result.reason, /refund: u_evil/);
+  assert.equal(result.severity, 'High');
+});
+
+test('refundAccountMismatch: does not flag a refund back to the original payer', () => {
+  const transaction = { purpose: 'Refund - order #1', receiver_id: 'u_1', reference_transaction_id: 't_1' };
+  const context = { referencedPurchase: { sender_id: 'u_1', receiver_id: 'm_1', amount: 500 } };
+  const result = refundAccountMismatch(transaction, context);
+
+  assert.equal(result.flagged, false);
+});
+
+test('refundAccountMismatch: does not flag when there is no reference_transaction_id', () => {
+  const transaction = { purpose: 'Refund - order #1', receiver_id: 'u_evil', reference_transaction_id: null };
+  const result = refundAccountMismatch(transaction, { referencedPurchase: null });
+
+  assert.equal(result.flagged, false);
+});
+
+test('refundAccountMismatch: ignores non-refund transactions', () => {
+  const transaction = { purpose: 'Payout', receiver_id: 'u_evil', reference_transaction_id: 't_1' };
+  const context = { referencedPurchase: { sender_id: 'u_1' } };
+  const result = refundAccountMismatch(transaction, context);
+
+  assert.equal(result.flagged, false);
+});
+
+// ---- multipleRefundDetection (Section 15.16, Feature 2) ----
+
+test('multipleRefundDetection: flags multiple refund attempts to the same customer', () => {
+  const transaction = { amount: 100, purpose: 'Refund' };
+  const result = multipleRefundDetection(transaction, { refundCountToCustomer: 3 });
+
+  assert.equal(result.flagged, true);
+  assert.equal(result.reason, 'Multiple refund attempts detected.');
+});
+
+test('multipleRefundDetection: flags cumulative refunds exceeding the original purchase', () => {
+  const transaction = { amount: 300, purpose: 'Refund' };
+  const context = { refundCountToCustomer: 0, referencedPurchase: { amount: 500 }, referencedPurchaseRefundedTotal: 300 };
+  const result = multipleRefundDetection(transaction, context);
+
+  assert.equal(result.flagged, true);
+  assert.equal(result.reason, 'Refund amount exceeds original purchase.');
+});
+
+test('multipleRefundDetection: does not flag a single ordinary refund', () => {
+  const transaction = { amount: 100, purpose: 'Refund' };
+  const context = { refundCountToCustomer: 0, referencedPurchase: { amount: 500 }, referencedPurchaseRefundedTotal: 0 };
+  const result = multipleRefundDetection(transaction, context);
+
+  assert.equal(result.flagged, false);
+});
+
+// ---- splitRefundDetection (Section 15.16, Feature 7) ----
+
+test('splitRefundDetection: flags a purchase refunded via several smaller transactions', () => {
+  // 10000 purchase refunded as 5 x 2000 -- the 5th pushes count to 5 and cumulative to 10000.
+  const transaction = { amount: 2000, purpose: 'Refund', reference_transaction_id: 't_1' };
+  const context = {
+    referencedPurchase: { amount: 10000 },
+    referencedPurchaseRefundCount: 4,
+    referencedPurchaseRefundedTotal: 8000,
+  };
+  const result = splitRefundDetection(transaction, context);
+
+  assert.equal(result.flagged, true);
+  assert.match(result.reason, /split into 5 separate transactions/);
+});
+
+test('splitRefundDetection: does not flag a single partial refund', () => {
+  const transaction = { amount: 2000, purpose: 'Refund', reference_transaction_id: 't_1' };
+  const context = { referencedPurchase: { amount: 10000 }, referencedPurchaseRefundCount: 0, referencedPurchaseRefundedTotal: 0 };
+  const result = splitRefundDetection(transaction, context);
+
+  assert.equal(result.flagged, false);
+});
+
+test('splitRefundDetection: does not flag several small refunds that never reach the purchase total', () => {
+  const transaction = { amount: 500, purpose: 'Refund', reference_transaction_id: 't_1' };
+  const context = { referencedPurchase: { amount: 10000 }, referencedPurchaseRefundCount: 4, referencedPurchaseRefundedTotal: 2000 };
+  const result = splitRefundDetection(transaction, context);
+
+  assert.equal(result.flagged, false);
+});
+
+// ---- refundVelocity (Section 15.16, Feature 9) ----
+
+test('refundVelocity: flags an unusually high refund rate', () => {
+  const transaction = { purpose: 'Refund' };
+  const result = refundVelocity(transaction, { refundVelocityCount: 19 });
+
+  assert.equal(result.flagged, true);
+  assert.equal(result.reason, 'Unusual refund velocity.');
+});
+
+test('refundVelocity: does not flag a normal refund rate', () => {
+  const transaction = { purpose: 'Refund' };
+  const result = refundVelocity(transaction, { refundVelocityCount: 2 });
 
   assert.equal(result.flagged, false);
 });

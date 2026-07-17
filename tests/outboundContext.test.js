@@ -23,23 +23,28 @@ function insertUser(db, userId) {
   );
 }
 
-function insertTransaction(db, { senderId, receiverId, amount, msAgo }) {
+function insertTransaction(db, { senderId, receiverId, amount, msAgo, purpose = null, merchantId = null, referenceTransactionId = null, transactionId }) {
   insertUser(db, senderId);
   insertUser(db, receiverId);
+  const id = transactionId || `t_${Math.random().toString(36).slice(2)}`;
   db.prepare(
     `INSERT INTO transactions
-      (transaction_id, sender_id, receiver_id, amount, timestamp, transaction_type, fraud_score, decision)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      (transaction_id, sender_id, receiver_id, amount, timestamp, transaction_type, fraud_score, decision, purpose, merchant_id, reference_transaction_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
-    `t_${Math.random().toString(36).slice(2)}`,
+    id,
     senderId,
     receiverId,
     amount,
     new Date(NOW_MS - msAgo).toISOString(),
     'transfer',
     0,
-    'allow'
+    'allow',
+    purpose,
+    merchantId,
+    referenceTransactionId
   );
+  return id;
 }
 
 // ---- isBusinessAccount ----
@@ -143,6 +148,66 @@ test('getOutboundContext: recentBurstReceiverIds only includes the short burst w
 
   assert.deepEqual(context.recentBurstReceiverIds, ['u_recent']);
   assert.ok(context.knownOutboundReceiverIds.includes('u_old'), 'the long lookback should still include the older receiver');
+});
+
+// ---- getOutboundContext: Section 15.16 refund-integrity fields ----
+
+test('getOutboundContext: referencedPurchase resolves the named purchase and its refunded total', () => {
+  const db = buildTestDb();
+  const purchaseId = insertTransaction(db, { senderId: 'u_1', receiverId: 'm_biz', amount: 500, msAgo: OLD_ENOUGH_MS, merchantId: 'gw_a' });
+  insertTransaction(db, {
+    senderId: 'm_biz',
+    receiverId: 'u_1',
+    amount: 200,
+    msAgo: 60 * 1000,
+    purpose: 'Refund',
+    referenceTransactionId: purchaseId,
+  });
+
+  const context = getOutboundContext(
+    db,
+    { sender_id: 'm_biz', receiver_id: 'u_1', timestamp: new Date(NOW_MS).toISOString(), reference_transaction_id: purchaseId },
+    NOW_MS
+  );
+
+  assert.equal(context.referencedPurchase.sender_id, 'u_1');
+  assert.equal(context.referencedPurchase.receiver_id, 'm_biz');
+  assert.equal(context.referencedPurchase.amount, 500);
+  assert.equal(context.referencedPurchase.merchant_id, 'gw_a');
+  assert.equal(context.referencedPurchaseRefundedTotal, 200);
+  assert.equal(context.referencedPurchaseRefundCount, 1);
+});
+
+test('getOutboundContext: referencedPurchase is null when no reference_transaction_id is given', () => {
+  const db = buildTestDb();
+  const context = getOutboundContext(db, { sender_id: 'm_biz', receiver_id: 'u_1', timestamp: new Date(NOW_MS).toISOString() }, NOW_MS);
+
+  assert.equal(context.referencedPurchase, null);
+  assert.equal(context.referencedPurchaseRefundedTotal, 0);
+  assert.equal(context.referencedPurchaseRefundCount, 0);
+});
+
+test('getOutboundContext: refundCountToCustomer/refundTotalToCustomer scoped to the multiple-refund window', () => {
+  const db = buildTestDb();
+  insertTransaction(db, { senderId: 'm_biz', receiverId: 'u_1', amount: 50, msAgo: 60 * 1000, purpose: 'Refund' });
+  insertTransaction(db, { senderId: 'm_biz', receiverId: 'u_1', amount: 75, msAgo: 2 * 60 * 1000, purpose: 'Refund' });
+  insertTransaction(db, { senderId: 'm_biz', receiverId: 'u_other', amount: 999, msAgo: 60 * 1000, purpose: 'Refund' }); // different customer, must not count
+
+  const context = getOutboundContext(db, { sender_id: 'm_biz', receiver_id: 'u_1', timestamp: new Date(NOW_MS).toISOString() }, NOW_MS);
+
+  assert.equal(context.refundCountToCustomer, 2);
+  assert.equal(context.refundTotalToCustomer, 125);
+});
+
+test('getOutboundContext: refundVelocityCount counts all recent refunds from this business account regardless of receiver', () => {
+  const db = buildTestDb();
+  insertTransaction(db, { senderId: 'm_biz', receiverId: 'u_1', amount: 10, msAgo: 5000, purpose: 'Refund' });
+  insertTransaction(db, { senderId: 'm_biz', receiverId: 'u_2', amount: 10, msAgo: 5000, purpose: 'Refund' });
+  insertTransaction(db, { senderId: 'm_biz', receiverId: 'u_3', amount: 10, msAgo: 5000, purpose: 'Payout' }); // not a refund, must not count
+
+  const context = getOutboundContext(db, { sender_id: 'm_biz', receiver_id: 'u_4', timestamp: new Date(NOW_MS).toISOString() }, NOW_MS);
+
+  assert.equal(context.refundVelocityCount, 2);
 });
 
 // ---- applyOutboundRestrictors ----

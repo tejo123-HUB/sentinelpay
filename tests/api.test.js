@@ -133,6 +133,72 @@ test('POST /transaction: purpose round-trips through GET /transactions (merchant
   }
 });
 
+test('POST /transaction: a referenced refund sent to the wrong account is flagged (Section 15.16, Feature 1)', async () => {
+  const { server } = await freshServer();
+  try {
+    await request(server, 'POST', '/business-accounts', { account_id: 'm_ref_test' });
+
+    const purchase = await request(
+      server,
+      'POST',
+      '/transaction',
+      validTransaction({ sender_id: 'u_original_payer', receiver_id: 'm_ref_test', amount: 500, purpose: null })
+    );
+    assert.equal(purchase.status, 201);
+
+    const refund = await request(
+      server,
+      'POST',
+      '/transaction',
+      validTransaction({
+        sender_id: 'm_ref_test',
+        receiver_id: 'u_someone_else',
+        amount: 500,
+        purpose: 'Refund - order #1',
+        reference_transaction_id: purchase.body.transaction_id,
+      })
+    );
+
+    assert.equal(refund.status, 201);
+    assert.notEqual(refund.body.decision, 'allow');
+    assert.ok(refund.body.reasons.some((r) => r.includes('Refund destination does not match original payment account.')));
+  } finally {
+    server.close();
+  }
+});
+
+test('POST /transaction: a valid referenced refund back to the original payer is not flagged for account mismatch', async () => {
+  const { server } = await freshServer();
+  try {
+    await request(server, 'POST', '/business-accounts', { account_id: 'm_ref_test_2' });
+
+    const purchase = await request(
+      server,
+      'POST',
+      '/transaction',
+      validTransaction({ sender_id: 'u_original_payer_2', receiver_id: 'm_ref_test_2', amount: 500, purpose: null })
+    );
+
+    const refund = await request(
+      server,
+      'POST',
+      '/transaction',
+      validTransaction({
+        sender_id: 'm_ref_test_2',
+        receiver_id: 'u_original_payer_2',
+        amount: 200,
+        purpose: 'Refund - order #2',
+        reference_transaction_id: purchase.body.transaction_id,
+      })
+    );
+
+    assert.equal(refund.status, 201);
+    assert.ok(!refund.body.reasons.some((r) => r.includes('does not match original payment account')));
+  } finally {
+    server.close();
+  }
+});
+
 test('POST /transaction: purpose is optional and defaults to null when omitted', async () => {
   const { server } = await freshServer();
   try {

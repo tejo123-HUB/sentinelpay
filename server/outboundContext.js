@@ -23,6 +23,11 @@ const OUTBOUND_BURST_WINDOW_MS = 10 * 60 * 1000;
 // refunded repeatedly (see the priorRefundTotal comment).
 const OUTBOUND_MIN_PURCHASE_AGE_MS = 5 * 60 * 1000;
 
+// Section 15.16 (Features 1/2/3/7/9): refund-integrity fields, computed alongside the fields
+// above so every outbound detector shares one context object and one calling convention
+// (check(transaction, outboundContext)) rather than each rule querying the DB independently.
+const { REFUND_INTEGRITY } = require('./config');
+
 /**
  * @param {import('node:sqlite').DatabaseSync} db
  * @param {{ sender_id: string, receiver_id: string, timestamp: string }} transaction
@@ -87,6 +92,45 @@ function getOutboundContext(db, transaction, nowMs) {
     .prepare('SELECT DISTINCT receiver_id FROM transactions WHERE sender_id = ? AND timestamp >= ? AND timestamp <= ?')
     .all(businessId, burstSince, transaction.timestamp);
 
+  // Feature 2 (multiple refunds) / Feature 9 (refund velocity): refund counts in their own,
+  // shorter, config-driven windows -- distinct from the 90-day priorRefundTotal above, which
+  // exists to reduce refundWithoutPurchase.js's "available credit," not to bound a rate.
+  const multiRefundSince = new Date(nowMs - REFUND_INTEGRITY.MULTIPLE_REFUND_WINDOW_MS).toISOString();
+  const refundVelocitySince = new Date(nowMs - REFUND_INTEGRITY.REFUND_VELOCITY_WINDOW_MS).toISOString();
+
+  const refundsToCustomer = db
+    .prepare(
+      "SELECT COUNT(*) AS n, COALESCE(SUM(amount), 0) AS total FROM transactions WHERE sender_id = ? AND receiver_id = ? AND LOWER(purpose) LIKE '%refund%' AND timestamp >= ? AND timestamp <= ?"
+    )
+    .get(businessId, counterpartyId, multiRefundSince, transaction.timestamp);
+
+  const refundVelocity = db
+    .prepare(
+      "SELECT COUNT(*) AS n FROM transactions WHERE sender_id = ? AND LOWER(purpose) LIKE '%refund%' AND timestamp >= ? AND timestamp <= ?"
+    )
+    .get(businessId, refundVelocitySince, transaction.timestamp);
+
+  // Feature 1 (account mismatch) / Feature 3 (purchase validation) / Feature 7 (split refund):
+  // when this transaction explicitly references the purchase it refunds, look that purchase up
+  // and total what's already been refunded against it specifically -- a sharper, per-purchase
+  // check than the customer-aggregate priorPurchaseTotal/priorRefundTotal above.
+  let referencedPurchase = null;
+  let referencedPurchaseRefundedTotal = 0;
+  let referencedPurchaseRefundCount = 0;
+  if (transaction.reference_transaction_id) {
+    referencedPurchase = db
+      .prepare('SELECT transaction_id, sender_id, receiver_id, amount, merchant_id FROM transactions WHERE transaction_id = ?')
+      .get(transaction.reference_transaction_id) || null;
+
+    const priorRefundsOnPurchase = db
+      .prepare(
+        'SELECT COUNT(*) AS n, COALESCE(SUM(amount), 0) AS total FROM transactions WHERE reference_transaction_id = ? AND timestamp <= ?'
+      )
+      .get(transaction.reference_transaction_id, transaction.timestamp);
+    referencedPurchaseRefundedTotal = priorRefundsOnPurchase.total;
+    referencedPurchaseRefundCount = priorRefundsOnPurchase.n;
+  }
+
   return {
     priorPurchaseTotal: priorPurchase.total,
     priorRefundTotal: priorRefund.total,
@@ -95,6 +139,12 @@ function getOutboundContext(db, transaction, nowMs) {
     rollingInboundTotal: rollingInbound.total,
     rollingOutboundTotal: rollingOutbound.total,
     recentBurstReceiverIds: burstReceiverRows.map((r) => r.receiver_id),
+    refundCountToCustomer: refundsToCustomer.n,
+    refundTotalToCustomer: refundsToCustomer.total,
+    refundVelocityCount: refundVelocity.n,
+    referencedPurchase,
+    referencedPurchaseRefundedTotal,
+    referencedPurchaseRefundCount,
   };
 }
 
