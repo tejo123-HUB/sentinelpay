@@ -198,6 +198,26 @@ test('GET /analytics/export: supports both json and csv formats', async () => {
   }
 });
 
+test('GET /analytics/export?format=excel: returns a real .xlsx file (Section 16, Category 18)', async () => {
+  const { server } = await freshServer();
+  try {
+    await request(server, 'POST', '/transaction', validTransaction());
+
+    const excel = await request(server, 'GET', '/analytics/export?format=excel');
+    assert.equal(excel.status, 200);
+    assert.match(excel.headers['content-type'], /spreadsheetml/);
+    assert.match(excel.headers['content-disposition'], /sentinelpay-export\.xlsx/);
+    // ZIP files (which .xlsx always is) start with the two-byte magic "PK" -- a real smoke check
+    // that this is genuinely a binary spreadsheet, not an error page or empty body. Full
+    // structural validation (a valid ZIP + correct OOXML parts) is covered directly against the
+    // Buffer output in tests/xlsxWriter.test.js, including cross-checking with Python's
+    // independent zipfile module.
+    assert.equal(String(excel.body).slice(0, 2), 'PK');
+  } finally {
+    server.close();
+  }
+});
+
 test('analytics routes require an API key', async () => {
   const { server } = await freshServer();
   try {

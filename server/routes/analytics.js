@@ -8,6 +8,7 @@ const router = express.Router();
 
 const { requireApiKey } = require('../middleware/apiKeyAuth');
 const { computeMuleScore } = require('../muleScore');
+const { buildXlsxWorkbook } = require('../xlsxWriter');
 
 const DEFAULT_TOP_LIMIT = 10;
 const MAX_TOP_LIMIT = 100;
@@ -231,7 +232,8 @@ router.get('/analytics/trend', requireApiKey, (req, res) => {
   res.json({ bucket, buckets: sortedBuckets });
 });
 
-const VALID_EXPORT_FORMATS = ['csv', 'json'];
+const VALID_EXPORT_FORMATS = ['csv', 'json', 'excel'];
+const EXPORT_HEADERS = ['transaction_id', 'sender_id', 'receiver_id', 'amount', 'timestamp', 'merchant_id', 'purpose', 'transaction_type', 'fraud_score', 'decision', 'country'];
 const MAX_EXPORT_ROWS = 5000;
 
 function toCsvValue(value) {
@@ -240,9 +242,10 @@ function toCsvValue(value) {
   return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
 }
 
-// GET /analytics/export?format=csv|json&limit=1000 — bulk export of recent transactions, for the
-// dashboard's CSV/PDF export buttons (PDF is generated client-side from this JSON, same reasoning
-// as this project's existing dependency-light dashboard conventions -- no server-side PDF library).
+// GET /analytics/export?format=csv|json|excel&limit=1000 — bulk export of recent transactions.
+// PDF is generated client-side from the JSON form (dashboard/analytics.js's triggerPdfExport),
+// same dependency-light reasoning as this project's other client-side-rendered exports; Excel is
+// a real server-generated .xlsx file (server/xlsxWriter.js), no exceljs/xlsx dependency.
 router.get('/analytics/export', requireApiKey, (req, res) => {
   const db = req.app.locals.db;
   const format = VALID_EXPORT_FORMATS.includes(req.query.format) ? req.query.format : 'json';
@@ -262,6 +265,18 @@ router.get('/analytics/export', requireApiKey, (req, res) => {
         .join(',')
     );
     res.type('text/csv').set('Content-Disposition', 'attachment; filename="sentinelpay-export.csv"').send([header, ...lines].join('\n'));
+    return;
+  }
+
+  if (format === 'excel') {
+    // Section 16, Category 18: a real .xlsx file, built by server/xlsxWriter.js -- no
+    // exceljs/xlsx dependency, consistent with this project's dependency-light convention.
+    const dataRows = rows.map((r) => EXPORT_HEADERS.map((h) => (typeof r[h] === 'number' ? r[h] : r[h] ?? '')));
+    const workbook = buildXlsxWorkbook(EXPORT_HEADERS, dataRows);
+    res
+      .type('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+      .set('Content-Disposition', 'attachment; filename="sentinelpay-export.xlsx"')
+      .send(workbook);
     return;
   }
 
