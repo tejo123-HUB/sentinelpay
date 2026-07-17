@@ -8,14 +8,14 @@ const express = require('express');
 const crypto = require('node:crypto');
 const router = express.Router();
 
-const { requireApiKey } = require('../middleware/apiKeyAuth');
+const { requireApiKey, requireRole } = require('../middleware/apiKeyAuth');
 const { MAX_ID_LENGTH } = require('../validate');
 
 const MAX_NOTE_LENGTH = 2000;
 const MAX_AUTHOR_LENGTH = 128;
 
 // POST /investigation-notes { transaction_id, note, author? }
-router.post('/investigation-notes', requireApiKey, (req, res) => {
+router.post('/investigation-notes', requireApiKey, requireRole('analyst'), (req, res) => {
   const db = req.app.locals.db;
   const { transaction_id, note, author } = req.body || {};
 

@@ -6,7 +6,7 @@ const { MAX_ID_LENGTH } = require('../validate');
 // transactions.js scopes it per-route: a blanket router.use(requireApiKey) here would run for
 // every request reaching this router, including the dashboard's own static assets, which can't
 // attach an X-API-Key header the way authFetch()'s fetch() calls can.
-const { requireApiKey } = require('../middleware/apiKeyAuth');
+const { requireApiKey, requireRole } = require('../middleware/apiKeyAuth');
 const { recordAdminAction } = require('../adminAuditLog');
 
 // GET /business-accounts — the dashboard's editable registry of the business's own account IDs,
@@ -20,7 +20,9 @@ router.get('/business-accounts', requireApiKey, (req, res) => {
 
 // POST /business-accounts { account_id } — registers an account as belonging to the business.
 // INSERT OR IGNORE: re-adding an already-registered ID is a no-op, not an error.
-router.post('/business-accounts', requireApiKey, (req, res) => {
+// admin-only (Section 16, Category 20 RBAC): changes which accounts get outbound fraud/AML
+// scoring at all -- a broad, system-wide effect, not a routine operational action.
+router.post('/business-accounts', requireApiKey, requireRole('admin'), (req, res) => {
   const db = req.app.locals.db;
   const { account_id } = req.body || {};
   if (typeof account_id !== 'string' || account_id.trim() === '' || account_id.length > MAX_ID_LENGTH) {
@@ -40,7 +42,7 @@ router.post('/business-accounts', requireApiKey, (req, res) => {
 
 // DELETE /business-accounts/:accountId — un-registers an account. Idempotent: removing an ID
 // that isn't registered still returns 204, not a 404.
-router.delete('/business-accounts/:accountId', requireApiKey, (req, res) => {
+router.delete('/business-accounts/:accountId', requireApiKey, requireRole('admin'), (req, res) => {
   const db = req.app.locals.db;
   db.prepare('DELETE FROM business_accounts WHERE account_id = ?').run(req.params.accountId);
   recordAdminAction(db, { action: 'delete', targetType: 'business_account', targetId: req.params.accountId, actorIp: req.ip });

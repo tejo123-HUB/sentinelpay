@@ -5,12 +5,12 @@ const express = require('express');
 const crypto = require('node:crypto');
 const router = express.Router();
 
-const { requireApiKey } = require('../middleware/apiKeyAuth');
+const { requireApiKey, requireRole } = require('../middleware/apiKeyAuth');
 const { MAX_ID_LENGTH } = require('../validate');
 
 const MAX_DISPUTE_TYPE_LENGTH = 64;
 
-router.post('/disputes', requireApiKey, (req, res) => {
+router.post('/disputes', requireApiKey, requireRole('analyst'), (req, res) => {
   const db = req.app.locals.db;
   const { transaction_id, customer_id, dispute_type } = req.body || {};
 

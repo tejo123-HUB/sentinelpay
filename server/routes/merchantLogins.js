@@ -6,12 +6,12 @@ const express = require('express');
 const crypto = require('node:crypto');
 const router = express.Router();
 
-const { requireApiKey } = require('../middleware/apiKeyAuth');
+const { requireApiKey, requireRole } = require('../middleware/apiKeyAuth');
 const { MAX_ID_LENGTH, MAX_COUNTRY_LENGTH } = require('../validate');
 
 const MAX_META_LENGTH = 128; // browser/os strings -- generous but bounded, same reasoning as MAX_ID_LENGTH
 
-router.post('/merchant-logins', requireApiKey, (req, res) => {
+router.post('/merchant-logins', requireApiKey, requireRole('analyst'), (req, res) => {
   const db = req.app.locals.db;
   const { merchant_id, device_id, browser, os, ip_address, location, country, timestamp } = req.body || {};
 

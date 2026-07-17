@@ -5,7 +5,7 @@ const express = require('express');
 const crypto = require('node:crypto');
 const router = express.Router();
 
-const { requireApiKey } = require('../middleware/apiKeyAuth');
+const { requireApiKey, requireRole } = require('../middleware/apiKeyAuth');
 const { MAX_ID_LENGTH } = require('../validate');
 const { recordAdminAction } = require('../adminAuditLog');
 
@@ -32,7 +32,10 @@ router.get('/fraud-lists', requireApiKey, (req, res) => {
 // (unlike business_accounts): an account can validly appear on the same list more than once
 // over time with different reasons (e.g. re-blacklisted after a second incident), and entry_id
 // is the primary key, not (list_type, account_id).
-router.post('/fraud-lists', requireApiKey, (req, res) => {
+// admin-only (Section 16, Category 20 RBAC): a blacklist/whitelist entry can force-block or
+// force-allow a transaction outright (scoring.js), a system-wide effect too consequential for a
+// lower-trust key.
+router.post('/fraud-lists', requireApiKey, requireRole('admin'), (req, res) => {
   const db = req.app.locals.db;
   const { list_type, account_id, reason } = req.body || {};
 
@@ -62,7 +65,7 @@ router.post('/fraud-lists', requireApiKey, (req, res) => {
 });
 
 // DELETE /fraud-lists/:entryId — idempotent, like business_accounts' DELETE.
-router.delete('/fraud-lists/:entryId', requireApiKey, (req, res) => {
+router.delete('/fraud-lists/:entryId', requireApiKey, requireRole('admin'), (req, res) => {
   const db = req.app.locals.db;
   db.prepare('DELETE FROM fraud_lists WHERE entry_id = ?').run(req.params.entryId);
   recordAdminAction(db, { action: 'delete', targetType: 'fraud_list', targetId: req.params.entryId, actorIp: req.ip });

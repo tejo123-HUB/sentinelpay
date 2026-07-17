@@ -21,7 +21,7 @@ const { getFraudProbability } = require('../ml/mlClient');
 // The whole dashboard was unstyled and inert as a result. Scoping the middleware to only the
 // routes that actually need it lets an unmatched path (style.css, a 404, anything) fall through
 // past this router entirely, the same as it would have with no auth middleware in the chain at all.
-const { requireApiKey } = require('../middleware/apiKeyAuth');
+const { requireApiKey, requireRole } = require('../middleware/apiKeyAuth');
 const { isBusinessAccount } = require('../businessAccounts');
 const getOutboundContext = require('../outboundContext');
 const applyOutboundRestrictors = require('../outboundRestrictor');
@@ -102,7 +102,9 @@ const MAX_BUCKET_MINUTES = 24 * 60; // one bucket per day, at most
 // (hanging the client forever, and potentially crashing the whole process on modern Node,
 // which terminates by default on unhandled rejections) instead of reaching the error-handling
 // middleware in index.js.
-router.post('/transaction', requireApiKey, async (req, res, next) => {
+// analyst-or-above (Section 16, Category 20 RBAC): ingesting a transaction is an operational
+// action, not a read -- a viewer-only key can watch the dashboard but not inject transactions.
+router.post('/transaction', requireApiKey, requireRole('analyst'), async (req, res, next) => {
   const requestStartMs = process.hrtime.bigint(); // Feature 18 analytics: average response latency -- not a scoring input, measured purely for observability
   try {
     const db = req.app.locals.db;
