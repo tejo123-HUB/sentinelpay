@@ -161,6 +161,33 @@ CREATE TABLE IF NOT EXISTS admin_audit_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_admin_audit_log_created_at ON admin_audit_log(created_at);
+
+-- Section 16, Category 14: the real, working subset of the Fraud Investigation Module that
+-- doesn't need a full analyst-identity/login system -- case creation, assignment (caller-
+-- supplied label, same trust model as employee_id/investigation_notes.author), and status
+-- tracking. "Investigation Timeline"/"Fraud Replay" are served by GET /cases/:caseId/timeline,
+-- which merges linked transactions, their structuring alerts, and investigation_notes in
+-- chronological order -- a real feature, not a video-style replay mechanism.
+CREATE TABLE IF NOT EXISTS cases (
+  case_id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('open', 'investigating', 'resolved', 'escalated')),
+  assigned_to TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS case_transactions (
+  case_id TEXT NOT NULL,
+  transaction_id TEXT NOT NULL,
+  added_at TEXT NOT NULL,
+  PRIMARY KEY (case_id, transaction_id),
+  FOREIGN KEY (case_id) REFERENCES cases(case_id),
+  FOREIGN KEY (transaction_id) REFERENCES transactions(transaction_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_case_transactions_transaction ON case_transactions(transaction_id);
+CREATE INDEX IF NOT EXISTS idx_cases_status ON cases(status);
 `;
 
 function initDb(dbPath) {
