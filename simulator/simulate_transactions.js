@@ -1,6 +1,8 @@
-// Generates realistic demo traffic against a running SentinelPay server: a continuous stream
-// of normal micro-transactions, plus on-demand scripted scenarios for a single-transaction
-// fraud block and a full structuring/layering pattern (architecture.md Section 10, Task 4).
+// Generates realistic demo traffic against a running SentinelPay server: a continuous stream of
+// normal customer-pays-merchant commerce (purchases, refunds, store-credit top-ups, settlement
+// payouts — see generateNormalTransaction below), plus on-demand scripted scenarios for a
+// single-transaction fraud block and a full structuring/layering pattern (architecture.md
+// Section 10, Task 4).
 //
 // Usage:
 //   node simulator/simulate_transactions.js --scenario=normal --count=100 --rate=150
@@ -26,20 +28,74 @@ if (API_KEY === DEFAULT_DEV_API_KEY) {
   console.warn('[simulator] No API_KEY set — using the same insecure default the server falls back to.');
 }
 
-// A pool of synthetic "regular" users with stable homes/devices, so their behavioral
-// baselines (avg_transaction_amount, typical_active_hours, known devices) build up naturally
-// across the normal traffic stream rather than every transaction looking brand-new. Sized
-// large enough (300) that even a fast stream (tens of ms between sends) keeps any single
-// user's own transaction rate well under the velocity detector's threshold (5/60s) — a
-// smaller pool made "normal" traffic look like bot-speed velocity abuse from a handful of
-// accounts, which is a simulator realism bug, not a fraud-engine false positive.
-const NORMAL_USER_POOL = Array.from({ length: 300 }, (_, i) => ({
-  id: `u_sim_${i + 1}`,
-  device: `d_sim_${i + 1}`,
-  homeLat: 16.5062 + (Math.random() - 0.5) * 0.4,
-  homeLng: 80.648 + (Math.random() - 0.5) * 0.4,
-  typicalAmount: 50 + Math.random() * 300,
-}));
+// Demo/display only: hub cities spread across India so the dashboard's Map tab reads as a
+// nationwide network rather than one single-city blob. Round-robin assignment below (not
+// random) guarantees an even split across hubs regardless of pool size.
+const DEMO_CITY_HUBS = [
+  { name: 'Delhi', lat: 28.6139, lng: 77.209 },
+  { name: 'Mumbai', lat: 19.076, lng: 72.8777 },
+  { name: 'Bengaluru', lat: 12.9716, lng: 77.5946 },
+  { name: 'Kolkata', lat: 22.5726, lng: 88.3639 },
+  { name: 'Chennai', lat: 13.0827, lng: 80.2707 },
+  { name: 'Hyderabad', lat: 17.385, lng: 78.4867 },
+  { name: 'Pune', lat: 18.5204, lng: 73.8567 },
+  { name: 'Ahmedabad', lat: 23.0225, lng: 72.5714 },
+  { name: 'Jaipur', lat: 26.9124, lng: 75.7873 },
+  { name: 'Lucknow', lat: 26.8467, lng: 80.9462 },
+];
+
+// A pool of synthetic customers with stable homes/devices, so their behavioral baselines
+// (avg_transaction_amount, typical_active_hours, known devices) build up naturally across the
+// normal traffic stream rather than every transaction looking brand-new. Sized large enough
+// (300) that even a fast stream (tens of ms between sends) keeps any single customer's own
+// transaction rate well under the velocity detector's threshold (5/60s) — a smaller pool made
+// "normal" traffic look like bot-speed velocity abuse from a handful of accounts, which is a
+// simulator realism bug, not a fraud-engine false positive. Homes are assigned round-robin
+// across DEMO_CITY_HUBS (not randomly) so every hub gets an equal share of customers — see
+// DEMO_CITY_HUBS above.
+const CUSTOMER_POOL = Array.from({ length: 300 }, (_, i) => {
+  const hub = DEMO_CITY_HUBS[i % DEMO_CITY_HUBS.length];
+  return {
+    id: `u_sim_${i + 1}`,
+    device: `d_sim_${i + 1}`,
+    homeCity: hub.name,
+    homeLat: hub.lat + (Math.random() - 0.5) * 0.3,
+    homeLng: hub.lng + (Math.random() - 0.5) * 0.3,
+    typicalAmount: 50 + Math.random() * 300,
+  };
+});
+
+// The business's own receiving accounts — a handful of storefronts/product lines within the one
+// merchant business SentinelPay is monitoring, not a fresh random receiver per transaction. Sized
+// large enough (8) that even when a merchant account is the *sender* (refunds/payouts, below),
+// any single account's send rate stays well under the velocity threshold — the same reasoning
+// that sizes CUSTOMER_POOL above, just for the much smaller share of traffic merchants originate.
+const MERCHANT_RECEIVER_POOL = [
+  'm_store_apparel',
+  'm_store_electronics',
+  'm_store_home_goods',
+  'm_store_beauty',
+  'm_store_subscriptions',
+  'm_store_digital_goods',
+  'm_store_grocery',
+  'm_store_marketplace',
+];
+
+// Which of the business's own payment-gateway accounts a transaction was ingested through —
+// the point of SentinelPay wiring into every gateway the business uses, rather than just one, is
+// that laundering can otherwise hide by spreading activity across gateways no single integration
+// would see in full (architecture.md Section 1). Populated from a small fixed pool so the
+// dashboard's "Gateway" column visibly shows several real gateways, not a fresh random value
+// every transaction.
+const GATEWAY_POOL = ['stripe_acct_primary', 'razorpay_acct_intl', 'paypal_acct_eu', 'stripe_acct_backup'];
+
+function randomGateway() {
+  return GATEWAY_POOL[Math.floor(Math.random() * GATEWAY_POOL.length)];
+}
+
+function randomMerchantAccount() {
+  return MERCHANT_RECEIVER_POOL[Math.floor(Math.random() * MERCHANT_RECEIVER_POOL.length)];
+}
 
 function jitter(value, spread) {
   return value + (Math.random() * 2 - 1) * spread;
@@ -81,29 +137,74 @@ async function getAlerts(baseUrl, limit = 20) {
   return res.json();
 }
 
+// Models the business's actual money flow, not generic person-to-person transfers: a customer
+// mostly pays one of the business's storefronts, occasionally the business refunds a customer
+// or settles funds out to its bank — the two cases that carry a human-readable `purpose` note,
+// mirroring what a real risk/compliance analyst would actually see in this data (architecture.md
+// Section 1).
 function generateNormalTransaction() {
-  const sender = NORMAL_USER_POOL[Math.floor(Math.random() * NORMAL_USER_POOL.length)];
-  let receiver = NORMAL_USER_POOL[Math.floor(Math.random() * NORMAL_USER_POOL.length)];
-  while (receiver.id === sender.id) {
-    receiver = NORMAL_USER_POOL[Math.floor(Math.random() * NORMAL_USER_POOL.length)];
+  const customer = CUSTOMER_POOL[Math.floor(Math.random() * CUSTOMER_POOL.length)];
+  const merchantAccount = randomMerchantAccount();
+  const gateway = randomGateway();
+  // Small jitter approximating real GPS noise for "still at home" (~tens of meters), not an
+  // independent multi-km random jump every transaction.
+  const customerLocation = { lat: jitter(customer.homeLat, 0.0003), lng: jitter(customer.homeLng, 0.0003) };
+  const roll = Math.random();
+
+  if (roll < 0.86) {
+    // Ordinary purchase: customer pays the business.
+    const amount = Math.max(10, jitter(customer.typicalAmount, customer.typicalAmount * 0.3));
+    return {
+      sender_id: customer.id,
+      receiver_id: merchantAccount,
+      amount: Math.round(amount * 100) / 100,
+      timestamp: new Date().toISOString(),
+      location: customerLocation,
+      device_id: customer.device,
+      merchant_id: gateway,
+      transaction_type: 'transfer',
+    };
   }
 
-  const amount = Math.max(10, jitter(sender.typicalAmount, sender.typicalAmount * 0.3));
-  const type = Math.random() < 0.85 ? 'transfer' : Math.random() < 0.5 ? 'deposit' : 'withdrawal';
+  if (roll < 0.92) {
+    // Merchant-initiated refund back to the customer — the case `purpose` exists for.
+    const amount = Math.max(10, jitter(customer.typicalAmount, customer.typicalAmount * 0.2));
+    return {
+      sender_id: merchantAccount,
+      receiver_id: customer.id,
+      amount: Math.round(amount * 100) / 100,
+      timestamp: new Date().toISOString(),
+      device_id: customer.device,
+      merchant_id: gateway,
+      purpose: `Refund - order #${Math.floor(100000 + Math.random() * 900000)}`,
+      transaction_type: 'transfer',
+    };
+  }
 
+  if (roll < 0.98) {
+    // Customer tops up stored/account credit with the business.
+    const amount = Math.max(10, jitter(customer.typicalAmount, customer.typicalAmount * 0.3));
+    return {
+      sender_id: customer.id,
+      receiver_id: merchantAccount,
+      amount: Math.round(amount * 100) / 100,
+      timestamp: new Date().toISOString(),
+      location: customerLocation,
+      device_id: customer.device,
+      merchant_id: gateway,
+      transaction_type: 'deposit',
+    };
+  }
+
+  // The business settles funds out to its own bank account through this gateway.
   return {
-    sender_id: sender.id,
-    receiver_id: receiver.id,
-    amount: Math.round(amount * 100) / 100,
+    sender_id: merchantAccount,
+    receiver_id: `bank_settlement_${gateway}`,
+    amount: Math.round((500 + Math.random() * 4000) * 100) / 100,
     timestamp: new Date().toISOString(),
-    // Small jitter approximating real GPS noise for "still at home" (~tens of meters), not an
-    // independent multi-km random jump every transaction — a sender picked twice in quick
-    // succession (this pool is small and the stream is fast) must not look like impossible
-    // travel just because the simulator re-rolled a wide-radius location each time.
-    location: { lat: jitter(sender.homeLat, 0.0003), lng: jitter(sender.homeLng, 0.0003) },
-    device_id: sender.device,
-    merchant_id: randomId('m'),
-    transaction_type: type,
+    merchant_id: gateway,
+    purpose: 'Payout - settlement to business bank account',
+    transaction_type: 'withdrawal',
   };
 }
 
@@ -128,15 +229,18 @@ async function runNormalStream(baseUrl, count, rateMs, continuous) {
 }
 
 // Single-transaction fraud pattern: velocity + impossible travel + device mismatch, on a
-// fresh account each run so repeat demo runs aren't affected by prior state.
+// fresh account each run so repeat demo runs aren't affected by prior state. Targets one of the
+// business's real storefronts — a card-testing/account-takeover attack against the merchant,
+// not a generic person-to-person transfer.
 async function triggerFraudScenario(baseUrl) {
   const sender = randomId('u_fraud');
-  const receiver = randomId('u_fraud_target');
+  const receiver = randomMerchantAccount();
+  const gateway = randomGateway();
   const homeLat = 16.5062;
   const homeLng = 80.648;
   const device = randomId('d');
 
-  console.log(`[fraud] scripted attack from ${sender}: rapid transactions + a 400km+ jump on a new device`);
+  console.log(`[fraud] scripted attack from ${sender} against ${receiver}: rapid transactions + a 400km+ jump on a new device`);
 
   let last;
   for (let i = 0; i < 5; i += 1) {
@@ -147,6 +251,7 @@ async function triggerFraudScenario(baseUrl) {
       timestamp: new Date().toISOString(),
       location: { lat: homeLat, lng: homeLng },
       device_id: device,
+      merchant_id: gateway,
       transaction_type: 'transfer',
     });
     await sleep(300);
@@ -160,6 +265,7 @@ async function triggerFraudScenario(baseUrl) {
     timestamp: new Date().toISOString(),
     location: { lat: 28.6139, lng: 77.209 }, // Delhi, ~1200km from the home location, seconds later
     device_id: randomId('d_new'),
+    merchant_id: gateway,
     transaction_type: 'transfer',
   });
 
@@ -172,14 +278,16 @@ async function triggerFraudScenario(baseUrl) {
   return finalResult;
 }
 
-// Full structuring pattern: 1 sender -> 6 small transfers -> 3 receivers, then 2 of those
-// receivers rapidly withdraw >80% of what they received. Fresh account IDs every run so the
+// Full structuring pattern: a shell account funnels a large sum through 6 small transfers to 3
+// shell vendor/payout accounts riding on the platform's payment flow, 2 of which then rapidly
+// cash out >80% of what they received — laundering hidden inside otherwise-ordinary marketplace
+// activity, not one obviously large red-flag transaction. Fresh account IDs every run so the
 // structuring engine's re-alert cooldown never suppresses a legitimate new demo run.
 async function triggerStructuringScenario(baseUrl) {
   const sender = randomId('u_struct');
-  const receivers = [randomId('u_mule'), randomId('u_mule'), randomId('u_mule')];
+  const receivers = [randomId('u_vendor_shell'), randomId('u_vendor_shell'), randomId('u_vendor_shell')];
 
-  console.log(`[structuring] scripted pattern from ${sender} -> [${receivers.join(', ')}]`);
+  console.log(`[structuring] scripted pattern from ${sender} -> [${receivers.join(', ')}] (shell vendor/payout accounts)`);
 
   // Real wall-clock timestamps at send time (not pre-computed future offsets) — the background
   // job compares transaction timestamps against its own real Date.now(), so backdating/future-
@@ -274,7 +382,7 @@ async function triggerOddHourScenario(baseUrl) {
   }
 
   const sender = randomId('u_oddhour');
-  const receiver = randomId('u_oddhour_target');
+  const receiver = randomMerchantAccount();
   const nowMs = Date.now();
   const currentHourUtc = new Date(nowMs).getUTCHours();
   const baselineWindow = pickOddHourBaselineWindow(currentHourUtc);
@@ -364,4 +472,9 @@ module.exports = {
   triggerStructuringScenario,
   triggerOddHourScenario,
   randomId,
+  randomGateway,
+  randomMerchantAccount,
+  DEMO_CITY_HUBS,
+  MERCHANT_RECEIVER_POOL,
+  GATEWAY_POOL,
 };

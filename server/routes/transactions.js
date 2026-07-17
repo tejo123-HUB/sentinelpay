@@ -103,8 +103,8 @@ router.post('/transaction', requireApiKey, async (req, res, next) => {
 
     db.prepare(
       `INSERT INTO transactions
-        (transaction_id, sender_id, receiver_id, amount, timestamp, location_lat, location_lng, device_id, merchant_id, transaction_type, fraud_score, decision)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        (transaction_id, sender_id, receiver_id, amount, timestamp, location_lat, location_lng, device_id, merchant_id, purpose, transaction_type, fraud_score, decision)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       transactionId,
       input.sender_id,
@@ -115,6 +115,7 @@ router.post('/transaction', requireApiKey, async (req, res, next) => {
       input.location ? input.location.lng : null,
       input.device_id,
       input.merchant_id,
+      input.purpose,
       input.transaction_type,
       score,
       decision
@@ -154,6 +155,7 @@ router.post('/transaction', requireApiKey, async (req, res, next) => {
         location: input.location,
         device_id: input.device_id,
         merchant_id: input.merchant_id,
+        purpose: input.purpose,
         transaction_type: input.transaction_type,
       });
     }
@@ -216,6 +218,7 @@ router.get('/transactions', requireApiKey, (req, res) => {
           : null,
       device_id: row.device_id,
       merchant_id: row.merchant_id,
+      purpose: row.purpose,
       transaction_type: row.transaction_type,
       fraud_score: row.fraud_score,
       decision: row.decision,

@@ -29,6 +29,7 @@ function mapTransactionRow(row) {
         : null,
     device_id: row.device_id,
     merchant_id: row.merchant_id,
+    purpose: row.purpose,
     transaction_type: row.transaction_type,
   };
 }

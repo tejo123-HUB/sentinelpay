@@ -98,7 +98,7 @@ async function refreshAuditTable() {
 
     tbody.innerHTML = '';
     if (transactions.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No matching transactions.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No matching transactions.</td></tr>';
       return;
     }
 
@@ -111,6 +111,8 @@ async function refreshAuditTable() {
         <td>${escapeHtml(tx.sender_id)}</td>
         <td>${escapeHtml(tx.receiver_id)}</td>
         <td>₹${Number(tx.amount).toFixed(2)}</td>
+        <td>${escapeHtml(tx.merchant_id || '—')}</td>
+        <td class="reasons">${escapeHtml(tx.purpose || '—')}</td>
         <td>${Number.isFinite(tx.fraud_score) ? tx.fraud_score : '—'}</td>
         <td class="decision-cell">${escapeHtml((tx.decision || '—').replace('_', '-'))}</td>
         <td class="reasons">${escapeHtml((tx.reasons || []).join('; ') || '—')}</td>

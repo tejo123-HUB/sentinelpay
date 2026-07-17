@@ -286,6 +286,8 @@ test('websocket: the transaction broadcast includes full transaction details, no
       timestamp: '2026-07-18T10:00:00Z',
       location: { lat: 16.5062, lng: 80.648 },
       device_id: 'd_ws_full',
+      merchant_id: 'stripe_acct_primary',
+      purpose: 'Refund - order #482913',
       transaction_type: 'transfer',
     });
     assert.equal(status, 201);
@@ -297,6 +299,8 @@ test('websocket: the transaction broadcast includes full transaction details, no
     assert.equal(message.data.amount, 321);
     assert.deepEqual(message.data.location, { lat: 16.5062, lng: 80.648 });
     assert.equal(message.data.transaction_type, 'transfer');
+    assert.equal(message.data.merchant_id, 'stripe_acct_primary');
+    assert.equal(message.data.purpose, 'Refund - order #482913');
     assert.ok(message.data.transaction_id);
 
     ws.close();

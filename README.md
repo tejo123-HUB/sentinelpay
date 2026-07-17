@@ -7,6 +7,10 @@ Combines a fast rule-based signal engine, a cross-account structuring/layering g
 and a scikit-learn-trained ML classifier into a single 0-100 fraud score, returned
 synchronously (allow / step-up / block) within the same `POST /transaction` request.
 
+Built for **a merchant business's own senior risk/compliance team**, not a bank — it wires into
+every payment gateway the business uses (Stripe, Razorpay, PayPal, etc.), giving one aggregated
+view across gateways that no single gateway's own dashboard can show.
+
 See **`architecture.md`** for the full technical spec (schema, API contract, build plan,
 final thresholds, and every documented deviation from the original plan) and
 **`user-manual.md`** for a plain-language walkthrough with worked examples.
@@ -50,7 +54,21 @@ python ml/train_model.py
 
 ## Running the demo
 
-With the server running (`npm start`), open the dashboard and, in another terminal:
+**One command, for the hackathon table:**
+
+```bash
+npm run demo
+```
+
+This resets the demo database, starts the server, opens the dashboard in your browser, starts
+continuous ambient traffic, and drops you into a live menu (`1`-`5`, `q`) to fire the fraud,
+structuring, and odd-hour scenarios on cue. `q` (or Ctrl+C) shuts everything down cleanly —
+server and background traffic both. If a server is already running on port 3000, it reuses it
+instead of starting a second one (and skips the DB reset, since that would pull the rug out
+from under a live server).
+
+Manual/step-by-step version — with the server running (`npm start`), open the dashboard and, in
+another terminal:
 
 ```bash
 # Continuous background traffic for the dashboard to show live

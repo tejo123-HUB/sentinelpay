@@ -12,6 +12,10 @@ CREATE TABLE IF NOT EXISTS users (
   typical_active_hours TEXT
 );
 
+-- sender_id/receiver_id are directional, not role-fixed: on an ordinary payment the customer
+-- is sender_id and the merchant is receiver_id; on a refund/payout the merchant is sender_id
+-- and the customer is receiver_id. merchant_id identifies which of the business's own
+-- payment-gateway accounts (Stripe/Razorpay/PayPal, etc.) the transaction was ingested from.
 CREATE TABLE IF NOT EXISTS transactions (
   transaction_id TEXT PRIMARY KEY,
   sender_id TEXT NOT NULL,
@@ -22,6 +26,7 @@ CREATE TABLE IF NOT EXISTS transactions (
   location_lng REAL,
   device_id TEXT,
   merchant_id TEXT,
+  purpose TEXT, -- human-readable note, mainly populated on merchant-initiated outgoing transactions (refunds, payouts)
   transaction_type TEXT NOT NULL CHECK (transaction_type IN ('transfer', 'withdrawal', 'deposit')),
   fraud_score REAL,
   decision TEXT CHECK (decision IN ('allow', 'step_up', 'block')),

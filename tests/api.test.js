@@ -108,6 +108,43 @@ test('GET /transactions and GET /alerts respond with arrays', async () => {
   }
 });
 
+test('POST /transaction: purpose round-trips through GET /transactions (merchant-initiated refund)', async () => {
+  const { server } = await freshServer();
+  try {
+    const posted = await request(
+      server,
+      'POST',
+      '/transaction',
+      validTransaction({
+        sender_id: 'm_test_merchant',
+        receiver_id: 'u_test_customer',
+        purpose: 'Refund - order #482913',
+      })
+    );
+    assert.equal(posted.status, 201);
+
+    const res = await request(server, 'GET', '/transactions?limit=10');
+    const found = res.body.find((t) => t.transaction_id === posted.body.transaction_id);
+    assert.ok(found, 'expected the posted transaction to appear in GET /transactions');
+    assert.equal(found.purpose, 'Refund - order #482913');
+    assert.equal(found.merchant_id, 'm_test');
+  } finally {
+    server.close();
+  }
+});
+
+test('POST /transaction: purpose is optional and defaults to null when omitted', async () => {
+  const { server } = await freshServer();
+  try {
+    const posted = await request(server, 'POST', '/transaction', validTransaction());
+    const res = await request(server, 'GET', '/transactions?limit=10');
+    const found = res.body.find((t) => t.transaction_id === posted.body.transaction_id);
+    assert.equal(found.purpose, null);
+  } finally {
+    server.close();
+  }
+});
+
 test('GET /transactions includes each transaction\'s flag reasons', async () => {
   const { server } = await freshServer();
   try {

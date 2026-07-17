@@ -1,7 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { validateTransactionInput, MAX_AMOUNT } = require('../server/validate');
+const { validateTransactionInput, MAX_AMOUNT, MAX_PURPOSE_LENGTH } = require('../server/validate');
 
 function baseInput(overrides = {}) {
   return {
@@ -74,4 +74,20 @@ test('validateTransactionInput: accepts an amount exactly at the sanity cap', ()
 test('validateTransactionInput: rejects an invalid transaction_type', () => {
   const result = validateTransactionInput(baseInput({ transaction_type: 'refund' }));
   assert.equal(result.valid, false);
+});
+
+test('validateTransactionInput: accepts a purpose note and normalizes a missing one to null', () => {
+  const withPurpose = validateTransactionInput(baseInput({ purpose: 'Refund - order #482913' }));
+  assert.equal(withPurpose.valid, true);
+  assert.equal(withPurpose.value.purpose, 'Refund - order #482913');
+
+  const withoutPurpose = validateTransactionInput(baseInput());
+  assert.equal(withoutPurpose.valid, true);
+  assert.equal(withoutPurpose.value.purpose, null);
+});
+
+test('validateTransactionInput: rejects an overlong purpose', () => {
+  const result = validateTransactionInput(baseInput({ purpose: 'x'.repeat(MAX_PURPOSE_LENGTH + 1) }));
+  assert.equal(result.valid, false);
+  assert.match(result.error, /purpose/);
 });

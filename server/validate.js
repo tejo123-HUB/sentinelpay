@@ -1,5 +1,6 @@
 const VALID_TRANSACTION_TYPES = ['transfer', 'withdrawal', 'deposit'];
 const MAX_ID_LENGTH = 128; // sender_id/receiver_id/device_id/merchant_id — generous but bounded
+const MAX_PURPOSE_LENGTH = 256; // freeform note text, longer than an id but still bounded
 // Sanity cap, not a business rule: `amount` was previously only checked for > 0 and finite, so a
 // pathological value (e.g. 1e300) would pass through untouched into avg_transaction_amount and
 // every dashboard total. Set far above any plausible micro-transaction (architecture.md's own
@@ -16,7 +17,7 @@ function validateTransactionInput(body) {
     return { valid: false, error: 'Request body must be a JSON object' };
   }
 
-  const { sender_id, receiver_id, amount, timestamp, location, device_id, merchant_id, transaction_type } = body;
+  const { sender_id, receiver_id, amount, timestamp, location, device_id, merchant_id, purpose, transaction_type } = body;
 
   if (typeof sender_id !== 'string' || sender_id.trim() === '' || sender_id.length > MAX_ID_LENGTH) {
     return { valid: false, error: `sender_id is required and must be a non-empty string of at most ${MAX_ID_LENGTH} characters` };
@@ -67,6 +68,9 @@ function validateTransactionInput(body) {
   if (typeof merchant_id === 'string' && merchant_id.length > MAX_ID_LENGTH) {
     return { valid: false, error: `merchant_id must be at most ${MAX_ID_LENGTH} characters` };
   }
+  if (typeof purpose === 'string' && purpose.length > MAX_PURPOSE_LENGTH) {
+    return { valid: false, error: `purpose must be at most ${MAX_PURPOSE_LENGTH} characters` };
+  }
 
   return {
     valid: true,
@@ -78,9 +82,10 @@ function validateTransactionInput(body) {
       location: normalizedLocation,
       device_id: typeof device_id === 'string' ? device_id : null,
       merchant_id: typeof merchant_id === 'string' ? merchant_id : null,
+      purpose: typeof purpose === 'string' ? purpose : null,
       transaction_type,
     },
   };
 }
 
-module.exports = { validateTransactionInput, VALID_TRANSACTION_TYPES, MAX_AMOUNT };
+module.exports = { validateTransactionInput, VALID_TRANSACTION_TYPES, MAX_AMOUNT, MAX_PURPOSE_LENGTH };

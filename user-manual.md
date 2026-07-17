@@ -7,11 +7,11 @@ This document explains SentinelPay for someone who has never seen the code — a
 
 ## 1. What Problem Is This Solving, in Plain Terms?
 
-Imagine you run a digital payment gateway (like a UPI app or a wallet). Every second, thousands of small payments flow through your system — someone buying a ₹40 cup of tea, someone paying a ₹200 electricity top-up, someone sending ₹500 to a friend. Somewhere in that flood, a small number of these transactions are fraudulent or are part of a money-laundering operation.
+Imagine you run a merchant business — an online store, a marketplace, a subscription service. Every second, thousands of small payments flow through your system — someone buying a ₹40 item, someone paying a ₹200 subscription renewal, someone getting a ₹500 refund. You take those payments through several payment gateways (Stripe, Razorpay, PayPal, and the like), and each gateway only shows you its own slice of the picture. Somewhere across that flood, spread across gateways so no single one sees the whole pattern, a small number of these transactions are fraudulent or are part of a money-laundering operation hiding inside otherwise-ordinary commerce.
 
-You can't manually review millions of transactions. You also can't afford to slow every single payment down by seconds while a heavyweight fraud check runs — users would abandon the app. And you can't just block anything unusual, because that would also block your genuine customers, which costs you their trust and their business.
+You can't manually review millions of transactions. You also can't afford to slow every single payment down by seconds while a heavyweight fraud check runs — customers would abandon checkout. And you can't just block anything unusual, because that would also block your genuine customers, which costs you their trust and their business.
 
-**SentinelPay sits in the middle of that payment flow** — between "user hits pay" and "money actually moves" — and makes an instant decision: let it through, ask for extra verification, or stop it, all within milliseconds, without a human ever looking at it in real time.
+**SentinelPay sits in the middle of that payment flow, wired into every gateway you use** — between "customer hits pay" and "money actually moves" — and makes an instant decision: let it through, ask for extra verification, or stop it, all within milliseconds, without a human ever looking at it in real time. Your own senior risk/compliance team gets one aggregated view across every gateway, instead of piecing it together from several separate dashboards.
 
 ---
 
@@ -21,8 +21,8 @@ There's no separate app end-users open. Instead, three groups interact with Sent
 
 | Who | What they see | How |
 |---|---|---|
-| **The payment gateway (the system integrating SentinelPay)** | Nothing visual — just an API response | Sends every transaction to `POST /transaction`, gets back a decision in milliseconds, and acts on it (allow the payment / show an OTP screen / reject it) |
-| **A fraud analyst / operations team** | The live dashboard | Watches transactions stream in, sees flagged ones highlighted, investigates structuring alerts |
+| **Each payment gateway you use (Stripe, Razorpay, PayPal, etc.)** | Nothing visual — just an API response | Sends every transaction to `POST /transaction`, gets back a decision in milliseconds, and acts on it (allow the payment / show an OTP screen / reject it) |
+| **Your business's senior risk/compliance team** | The live dashboard | Watches transactions stream in across every gateway, sees flagged ones highlighted, investigates structuring alerts |
 | **The end customer paying money** | Nothing directly — but they experience the outcome | A normal payment goes through instantly; a suspicious one might trigger an OTP prompt; a blocked one shows as "transaction declined" |
 
 So in real deployment, SentinelPay is invisible infrastructure — like a security guard checking IDs at a door so fast that honest visitors barely notice, while stopping the ones who shouldn't get through.
@@ -76,7 +76,7 @@ All of this — steps 3 through 9 — happens in well under a second. The person
 - **Impossible travel check** flags it: 400 km in under a minute implies an impossible speed.
 - **Device mismatch check** flags it: this device has never been linked to this account before.
 
-**Result:** These three flags combine into a fraud score well above 80 → **Block**. The gateway immediately declines the transaction and can notify the account holder. The response also includes the reasons, e.g.:
+**Result:** These three flags combine into a fraud score well above 80 → **Block**. The gateway immediately declines the transaction and can notify the customer. The response also includes the reasons, e.g.:
 ```json
 {
   "decision": "block",
@@ -88,7 +88,7 @@ All of this — steps 3 through 9 — happens in well under a second. The person
   ]
 }
 ```
-This is what makes the system trustworthy — it's not a black box saying "blocked," it's giving a specific, human-readable reason a fraud analyst (or even the account holder, in a notification) can understand immediately.
+This is what makes the system trustworthy — it's not a black box saying "blocked," it's giving a specific, human-readable reason your risk team (or even the customer, in a notification) can understand immediately.
 
 ---
 
@@ -153,9 +153,9 @@ In the hackathon demo specifically, this dashboard is what you'd have projected 
 
 It's worth being honest about scope here: SentinelPay makes the **real-time decision** (allow/step-up/block) and raises alerts. In a full production system, a few things would typically happen next, which are outside this project's current scope but worth understanding for the pitch:
 
-- **Blocked transactions** would typically notify the account holder and may require manual review before any restriction is lifted.
-- **Structuring alerts** would typically be escalated to a compliance/AML (anti-money-laundering) team for investigation and, in regulated environments, potential reporting to financial authorities.
-- **Step-up outcomes** feed back into the system over time — if a user keeps confirming unusual-but-legitimate transactions, their behavioral baseline (like `avg_transaction_amount`) naturally adjusts, reducing future false positives.
+- **Blocked transactions** would typically notify the customer and may require manual review by your own risk team before any restriction is lifted.
+- **Structuring alerts** would typically be escalated to your business's own senior risk/compliance team for investigation — that's who's running this dashboard. If a pattern looks serious enough, they'd loop in whichever payment processor or banking partner is involved; formal anti-money-laundering (AML) reporting to regulators is that partner's statutory obligation, not something an ordinary merchant carries itself.
+- **Step-up outcomes** feed back into the system over time — if a customer keeps confirming unusual-but-legitimate transactions, their behavioral baseline (like `avg_transaction_amount`) naturally adjusts, reducing future false positives.
 
 ---
 

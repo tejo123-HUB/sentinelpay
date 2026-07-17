@@ -111,6 +111,8 @@ function addTransactionRow(tx, { prepend = true } = {}) {
   const receiverLabel = escapeHtml(tx.receiver_id || '—');
   const amountLabel = tx.amount != null ? `₹${Number(tx.amount).toFixed(2)}` : '—';
   const typeLabel = escapeHtml(tx.transaction_type || '—');
+  const gatewayLabel = escapeHtml(tx.merchant_id || '—');
+  const purposeLabel = escapeHtml(tx.purpose || '—');
   const reasons = escapeHtml((tx.reasons || []).join('; ') || '—');
   const decisionLabel = escapeHtml((tx.decision || '—').replace('_', '-'));
   const decisionClass = /^[a-z_]+$/.test(tx.decision || '') ? tx.decision : 'unknown';
@@ -122,6 +124,8 @@ function addTransactionRow(tx, { prepend = true } = {}) {
     <td>${receiverLabel}</td>
     <td>${amountLabel}</td>
     <td>${typeLabel}</td>
+    <td>${gatewayLabel}</td>
+    <td class="reasons">${purposeLabel}</td>
     <td>${Number.isFinite(tx.fraud_score) ? tx.fraud_score : '—'}</td>
     <td class="decision-cell">${decisionLabel}</td>
     <td class="reasons">${reasons}</td>

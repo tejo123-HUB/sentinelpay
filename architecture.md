@@ -9,11 +9,11 @@
 
 ## 1. Project Overview
 
-Digital payments in India and globally are scaling at an extraordinary rate — but most fraud detection systems were built for high-value transactions, not the flood of low-value, high-frequency micro-transactions that now dominate UPI, wallets, and in-app purchases. These systems are either too slow to catch fraud before money moves, or too resource-heavy to run at the scale micro-transactions demand.
+SentinelPay is built for **a merchant business's own senior risk/compliance team** — not a bank, and not a consumer-facing app. A merchant (an online store, marketplace, or subscription business) takes payments through several payment gateways (Stripe, Razorpay, PayPal, etc.), issues refunds and payouts back out through those same gateways, and needs one place to watch all of that money movement for fraud and money laundering — something no single gateway's own dashboard can show, since each only sees its own slice of traffic. Most fraud detection systems were also built for high-value, low-frequency transactions, not the flood of low-value, high-frequency micro-transactions that now dominate digital commerce; they're either too slow to catch fraud before money moves, or too resource-heavy to run at the scale micro-transactions demand.
 
-**SentinelPay** is a lightweight, horizontally scalable fraud-detection API purpose-built for micro-transactions. It sits between a payment gateway and the settlement layer, analyzing transaction metadata — velocity, geography, device fingerprint, and behavioral history — in real time, and returns a fraud-risk decision in milliseconds: **allow, challenge (step-up authentication), or block**.
+**SentinelPay** is a lightweight, horizontally scalable fraud-detection API purpose-built for micro-transactions. It wires into every payment gateway the business uses, sitting between those gateways and the settlement layer, analyzing transaction metadata — velocity, geography, device fingerprint, and behavioral history — in real time, and returns a fraud-risk decision in milliseconds: **allow, challenge (step-up authentication), or block**.
 
-Rather than relying on a single black-box model, SentinelPay combines fast rule-based signal detection with a machine learning scoring layer, so it can be demoed reliably even under hackathon time constraints while still showcasing genuine ML-driven intelligence. It also goes beyond single-transaction analysis: a dedicated graph engine tracks money as it moves *across* accounts, catching structuring and layering patterns — where a large sum is deliberately split into small transfers, fanned out across multiple accounts, and quickly withdrawn — that transaction-by-transaction fraud checks miss entirely.
+Rather than relying on a single black-box model, SentinelPay combines fast rule-based signal detection with a machine learning scoring layer, so it can be demoed reliably even under hackathon time constraints while still showcasing genuine ML-driven intelligence. It also goes beyond single-transaction analysis: a dedicated graph engine tracks money as it moves *across* accounts, catching structuring and layering patterns — where a large sum is deliberately split into small transfers, fanned out across multiple accounts, and quickly withdrawn — that transaction-by-transaction fraud checks miss entirely, even when that activity is dressed up as ordinary customer payments, refunds, or vendor payouts flowing through the business.
 
 ### Key Numbers at a Glance
 
@@ -35,10 +35,11 @@ Rather than relying on a single black-box model, SentinelPay combines fast rule-
 ## 2. Problem Statement
 
 - Traditional fraud models are tuned for large, infrequent transactions — not thousands of ₹10–₹500 micro-payments per second.
-- Rule-only systems create too many false positives, frustrating genuine users.
+- Rule-only systems create too many false positives, frustrating genuine customers.
 - ML-only systems are often too slow or too costly to run at micro-transaction scale and volume.
 - Fraud patterns (impossible travel, velocity abuse, device spoofing) need to be caught **before** settlement, not after in a batch job.
-- Sophisticated actors evade single-transaction fraud checks entirely by **structuring**: splitting a large sum into many small transfers, fanning them out across multiple accounts, then withdrawing quickly — a pattern invisible to systems that only look at one transaction at a time.
+- A merchant using several payment gateways has no single view across them — each gateway's own dashboard only shows its own slice of the business's traffic, so laundering that spreads activity across gateways can hide in the gaps between them.
+- Sophisticated actors evade single-transaction fraud checks entirely by **structuring**: splitting a large sum into many small transfers (often disguised as ordinary customer payments, refunds, or vendor payouts), fanning them out across multiple accounts, then withdrawing quickly — a pattern invisible to systems that only look at one transaction at a time.
 
 ## 3. Proposed Solution
 
@@ -48,7 +49,7 @@ A real-time scoring API that:
 3. Checks (via fast indexed lookup) whether this account is already part of a known structuring/laundering pattern.
 4. Runs a scoring model — rule-based today, ML-assisted once trained — for nuanced behavioral scoring.
 5. Combines all signals into a single fraud score.
-6. Returns a decision instantly to the payment gateway: allow, step-up authentication, or block.
+6. Returns a decision instantly to whichever of the business's payment gateways originated the transaction: allow, step-up authentication, or block.
 7. Logs everything for a live monitoring dashboard and audit trail, and runs a periodic background job to detect new cross-account structuring patterns.
 
 ---
@@ -58,7 +59,7 @@ A real-time scoring API that:
 ### 4.1 Core Features (MVP)
 
 1. **Transaction Ingestion API**
-   REST endpoint accepting `sender_id`, `receiver_id`, `amount`, `timestamp`, `location`, `device_id`, `merchant_id`, and `transaction_type` (transfer / withdrawal / deposit) for every incoming transaction. Including `sender_id`/`receiver_id` from day one is required for structuring detection — it must not be bolted on later.
+   REST endpoint accepting `sender_id`, `receiver_id`, `amount`, `timestamp`, `location`, `device_id`, `merchant_id`, `purpose`, and `transaction_type` (transfer / withdrawal / deposit) for every incoming transaction. `sender_id`/`receiver_id` are directional, not role-fixed: on an ordinary payment the customer is `sender_id` and the merchant is `receiver_id`; on a refund/payout the merchant is `sender_id` and the customer is `receiver_id`. `merchant_id` identifies which of the business's own payment-gateway accounts (Stripe/Razorpay/PayPal, etc.) the transaction was ingested from — the field that makes cross-gateway aggregation visible. `purpose` is an optional human-readable note, mainly populated on merchant-initiated outgoing transactions (refunds, payouts, vendor settlements), for analyst context — not a scoring input. Including `sender_id`/`receiver_id` from day one is required for structuring detection — it must not be bolted on later.
 
 2. **Rule-Based Fraud Signal Engine** — five independent detectors:
    - **Velocity Check** — flags users exceeding a transaction-per-second/minute threshold.
@@ -109,8 +110,9 @@ A real-time scoring API that:
 
 ```
                      ┌─────────────────────────┐
-                     │   Payment Gateway /       │
-                     │   Transaction Simulator   │
+                     │  Payment Gateways        │
+                     │  (Stripe/Razorpay/etc.) /│
+                     │  Transaction Simulator   │
                      └────────────┬─────────────┘
                                   │  POST /transaction
                                   ▼
@@ -182,7 +184,8 @@ CREATE TABLE transactions (
   location_lat REAL,
   location_lng REAL,
   device_id TEXT,
-  merchant_id TEXT,
+  merchant_id TEXT,                 -- which of the business's payment-gateway accounts this came from
+  purpose TEXT,                     -- note on outgoing merchant-initiated transactions (refunds, payouts)
   transaction_type TEXT NOT NULL CHECK (transaction_type IN ('transfer', 'withdrawal', 'deposit')),
   fraud_score REAL,
   decision TEXT CHECK (decision IN ('allow', 'step_up', 'block')),
@@ -219,7 +222,9 @@ CREATE TABLE structuring_alerts (
 
 **Schema change (Task 6):** added `reason TEXT NOT NULL` to `structuring_alerts`. It was missing from the original table above, but CLAUDE.md's hard rule ("every flag or alert needs a human-readable reason string, never just a score") applies to alerts too, and `flags.reason` already had one — this closes that gap rather than leaving structuring alerts as the one place a raw score/number could stand without explanation. Not a retrofit of `sender_id`/`receiver_id` (the one column change the hard rules forbid doing later) — just an added column.
 
-**Important:** `sender_id` and `receiver_id` must exist from the very first schema migration — do not add them later; the structuring detector depends on them from day one.
+**Schema change (merchant/multi-gateway reframe):** added `purpose TEXT` (nullable) to `transactions` — a pure addition, same as `reason` above, not a retrofit of `sender_id`/`receiver_id`. Mainly populated on merchant-initiated outgoing transactions (refunds, payouts, vendor settlements) as analyst-facing context, not a scoring input.
+
+**Important:** `sender_id` and `receiver_id` must exist from the very first schema migration — do not add them later; the structuring detector depends on them from day one. They're directional, not role-fixed: on an ordinary payment the customer is `sender_id` and the merchant is `receiver_id`; on a refund/payout the merchant is `sender_id` and the customer is `receiver_id`.
 
 **Implementation note (Task 2):** `server/db.js` adds two extra indexes beyond the ones listed above — `idx_flags_transaction` on `flags(transaction_id)` and `idx_structuring_alerts_sender` on `structuring_alerts(sender_id)` — both pure lookup-performance additions with no schema/column changes, needed for the fast per-transaction structuring-alert lookup (Task 6) and for fetching flags per transaction. The `users.avg_transaction_amount` running average (Task 3) is maintained using an indexed `COUNT(*)` over `transactions` for the per-user transaction count rather than adding a redundant `transaction_count` column to `users`.
 
@@ -240,16 +245,31 @@ across all routes) -> `429` once exceeded.
 ### `POST /transaction`
 Accepts a single transaction and returns a decision **synchronously** — scoring (rules + structuring lookup + ML) happens within the same request/response cycle. There is no async/polling pattern in this project. `amount` must be a positive finite number, capped at `MAX_AMOUNT` (10,000,000 — a sanity bound added in Section 15.6, well above any plausible transaction here, including a whole structuring burst).
 
-**Request body:**
+`sender_id`/`receiver_id` are directional, not role-fixed: the paying party (a customer, or the merchant itself on a refund/payout) is `sender_id`, and the receiving party (the merchant, or the customer on a refund) is `receiver_id`. `merchant_id` (optional) identifies which of the business's own payment-gateway accounts (Stripe/Razorpay/PayPal, etc.) the transaction was ingested from. `purpose` (optional, max 256 chars) is a human-readable note, mainly populated on merchant-initiated outgoing transactions (refunds, payouts, vendor settlements) for analyst context — it is not a scoring input.
+
+**Request body (ordinary customer payment):**
 ```json
 {
   "sender_id": "u_123",
-  "receiver_id": "u_456",
+  "receiver_id": "m_store_electronics",
   "amount": 250.00,
   "timestamp": "2026-07-18T10:15:00Z",
   "location": { "lat": 16.5062, "lng": 80.6480 },
   "device_id": "d_789",
-  "merchant_id": "m_001",
+  "merchant_id": "stripe_acct_primary",
+  "transaction_type": "transfer"
+}
+```
+
+**Request body (merchant-initiated refund):**
+```json
+{
+  "sender_id": "m_store_electronics",
+  "receiver_id": "u_123",
+  "amount": 250.00,
+  "timestamp": "2026-07-18T10:15:00Z",
+  "merchant_id": "stripe_acct_primary",
+  "purpose": "Refund - order #482913",
   "transaction_type": "transfer"
 }
 ```
@@ -279,7 +299,7 @@ Task 11 (audit trail): time-bucketed counts of `allow`/`step_up`/`block` over th
 ### WebSocket `/ws`
 Broadcasts every processed transaction and every new structuring alert to connected dashboard clients as they happen:
 ```json
-{ "type": "transaction", "data": { "transaction_id": "...", "fraud_score": ..., "decision": "...", "reasons": [...], "sender_id": "...", "receiver_id": "...", "amount": ..., "timestamp": "...", "location": { "lat": ..., "lng": ... }, "device_id": "...", "merchant_id": "...", "transaction_type": "..." } }
+{ "type": "transaction", "data": { "transaction_id": "...", "fraud_score": ..., "decision": "...", "reasons": [...], "sender_id": "...", "receiver_id": "...", "amount": ..., "timestamp": "...", "location": { "lat": ..., "lng": ... }, "device_id": "...", "merchant_id": "...", "purpose": "...", "transaction_type": "..." } }
 { "type": "structuring_alert", "data": { "sender_id": "...", "receiver_ids": [...], "total_amount": ..., "withdrawal_ratio": ... } }
 ```
 **Deviation from the original spec (Section 15.3):** the `transaction` payload is the full transaction, not just the `POST /transaction` response fields as originally documented here. See Section 15.3 for why — the original "same as POST response" contract left the dashboard's live table and map view with no sender/receiver/amount/location data for any transaction that arrived over the WebSocket rather than the initial `GET /transactions` load.
@@ -664,6 +684,19 @@ A "bug hunt and vulnerability list" request, done fresh against the current `mai
 All three required real regression tests, not just constant-value checks, to be worth anything: `tests/websocket.test.js` now includes a test that sends an oversized frame and confirms close code 1009, a test that opens connections up to a lowered cap and confirms the next one is rejected with 503, and a test that force-sets a server-side socket's heartbeat state to simulate "already missed a pong" and confirms the next tick terminates it and removes it from `wss.clients` — all three exercise the real code paths against a real running server and real WebSocket connections, not mocks. The heartbeat test in particular couldn't use a real unresponsive client (the WebSocket spec/`ws` library auto-answer ping frames at the protocol level in any normal client, making genuine unresponsiveness hard to simulate from the outside), so it reaches into the server-side socket object directly, the same established pattern the existing "unhandled per-client error" test already used.
 
 Verified live: a standalone raw-`ws` script (bypassing a flaky browser-automation session that got stuck on an unrelated tooling issue) confirmed connect → welcome message → a real `POST /transaction` broadcast all still arrive correctly over the hardened socket. `npm test`: 87 tests passing (up from 84).
+
+### 15.10 Merchant/multi-gateway reframe
+
+The product framing was corrected: SentinelPay is built for **a merchant business's own senior risk/compliance team**, not a bank — it wires into every payment gateway the business uses (Stripe, Razorpay, PayPal, etc.) rather than integrating with one gateway in isolation, since laundering can otherwise hide by spreading activity across gateways no single integration would see in full. This was a positioning/data-shape correction, not a scoring-logic change:
+
+1. **`sender_id`/`receiver_id` clarified as directional, not role-fixed.** On an ordinary payment the customer is `sender_id` and the merchant is `receiver_id`; on a refund/payout the merchant is `sender_id` and the customer is `receiver_id`. No schema change — this was always true of the data, just not documented that way.
+2. **`purpose TEXT` added to `transactions`** (nullable, pure addition — see Section 6) — a human-readable note, mainly populated on merchant-initiated outgoing transactions (refunds, payouts, vendor settlements), for analyst context only. Threaded through `validate.js` (bounded at 256 chars via `MAX_PURPOSE_LENGTH`), the `POST /transaction` insert, the WebSocket broadcast, `GET /transactions`, and `userProfile.js`'s `mapTransactionRow`.
+3. **`merchant_id`'s role clarified**, not changed structurally: it identifies which of the business's own payment-gateway accounts (Stripe/Razorpay/PayPal, etc.) a transaction was ingested from — the field that makes cross-gateway aggregation visible. It had existed since the original build but was never read by any rule/scoring/structuring code (still isn't — deliberately analyst-facing, not a detection input) and was never surfaced on the dashboard; both are now fixed (below).
+4. **Dashboard**: added "Gateway" (`merchant_id`) and "Purpose" columns to the live and audit tables, and an optional purpose line in the map popup — pure data/copy additions reusing the existing `reasons`-style wrapping CSS, no layout/design changes (`dashboard/index.html`, `app.js`, `audit.js`, `map.js`).
+5. **Simulator and demo-data seeder** (`simulator/simulate_transactions.js`, `scripts/generate_demo_data.js`) reworked from a single undifferentiated 300-user pool to a `CUSTOMER_POOL` (300) plus a small `MERCHANT_RECEIVER_POOL` (8 storefront-style accounts) and `GATEWAY_POOL` (4 gateway-account-style values), with `generateNormalTransaction` now producing a realistic mix: ordinary purchases (86%), merchant-initiated refunds with a `purpose` note (6%), store-credit top-ups (6%), and settlement payouts to the business's bank (2%). The merchant-account-as-sender share was deliberately kept small and spread across 8 accounts to stay well under the velocity detector's threshold — the same reasoning that originally sized `CUSTOMER_POOL` at 300. The fraud and odd-hour scenarios now target a real merchant account instead of a throwaway random receiver; the structuring scenario's narrative was re-anchored to shell vendor/payout accounts riding the platform's payment flow, with its detection mechanics unchanged.
+6. **`architecture.md`/`user-manual.md`/`README.md`** reframed accordingly (Sections 1–3, 5–7 here; Sections 1, 2, and 9 of `user-manual.md` — the latter's AML-reporting language was also corrected to attribute the statutory reporting obligation to the business's payment processor/banking partner, not the merchant itself).
+
+No new `transaction_type` enum value was added (refunds are modeled as `'transfer'` + `purpose`, not a new `'refund'` type) and no new fraud/scoring logic was added keyed off `purpose` or `merchant_id` — both remain explainability-only. `npm test`: 91 tests passing (up from 87; two `validate.test.js` cases and one `api.test.js` round-trip test cover `purpose`, one `websocket.test.js` assertion extended to cover `merchant_id`/`purpose` in the broadcast payload).
 
 ---
 

@@ -67,11 +67,12 @@ function plotTransaction(tx) {
   }).addTo(map);
 
   const senderLabel = escapeHtml(tx.sender_id || '—');
+  const purposeLabel = escapeHtml(tx.purpose || '');
   const reasonsLabel = escapeHtml((tx.reasons || []).join('; '));
   marker.bindPopup(
     `<strong>${senderLabel}</strong><br>${escapeHtml(tx.decision || '')} · score ${tx.fraud_score ?? '—'}${
-      reasonsLabel ? `<br>${reasonsLabel}` : ''
-    }`
+      purposeLabel ? `<br>${purposeLabel}` : ''
+    }${reasonsLabel ? `<br>${reasonsLabel}` : ''}`
   );
 
   markers.push({ marker, timestamp: tx.timestamp, transactionId: tx.transaction_id });
