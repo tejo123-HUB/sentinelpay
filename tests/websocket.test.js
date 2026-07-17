@@ -142,6 +142,116 @@ test('websocket: the handshake is rate-limited, sharing the same per-IP budget a
   }
 });
 
+test('websocket: rejects an oversized incoming frame (maxPayload regression)', async () => {
+  // Regression: the WebSocketServer had no maxPayload configured, so `ws`'s own unconfigured
+  // default (100 MiB per frame) applied — an authenticated client could force a large allocation
+  // per message even though nothing downstream ever reads incoming WS data (there's no
+  // `ws.on('message', ...)` handler anywhere in this app; the feed is broadcast-only).
+  const { server } = await freshServer();
+  const port = server.address().port;
+  try {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?apiKey=${encodeURIComponent(process.env.API_KEY)}`);
+    await new Promise((resolve, reject) => {
+      ws.addEventListener('open', resolve);
+      ws.addEventListener('error', reject);
+    });
+
+    const closeEvent = await new Promise((resolve) => {
+      ws.addEventListener('close', resolve);
+      ws.send('x'.repeat(5000)); // comfortably over MAX_PAYLOAD_BYTES (1024)
+    });
+
+    assert.equal(closeEvent.code, 1009, 'expected the connection to close with code 1009 (message too big)');
+  } finally {
+    server.close();
+  }
+});
+
+test('websocket: rejects new connections once the concurrent connection cap is reached (regression)', async () => {
+  // Regression: rateLimit.js bounds how *fast* new connections can open, but nothing previously
+  // bounded how many could be open *at once* — a long-running demo session could accumulate an
+  // unbounded number of connections (each held open, e.g., by a client that never closes cleanly).
+  const WsClient = require('ws');
+  const originalCap = process.env.WS_MAX_CONCURRENT_CONNECTIONS;
+  process.env.WS_MAX_CONCURRENT_CONNECTIONS = '2';
+  try {
+    const { server } = await freshServer();
+    const port = server.address().port;
+    try {
+      const openSockets = [];
+      for (let i = 0; i < 2; i += 1) {
+        const ws = new WsClient(`ws://127.0.0.1:${port}/ws?apiKey=${encodeURIComponent(process.env.API_KEY)}`);
+        await new Promise((resolve, reject) => {
+          ws.on('open', resolve);
+          ws.on('error', reject);
+        });
+        openSockets.push(ws);
+      }
+
+      const rejection = await new Promise((resolve, reject) => {
+        const ws = new WsClient(`ws://127.0.0.1:${port}/ws?apiKey=${encodeURIComponent(process.env.API_KEY)}`);
+        ws.on('unexpected-response', (req, res) => resolve({ statusCode: res.statusCode }));
+        ws.on('open', () => reject(new Error('expected the 3rd connection to be rejected once the cap of 2 was reached')));
+        ws.on('error', () => {}); // an 'unexpected-response'-triggered close also emits 'error'; already handled above
+      });
+
+      assert.equal(rejection.statusCode, 503);
+
+      for (const ws of openSockets) ws.close();
+    } finally {
+      server.close();
+    }
+  } finally {
+    if (originalCap === undefined) delete process.env.WS_MAX_CONCURRENT_CONNECTIONS;
+    else process.env.WS_MAX_CONCURRENT_CONNECTIONS = originalCap;
+  }
+});
+
+test('websocket: the heartbeat terminates a connection that stops responding (regression)', async () => {
+  // Regression: a connection that dies without a clean close (network drop, a laptop sleeping
+  // mid-demo) used to stay in wss.clients until the OS-level TCP timeout eventually noticed —
+  // minutes to hours, not a fast reap. Simulates "already missed a pong" by setting isAlive=false
+  // directly on the server-side socket right after connecting, before any real heartbeat tick has
+  // run — the next tick should terminate it, without needing to wait out real ping/pong network
+  // round-trips (which the WebSocket spec/ws library answer automatically at the protocol level,
+  // making a genuinely unresponsive client hard to simulate from a normal client).
+  const originalInterval = process.env.WS_HEARTBEAT_INTERVAL_MS;
+  process.env.WS_HEARTBEAT_INTERVAL_MS = '50'; // small on purpose so this test runs fast
+  try {
+    const { app, server } = await freshServer();
+    const port = server.address().port;
+    try {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?apiKey=${encodeURIComponent(process.env.API_KEY)}`);
+      await new Promise((resolve, reject) => {
+        ws.addEventListener('open', resolve);
+        ws.addEventListener('error', reject);
+      });
+
+      const wss = app.locals.wss;
+      const [serverSideClient] = wss.clients;
+      assert.ok(serverSideClient, 'expected the server to have registered the connected client');
+
+      serverSideClient.isAlive = false;
+
+      const closeEvent = await new Promise((resolve) => {
+        ws.addEventListener('close', resolve);
+      });
+      assert.ok(closeEvent, 'expected the client to be disconnected by the server-side heartbeat sweep');
+
+      // The client-side close event and the server actually splicing the socket out of
+      // wss.clients aren't the same tick — ws.terminate() closes the connection, but wss's own
+      // 'close' bookkeeping for that client follows slightly after. Give it a beat.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(wss.clients.size, 0, 'the terminated connection must be removed from wss.clients');
+    } finally {
+      server.close();
+    }
+  } finally {
+    if (originalInterval === undefined) delete process.env.WS_HEARTBEAT_INTERVAL_MS;
+    else process.env.WS_HEARTBEAT_INTERVAL_MS = originalInterval;
+  }
+});
+
 test('websocket: the transaction broadcast includes full transaction details, not just the HTTP response fields (regression)', async () => {
   // Regression test: the WS broadcast used to be exactly the HTTP response shape
   // ({transaction_id, fraud_score, decision, reasons}) — matching architecture.md's original
