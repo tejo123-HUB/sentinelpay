@@ -6,6 +6,10 @@ const impossibleTravel = require('../server/rules/impossibleTravel');
 const amountAnomaly = require('../server/rules/amountAnomaly');
 const deviceMismatch = require('../server/rules/deviceMismatch');
 const oddHour = require('../server/rules/oddHour');
+const refundWithoutPurchase = require('../server/rules/refundWithoutPurchase');
+const payoutToNewReceiver = require('../server/rules/payoutToNewReceiver');
+const outboundRatioAnomaly = require('../server/rules/outboundRatioAnomaly');
+const outboundFanOutBurst = require('../server/rules/outboundFanOutBurst');
 
 const BASE_TIME = new Date('2026-07-18T12:00:00Z').getTime();
 
@@ -159,6 +163,147 @@ test('oddHour: skips users without an established baseline', () => {
   const transaction = { timestamp: '2026-07-18T03:00:00Z' };
 
   const result = oddHour(transaction, userHistory);
+
+  assert.equal(result.flagged, false);
+});
+
+// ---- refundWithoutPurchase ----
+
+test('refundWithoutPurchase: flags a refund with no matching prior purchase', () => {
+  const transaction = { amount: 500, purpose: 'Refund - order #123' };
+  const result = refundWithoutPurchase(transaction, { priorPurchaseTotal: 0 });
+
+  assert.equal(result.flagged, true);
+  assert.match(result.reason, /no matching prior purchase/);
+});
+
+test('refundWithoutPurchase: flags a refund exceeding total prior purchases', () => {
+  const transaction = { amount: 500, purpose: 'Refund - order #123' };
+  const result = refundWithoutPurchase(transaction, { priorPurchaseTotal: 200 });
+
+  assert.equal(result.flagged, true);
+  assert.match(result.reason, /exceeds this customer's total prior purchases/);
+});
+
+test('refundWithoutPurchase: does not flag a refund backed by sufficient prior purchases', () => {
+  const transaction = { amount: 500, purpose: 'Refund - order #123' };
+  const result = refundWithoutPurchase(transaction, { priorPurchaseTotal: 500 });
+
+  assert.equal(result.flagged, false);
+});
+
+test('refundWithoutPurchase: ignores non-refund transactions entirely (e.g. vendor payouts)', () => {
+  const transaction = { amount: 5000, purpose: 'Payout - settlement to business bank account' };
+  const result = refundWithoutPurchase(transaction, { priorPurchaseTotal: 0 });
+
+  assert.equal(result.flagged, false);
+});
+
+// ---- payoutToNewReceiver ----
+
+test('payoutToNewReceiver: flags a payout to a receiver never paid before', () => {
+  const transaction = { receiver_id: 'u_new', purpose: null };
+  const context = { priorOutboundCount: 5, knownOutboundReceiverIds: ['u_a', 'u_b'] };
+
+  const result = payoutToNewReceiver(transaction, context);
+
+  assert.equal(result.flagged, true);
+  assert.match(result.reason, /never paid before/);
+});
+
+test('payoutToNewReceiver: does not flag a payout to an already-known receiver', () => {
+  const transaction = { receiver_id: 'u_a', purpose: null };
+  const context = { priorOutboundCount: 5, knownOutboundReceiverIds: ['u_a', 'u_b'] };
+
+  const result = payoutToNewReceiver(transaction, context);
+
+  assert.equal(result.flagged, false);
+});
+
+test('payoutToNewReceiver: skips a business account with no baseline history yet', () => {
+  const transaction = { receiver_id: 'u_new', purpose: null };
+  const context = { priorOutboundCount: 1, knownOutboundReceiverIds: [] };
+
+  const result = payoutToNewReceiver(transaction, context);
+
+  assert.equal(result.flagged, false);
+});
+
+test('payoutToNewReceiver: ignores refund-purpose transactions (a first refund is normal)', () => {
+  const transaction = { receiver_id: 'u_new', purpose: 'Refund - order #123' };
+  const context = { priorOutboundCount: 10, knownOutboundReceiverIds: [] };
+
+  const result = payoutToNewReceiver(transaction, context);
+
+  assert.equal(result.flagged, false);
+});
+
+// ---- outboundRatioAnomaly ----
+
+test('outboundRatioAnomaly: flags outbound total far exceeding inbound revenue', () => {
+  const transaction = { amount: 1000 };
+  const context = { rollingInboundTotal: 500, rollingOutboundTotal: 200 };
+
+  const result = outboundRatioAnomaly(transaction, context);
+
+  assert.equal(result.flagged, true);
+  assert.match(result.reason, /x inbound revenue/);
+});
+
+test('outboundRatioAnomaly: flags outbound with zero recorded inbound once there is prior outbound history', () => {
+  const transaction = { amount: 100 };
+  const context = { rollingInboundTotal: 0, rollingOutboundTotal: 500 };
+
+  const result = outboundRatioAnomaly(transaction, context);
+
+  assert.equal(result.flagged, true);
+  assert.match(result.reason, /no recorded inbound revenue/);
+});
+
+test('outboundRatioAnomaly: does not flag a business account\'s very first transaction', () => {
+  const transaction = { amount: 100 };
+  const context = { rollingInboundTotal: 0, rollingOutboundTotal: 0 };
+
+  const result = outboundRatioAnomaly(transaction, context);
+
+  assert.equal(result.flagged, false);
+});
+
+test('outboundRatioAnomaly: does not flag outbound comfortably within inbound revenue', () => {
+  const transaction = { amount: 100 };
+  const context = { rollingInboundTotal: 5000, rollingOutboundTotal: 200 };
+
+  const result = outboundRatioAnomaly(transaction, context);
+
+  assert.equal(result.flagged, false);
+});
+
+// ---- outboundFanOutBurst ----
+
+test('outboundFanOutBurst: flags 3+ distinct new receivers within the burst window', () => {
+  const transaction = { receiver_id: 'u_c' };
+  const context = { knownOutboundReceiverIds: [], recentBurstReceiverIds: ['u_a', 'u_b'] };
+
+  const result = outboundFanOutBurst(transaction, context);
+
+  assert.equal(result.flagged, true);
+  assert.match(result.reason, /distinct new payout receivers/);
+});
+
+test('outboundFanOutBurst: does not count already-known receivers toward the threshold', () => {
+  const transaction = { receiver_id: 'u_c' };
+  const context = { knownOutboundReceiverIds: ['u_a', 'u_b'], recentBurstReceiverIds: ['u_a', 'u_b'] };
+
+  const result = outboundFanOutBurst(transaction, context);
+
+  assert.equal(result.flagged, false);
+});
+
+test('outboundFanOutBurst: does not flag fewer than the threshold of new receivers', () => {
+  const transaction = { receiver_id: 'u_b' };
+  const context = { knownOutboundReceiverIds: [], recentBurstReceiverIds: ['u_a'] };
+
+  const result = outboundFanOutBurst(transaction, context);
 
   assert.equal(result.flagged, false);
 });

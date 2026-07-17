@@ -31,23 +31,22 @@ So in real deployment, SentinelPay is invisible infrastructure — like a securi
 
 ## 3. The Journey of a Single Transaction (Step by Step)
 
-Here's exactly what happens, in order, every time someone pays:
+Here's exactly what happens, in order, every time money moves:
 
-1. **A payment is initiated.** Say, someone sends ₹300 to a shop through the payment app.
+1. **A transaction is initiated** — a customer paying the business, or the business sending money out (a refund, a payout, a bank settlement).
 2. **The gateway calls `POST /transaction`** with details: who's sending, who's receiving, how much, from where, from which device, and what type of transaction it is.
 3. **SentinelPay saves the transaction** to its database immediately, so there's a permanent record regardless of the outcome.
-4. **Five quick rule checks run** (each takes a few milliseconds): Is this person sending money unusually fast? Did they just "teleport" to a new city? Is this amount way bigger than usual for them? Is this an unrecognized device? Is this a strange hour for them to be transacting?
-5. **A fast lookup checks**: is this sender or receiver already flagged as part of a known money-laundering pattern from the background structuring analysis (explained in Section 5)?
-6. **A machine learning model scores the transaction** based on patterns learned from historical fraud data — catching subtler signals the rules might miss.
-7. **All of these combine into one fraud score from 0–100.**
-8. **A decision is made instantly:**
+4. **A fast lookup always checks**: is this sender or receiver already flagged as part of a known money-laundering pattern from the background structuring analysis (explained in Section 5)? This runs on *every* transaction, no exceptions — a known laundering ring doesn't get a pass just because it's paying the business instead of being paid by it.
+5. **If money is leaving the business** (the sender is one of your registered business accounts — see Section 8), the full behavioral analysis runs: five general-purpose rule checks (is this account sending money unusually fast? did it just "teleport" to a new city? is this amount way bigger than usual? is this an unrecognized device? is this a strange hour?), four checks purpose-built for outbound risk (is this refund backed by a real purchase? is this a receiver we've never paid before? are we paying out far more than we're taking in? are we suddenly fanning out to several new receivers at once?), and a machine learning model catching subtler patterns. A customer simply paying the business skips this step entirely and goes straight to a decision — a stolen card used to pay you is the card network's/payment gateway's problem (chargebacks, CVV checks), not something this system polices.
+6. **All of this combines into one fraud score from 0–100**, plus (for outbound transactions above a configurable amount) a hard floor that guarantees at least a step-up review regardless of score.
+7. **A decision is made instantly:**
    - Score under 40 → **Allow** (payment goes through normally)
    - Score 40–80 → **Step-up** (ask for extra verification, like an OTP)
    - Score over 80 → **Block** (payment is stopped)
-9. **The gateway receives this decision** in the same instant and acts on it — completing the payment, prompting for OTP, or showing a decline message.
-10. **Everything is logged** to the live dashboard, so a human fraud analyst can see it happen in real time and investigate further if needed.
+8. **The gateway receives this decision** in the same instant and acts on it — completing the payment, prompting for OTP, or showing a decline message.
+9. **Everything is logged** to the live dashboard, so your risk team can see it happen in real time and investigate further if needed.
 
-All of this — steps 3 through 9 — happens in well under a second. The person paying experiences it as instantaneous.
+All of this — steps 3 through 8 — happens in well under a second.
 
 ---
 
@@ -55,52 +54,50 @@ All of this — steps 3 through 9 — happens in well under a second. The person
 
 **Scenario:** Priya buys a ₹150 coffee from a café she visits every week, using her phone, during her regular lunch hour.
 
-**What SentinelPay sees:**
-- Amount (₹150) is close to Priya's average spend → no anomaly
-- Location matches her recent activity → no impossible travel
-- Device is the one she always uses → no mismatch
-- Time is her normal lunch hour → no odd-hour flag
-- Velocity is normal (she hasn't made other transactions in the last minute) → no flag
-- No structuring pattern involving her account
+**What SentinelPay sees:** Priya is the customer here — money is moving *into* the business, not out of it — so no behavioral scoring runs at all (Section 3). The only check that ever runs regardless of direction is the structuring-alert lookup, and Priya's account isn't linked to any known laundering pattern.
 
-**Result:** Fraud score ~5/100 → **Allow**. Priya's payment completes instantly; she never knows any of this analysis happened.
+**Result:** Fraud score 0 → **Allow**, instantly. Priya's payment completes without ever touching the rule engine or the ML model; she never knows any of this happened.
 
 ---
 
-## 5. Worked Example #2 — A Single Stolen-Card-Style Fraud Attempt
+## 5. Worked Example #2 — A Compromised Business Account Draining Funds
 
-**Scenario:** Someone's payment credentials have been stolen. Within 90 seconds, the attacker makes 5 rapid transactions from a device never seen before, and the last transaction appears to originate 400 km away from where the previous one happened seconds earlier — physically impossible to travel in that time.
+**Scenario:** Someone gains access to one of your business's own payout accounts — a stolen admin credential, a compromised integration key. Within 90 seconds, it issues 6 rapid payouts to receivers it has never paid before, and the last one appears to originate 400 km away from where the previous one happened seconds earlier — physically impossible to travel in that time, and from a device never seen on this account before.
 
 **What SentinelPay sees:**
-- **Velocity check** flags it: 5 transactions in under 2 minutes is far above normal.
+- **Velocity check** flags it: 6 payouts in under 2 minutes is far above normal for this account.
 - **Impossible travel check** flags it: 400 km in under a minute implies an impossible speed.
-- **Device mismatch check** flags it: this device has never been linked to this account before.
+- **Device mismatch check** flags it: this device has never been linked to this business account before.
+- **Payout to new receiver** flags it: several of these receivers have never been paid by this account before.
+- **Outbound fan-out burst** flags it: three or more distinct new receivers paid within a 10-minute window is exactly the shape a draining attack produces — catchable immediately, without waiting for the slower background structuring scan.
 
-**Result:** These three flags combine into a fraud score well above 80 → **Block**. The gateway immediately declines the transaction and can notify the customer. The response also includes the reasons, e.g.:
+**Result:** These flags combine into a fraud score well above 80 → **Block**. The response includes the reasons, e.g.:
 ```json
 {
   "decision": "block",
-  "fraud_score": 94,
+  "fraud_score": 100,
   "reasons": [
-    "5 transactions in 90 seconds",
+    "6 transactions in 90 seconds",
     "412 km location jump in under 60 seconds",
-    "Transaction from a previously unseen device"
+    "Transaction from a previously unseen device",
+    "Payout to a receiver this business account has never paid before",
+    "3 distinct new payout receivers in a short window"
   ]
 }
 ```
-This is what makes the system trustworthy — it's not a black box saying "blocked," it's giving a specific, human-readable reason your risk team (or even the customer, in a notification) can understand immediately.
+This is what makes the system trustworthy — it's not a black box saying "blocked," it's giving specific, human-readable reasons your risk team can understand immediately. Notice what's *not* here: nothing about the customers paying you. A stolen card used to pay your business is the card network's/payment gateway's problem (chargebacks, CVV checks) — this system is watching money leave the business, not money arriving from customers.
 
 ---
 
-## 6. Worked Example #3 — The Middle Ground (Step-Up Authentication)
+## 6. Worked Example #3 — The Middle Ground (Step-Up Review)
 
-**Scenario:** Rahul, who usually spends ₹200–500 per transaction, suddenly makes a ₹4,000 purchase — unusual for him, but not wildly suspicious on its own. It's from his usual device, at a normal hour, and there's no velocity or travel issue.
+**Scenario:** Your business issues a ₹8,000 refund to a customer — but that customer has no record of ever actually buying anything from this business account. On its own, this isn't necessarily malicious (maybe it's a goodwill gesture, maybe a rare cross-account edge case), but it's exactly the shape a fake-refund laundering attempt takes, so it shouldn't sail through unreviewed either.
 
 **What SentinelPay sees:**
-- **Amount anomaly check** flags it: ₹4,000 is well over 3x his usual average.
-- Nothing else is unusual.
+- **Refund without purchase check** flags it: the refund has no matching prior purchase from this customer at this business account.
+- Nothing else is unusual — no velocity issue, no new-device flag, no fan-out pattern.
 
-**Result:** One moderate flag pushes the score into the 40–80 range → **Step-up**. Instead of blocking Rahul's legitimate (if unusual) purchase outright, the app prompts him for an OTP or biometric confirmation. If he confirms it's really him, the payment completes. This is the system protecting against false positives — Rahul isn't locked out just because he did something slightly unusual once.
+**Result:** One moderate flag pushes the score into the 40–80 range → **Step-up review**, not an automatic block. This is the system protecting against false positives — a single unusual refund gets flagged for a human to look at, rather than being either silently allowed or aggressively blocked outright.
 
 ---
 
@@ -140,7 +137,8 @@ A fraud analyst sees one clear, actionable alert: *"₹80,000 structured across 
 
 In a real deployment, a fraud operations analyst would have this dashboard open on a screen throughout their shift:
 
-- A **live table** scrolls with every transaction as it's processed, color-coded green (allow), yellow (step-up), red (block).
+- A **live table** scrolls with every transaction as it's processed, color-coded green (allow), yellow (step-up), red (block). Sender and receiver are collapsed into one **ID** column showing whichever side is the customer — the business side is inferred from the **Business Accounts** registry (below), so an analyst doesn't have to mentally filter out their own accounts on every row.
+- A **Business Accounts** strip lets you register which account IDs are your own (a text field, editable any time) — this is what tells the system which side of a transaction is "the business" for both the dashboard's ID column *and* the fraud detection pipeline itself: only transactions sent *from* a registered business account get behavioral fraud/AML scoring at all (Section 3).
 - **Counters** at the top show at a glance: how many transactions processed today, how many flagged, how many blocked, how many stepped up.
 - A **dedicated structuring alerts panel** surfaces laundering patterns as soon as they're detected — this is the panel an analyst would check first, since it represents the highest-value, hardest-to-spot-manually cases.
 - Clicking into any flagged transaction or alert shows the human-readable reasons, so the analyst doesn't have to reverse-engineer *why* something was flagged.
@@ -155,7 +153,7 @@ It's worth being honest about scope here: SentinelPay makes the **real-time deci
 
 - **Blocked transactions** would typically notify the customer and may require manual review by your own risk team before any restriction is lifted.
 - **Structuring alerts** would typically be escalated to your business's own senior risk/compliance team for investigation — that's who's running this dashboard. If a pattern looks serious enough, they'd loop in whichever payment processor or banking partner is involved; formal anti-money-laundering (AML) reporting to regulators is that partner's statutory obligation, not something an ordinary merchant carries itself.
-- **Step-up outcomes** feed back into the system over time — if a customer keeps confirming unusual-but-legitimate transactions, their behavioral baseline (like `avg_transaction_amount`) naturally adjusts, reducing future false positives.
+- **Step-up outcomes** feed back into the system over time — if a business account keeps confirming unusual-but-legitimate outbound transactions, its behavioral baseline (like `avg_transaction_amount`) naturally adjusts, reducing future false positives.
 
 ---
 

@@ -148,14 +148,20 @@ test('POST /transaction: purpose is optional and defaults to null when omitted',
 test('GET /transactions includes each transaction\'s flag reasons', async () => {
   const { server } = await freshServer();
   try {
+    // Rule/ML scoring is outbound-only (money leaving the business) -- register the sender as
+    // a business account first, or this burst would auto-allow with no flags at all.
+    await request(server, 'POST', '/business-accounts', { account_id: 'u_test_1' });
     // Same 5-transaction-in-60s burst pattern used elsewhere to reliably trip velocity.
     for (let i = 0; i < 6; i += 1) {
       await request(server, 'POST', '/transaction', validTransaction({ timestamp: `2026-07-18T10:15:0${i}Z` }));
     }
     const res = await request(server, 'GET', '/transactions?limit=10');
-    const flagged = res.body.find((t) => t.reasons && t.reasons.length > 0);
-    assert.ok(flagged, 'expected at least one transaction with reasons after a velocity burst');
-    assert.match(flagged.reasons[0], /transactions in/);
+    // Find the specifically velocity-flagged transaction rather than "any flagged transaction" —
+    // this business account also trips outboundRatioAnomaly.js from its 2nd outbound transaction
+    // onward (no inbound revenue recorded for it in this test's fixture), so more than one
+    // transaction in the burst legitimately has reasons; this test is about velocity specifically.
+    const flagged = res.body.find((t) => t.reasons && t.reasons.some((r) => /transactions in/.test(r)));
+    assert.ok(flagged, 'expected the velocity-flagged transaction to appear with its reason');
   } finally {
     server.close();
   }
@@ -189,6 +195,9 @@ test('GET /transactions?decision= handles a repeated query param, not just a sin
   // present, since allow is itself one of the filtered-for values.
   const { server } = await freshServer();
   try {
+    // Rule/ML scoring is outbound-only -- register the sender as a business account first, or
+    // this burst would auto-allow and there'd be no step_up transaction to test the filter with.
+    await request(server, 'POST', '/business-accounts', { account_id: 'u_repeat_filter' });
     // Same 6-transaction-in-60s burst used elsewhere in this file to reliably trip velocity
     // and land the last one in step_up.
     for (let i = 0; i < 6; i += 1) {
@@ -533,6 +542,96 @@ test('POST /transaction: a future-dated client timestamp cannot bypass an active
     assert.equal(res.status, 201);
     assert.equal(res.body.decision, 'block', 'a manipulated future timestamp must not evade the structuring alert');
     assert.ok(res.body.fraud_score > 80);
+  } finally {
+    server.close();
+  }
+});
+
+// ---- Outbound-only fraud/AML scoring (server/outboundContext.js, server/rules/refund*, etc.) ----
+
+test('POST /transaction: an inbound burst (unregistered sender) never produces a flag or score, regardless of behavior', async () => {
+  const { server } = await freshServer();
+  try {
+    // Same velocity-tripping burst pattern used elsewhere in this file, plus an impossible
+    // travel jump on the final transaction and a brand-new device -- if rule/ML scoring ran on
+    // this sender, it would trip velocity, impossible_travel, and device_mismatch all at once.
+    // None of that should matter: this sender is never registered as a business account, so
+    // fraud/AML scoring should never run at all.
+    for (let i = 0; i < 5; i += 1) {
+      await request(
+        server,
+        'POST',
+        '/transaction',
+        validTransaction({ sender_id: 'u_inbound_burst', location: { lat: 16.5062, lng: 80.648 } })
+      );
+    }
+    const final = await request(
+      server,
+      'POST',
+      '/transaction',
+      validTransaction({
+        sender_id: 'u_inbound_burst',
+        location: { lat: 28.6139, lng: 77.209 }, // ~1200km jump, seconds later
+        device_id: 'd_brand_new',
+      })
+    );
+
+    assert.equal(final.status, 201);
+    assert.equal(final.body.decision, 'allow');
+    assert.equal(final.body.fraud_score, 0);
+    assert.deepEqual(final.body.reasons, []);
+  } finally {
+    server.close();
+  }
+});
+
+test('POST /transaction: an active structuring alert still forces block for an inbound (non-business-account) sender', async () => {
+  const { app, server } = await freshServer();
+  try {
+    const db = app.locals.db;
+    const senderId = 'u_inbound_evader';
+    const receiverId = 'u_inbound_evader_target';
+
+    db.prepare('INSERT INTO users (user_id, created_at, avg_transaction_amount) VALUES (?, ?, 0)').run(
+      senderId,
+      new Date().toISOString()
+    );
+    db.prepare('INSERT INTO users (user_id, created_at, avg_transaction_amount) VALUES (?, ?, 0)').run(
+      receiverId,
+      new Date().toISOString()
+    );
+    db.prepare(
+      `INSERT INTO structuring_alerts
+        (alert_id, sender_id, receiver_ids, total_amount, transaction_count, window_start, window_end, withdrawal_ratio, reason, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      'sa_test_inbound',
+      senderId,
+      JSON.stringify([receiverId]),
+      24000,
+      6,
+      new Date().toISOString(),
+      new Date().toISOString(),
+      0.85,
+      'test seeded structuring alert',
+      new Date().toISOString()
+    );
+
+    // senderId is never registered in business_accounts -- this is an inbound transaction, and
+    // fraud/AML behavioral scoring is skipped for it, but the structuring-alert floor must
+    // still apply regardless.
+    const res = await request(server, 'POST', '/transaction', {
+      sender_id: senderId,
+      receiver_id: receiverId,
+      amount: 50,
+      timestamp: new Date().toISOString(),
+      transaction_type: 'transfer',
+    });
+
+    assert.equal(res.status, 201);
+    assert.equal(res.body.decision, 'block', 'a known structuring ring must not get a pass just because it is paying the business');
+    assert.ok(res.body.fraud_score > 80);
+    assert.ok(res.body.reasons.some((r) => r.includes('Structuring alert')));
   } finally {
     server.close();
   }

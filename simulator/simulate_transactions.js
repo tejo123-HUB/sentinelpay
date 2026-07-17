@@ -2,13 +2,18 @@
 // normal customer-pays-merchant commerce (purchases, refunds, store-credit top-ups, settlement
 // payouts — see generateNormalTransaction below), plus on-demand scripted scenarios for a
 // single-transaction fraud block and a full structuring/layering pattern (architecture.md
-// Section 10, Task 4).
+// Section 10, Task 4). Fraud/AML rule+ML scoring is outbound-only (money leaving the business —
+// see architecture.md Section 4.1): --scenario=fraud/odd-hour are inbound and kept only for
+// reference/comparison (no longer expected to block); --scenario=outbound-fraud/refund-fraud are
+// the scenarios this system actually catches.
 //
 // Usage:
 //   node simulator/simulate_transactions.js --scenario=normal --count=100 --rate=150
-//   node simulator/simulate_transactions.js --scenario=fraud
+//   node simulator/simulate_transactions.js --scenario=fraud          (inbound, no longer blocks — see above)
 //   node simulator/simulate_transactions.js --scenario=structuring
-//   node simulator/simulate_transactions.js --scenario=odd-hour
+//   node simulator/simulate_transactions.js --scenario=odd-hour       (inbound, no longer blocks — see above)
+//   node simulator/simulate_transactions.js --scenario=outbound-fraud
+//   node simulator/simulate_transactions.js --scenario=refund-fraud
 //   node simulator/simulate_transactions.js --scenario=all
 //   node simulator/simulate_transactions.js --scenario=normal --continuous   (Ctrl+C to stop)
 
@@ -137,6 +142,30 @@ async function getAlerts(baseUrl, limit = 20) {
   return res.json();
 }
 
+// Fraud/AML rule+ML scoring only runs for transactions whose sender is a registered business
+// account (architecture.md Section 4.1) -- registration is normally a manual, owner-driven step
+// via the dashboard's Business Accounts strip, but the simulator already knows exactly which
+// IDs are the business's own storefronts (MERCHANT_RECEIVER_POOL), so it self-registers them
+// here rather than requiring a manual click before any outbound scenario/detector can be
+// demonstrated. Idempotent server-side (POST /business-accounts is INSERT OR IGNORE) -- safe to
+// call on every run. Best-effort: a registration failure here shouldn't crash whichever scenario
+// the caller actually asked for.
+async function ensureMerchantAccountsRegistered(baseUrl) {
+  await Promise.all(
+    MERCHANT_RECEIVER_POOL.map(async (accountId) => {
+      try {
+        await fetch(`${baseUrl}/business-accounts`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY },
+          body: JSON.stringify({ account_id: accountId }),
+        });
+      } catch (err) {
+        console.warn(`[simulator] could not register ${accountId} as a business account:`, err.message);
+      }
+    })
+  );
+}
+
 // Models the business's actual money flow, not generic person-to-person transfers: a customer
 // mostly pays one of the business's storefronts, occasionally the business refunds a customer
 // or settles funds out to its bank — the two cases that carry a human-readable `purpose` note,
@@ -167,14 +196,17 @@ function generateNormalTransaction() {
   }
 
   if (roll < 0.92) {
-    // Merchant-initiated refund back to the customer — the case `purpose` exists for.
+    // Merchant-initiated refund back to the customer — the case `purpose` exists for. No
+    // device_id: this is a business-initiated payout, not something the customer's own device
+    // touched — setting it to the customer's device previously made every refund look like a
+    // "device mismatch" against the business account's own device history (it had never seen
+    // the customer's device, and never would).
     const amount = Math.max(10, jitter(customer.typicalAmount, customer.typicalAmount * 0.2));
     return {
       sender_id: merchantAccount,
       receiver_id: customer.id,
       amount: Math.round(amount * 100) / 100,
       timestamp: new Date().toISOString(),
-      device_id: customer.device,
       merchant_id: gateway,
       purpose: `Refund - order #${Math.floor(100000 + Math.random() * 900000)}`,
       transaction_type: 'transfer',
@@ -228,10 +260,13 @@ async function runNormalStream(baseUrl, count, rateMs, continuous) {
   console.log(`[normal] done, sent ${sent} transactions`);
 }
 
-// Single-transaction fraud pattern: velocity + impossible travel + device mismatch, on a
-// fresh account each run so repeat demo runs aren't affected by prior state. Targets one of the
-// business's real storefronts — a card-testing/account-takeover attack against the merchant,
-// not a generic person-to-person transfer.
+// Single-transaction card-testing pattern (velocity + impossible travel + device mismatch)
+// targeting one of the business's storefronts — kept for reference/comparison, but no longer
+// expected to be blocked: fraud/AML behavioral scoring is now outbound-only (money leaving the
+// business), and this is an inbound attack (a customer paying the merchant with a stolen card).
+// That's the card network's/payment gateway's problem to catch (CVV, 3D-Secure, chargebacks),
+// not money laundering or theft of the business's own funds — see --scenario=outbound-fraud for
+// the equivalent attack this system actually polices.
 async function triggerFraudScenario(baseUrl) {
   const sender = randomId('u_fraud');
   const receiver = randomMerchantAccount();
@@ -270,10 +305,18 @@ async function triggerFraudScenario(baseUrl) {
   });
 
   console.log('[fraud] final transaction result:', finalResult.body);
-  if (finalResult.body && finalResult.body.decision === 'block') {
-    console.log('[fraud] OK: scripted fraud pattern was blocked as expected');
+  if (finalResult.body && finalResult.body.decision === 'allow' && (finalResult.body.reasons || []).length === 0) {
+    console.log(
+      "[fraud] OK: correctly allowed with no flags — this is an inbound attack (a customer paying the merchant), " +
+        'and fraud/AML scoring only runs on money leaving the business now. See --scenario=outbound-fraud for the ' +
+        'attack this system actually catches.'
+    );
   } else {
-    console.warn('[fraud] WARNING: expected a block decision, got:', finalResult.body && finalResult.body.decision);
+    console.warn(
+      '[fraud] unexpected: inbound transactions should always auto-allow with no flags now (unless caught by an ' +
+        'active structuring alert) — got:',
+      finalResult.body
+    );
   }
   return finalResult;
 }
@@ -359,17 +402,16 @@ function pickOddHourBaselineWindow(currentHourUtc) {
   return inWindowA ? ODD_HOUR_WINDOW_B : ODD_HOUR_WINDOW_A;
 }
 
-// Demonstrates the odd-hour rule live without weakening the timestamp-security fix
-// (architecture.md Section 15.2, finding #1 / Section 15.4): POST /transaction always scores
-// against server-received time, so a live demo can no longer fake "this account has days of
-// daytime history, and it's now 3am" using a client-supplied timestamp within a few seconds —
-// that's the security fix working as intended, not a limitation to route around via the API.
-// Instead, this seeds a realistic-looking historical baseline directly into the demo database
-// (bypassing the API entirely — the same way a real account's baseline would only exist after
-// real accumulated usage, never something POST /transaction itself lets a caller assert), then
-// sends exactly one transaction through the *real* API at genuine current time. The odd-hour
-// check itself still runs unmodified against real server time; only how the account's
-// pre-existing history came to exist is different from organic usage.
+// Kept for reference/comparison, same as triggerFraudScenario above: this is an inbound
+// transaction (a customer paying the merchant), and rule-based scoring — odd-hour included — is
+// now outbound-only, so this no longer produces a flag. Originally demonstrated the odd-hour
+// rule live without weakening the timestamp-security fix (architecture.md Section 15.2, finding
+// #1 / Section 15.4): POST /transaction always scores against server-received time, so a live
+// demo can't fake "this account has days of daytime history, and it's now 3am" using a
+// client-supplied timestamp — that's the security fix working as intended. This seeds a
+// realistic-looking historical baseline directly into the demo database (bypassing the API
+// entirely — the same way a real account's baseline would only exist after real accumulated
+// usage), then sends exactly one transaction through the *real* API at genuine current time.
 async function triggerOddHourScenario(baseUrl) {
   const dbPath = resolveDbPath();
   let db;
@@ -414,22 +456,103 @@ async function triggerOddHourScenario(baseUrl) {
   });
 
   console.log('[odd-hour] live transaction result:', result.body);
-  const flaggedOddHour = Boolean(
-    result.body && result.body.reasons && result.body.reasons.some((r) => /typical active hours/.test(r))
-  );
-  if (flaggedOddHour) {
-    console.log("[odd-hour] OK: transaction was correctly flagged as outside the account's typical active hours");
-    // odd_hour is deliberately the weakest single rule weight (see server/rules/oddHour.js) —
-    // on its own it won't cross the step_up threshold, matching the design intent that no
-    // single mild signal alone should challenge/block a user. The flag firing (above) is what
-    // this scenario demonstrates, not a guaranteed decision tier.
-    if (result.body && result.body.decision === 'allow') {
-      console.log(
-        "[odd-hour] note: decision is still 'allow' — a single odd-hour flag alone isn't enough to trigger step-up by design; see the reason above for the actual signal."
-      );
-    }
+  if (result.body && result.body.decision === 'allow' && (result.body.reasons || []).length === 0) {
+    console.log(
+      '[odd-hour] OK: correctly allowed with no flags — inbound transactions (a customer paying the merchant) ' +
+        'are no longer rule-scored, odd-hour included. See --scenario=outbound-fraud for a scenario this system ' +
+        'actually catches.'
+    );
   } else {
-    console.warn('[odd-hour] WARNING: expected an odd-hour flag but did not see one — check server logs');
+    console.warn('[odd-hour] unexpected: inbound transactions should auto-allow with no flags now — got:', result.body);
+  }
+  return result;
+}
+
+// The flagship "single-transaction fraud block" demo under the outbound-only model: a
+// compromised business account (one of the business's own storefronts, picked at random)
+// rapidly drains funds to several fresh, never-paid-before receivers, from a new device, with an
+// implausible location jump — the outbound equivalent of the old --scenario=fraud (which
+// attacked the merchant from the customer side, no longer scored — see triggerFraudScenario
+// above). Triggers velocity + device mismatch + impossible travel from the existing rule set,
+// plus payoutToNewReceiver.js and outboundFanOutBurst.js from the new outbound-only detectors.
+async function triggerOutboundFraudScenario(baseUrl) {
+  const sender = randomMerchantAccount(); // one of the business's own accounts, "compromised"
+  const gateway = randomGateway();
+  const homeLat = 16.5062;
+  const homeLng = 80.648;
+  const device = randomId('d');
+
+  console.log(
+    `[outbound-fraud] scripted account-takeover from ${sender}: rapid payouts to new receivers + a 400km+ jump on a new device`
+  );
+
+  let last;
+  for (let i = 0; i < 5; i += 1) {
+    last = await postTransaction(baseUrl, {
+      sender_id: sender,
+      receiver_id: randomId('u_drain_target'),
+      amount: 500 + i * 50,
+      timestamp: new Date().toISOString(),
+      location: { lat: homeLat, lng: homeLng },
+      device_id: device,
+      merchant_id: gateway,
+      transaction_type: 'transfer',
+    });
+    await sleep(300);
+  }
+
+  // Final payout: new device, far-away location, seconds after the last one, to yet another
+  // fresh receiver.
+  const finalResult = await postTransaction(baseUrl, {
+    sender_id: sender,
+    receiver_id: randomId('u_drain_target'),
+    amount: 550,
+    timestamp: new Date().toISOString(),
+    location: { lat: 28.6139, lng: 77.209 }, // Delhi, ~1200km from the home location, seconds later
+    device_id: randomId('d_new'),
+    merchant_id: gateway,
+    transaction_type: 'transfer',
+  });
+
+  console.log('[outbound-fraud] final transaction result:', finalResult.body);
+  if (finalResult.body && finalResult.body.decision === 'block') {
+    console.log('[outbound-fraud] OK: scripted account-takeover pattern was blocked as expected');
+  } else {
+    console.warn('[outbound-fraud] WARNING: expected a block decision, got:', finalResult.body && finalResult.body.decision);
+  }
+  return finalResult;
+}
+
+// Demonstrates refundWithoutPurchase.js: a business account issues a large refund-purpose
+// payment to a customer it has no record of ever selling anything to — the "fake refund"
+// laundering pattern, money leaving the business with no legitimate revenue behind it.
+async function triggerRefundFraudScenario(baseUrl) {
+  const sender = randomMerchantAccount();
+  const gateway = randomGateway();
+  const customer = randomId('u_refund_target'); // a fresh account this business has never actually sold to
+
+  console.log(`[refund-fraud] scripted fake refund from ${sender} to ${customer} (no matching prior purchase)`);
+
+  const result = await postTransaction(baseUrl, {
+    sender_id: sender,
+    receiver_id: customer,
+    amount: 8000,
+    timestamp: new Date().toISOString(),
+    merchant_id: gateway,
+    purpose: `Refund - order #${Math.floor(100000 + Math.random() * 900000)}`,
+    transaction_type: 'transfer',
+  });
+
+  console.log('[refund-fraud] result:', result.body);
+  const flaggedRefundFraud = Boolean(
+    result.body &&
+      result.body.reasons &&
+      result.body.reasons.some((r) => /no matching prior purchase|exceeds this customer's total prior purchases/.test(r))
+  );
+  if (flaggedRefundFraud) {
+    console.log('[refund-fraud] OK: refund with no matching purchase was correctly flagged');
+  } else {
+    console.warn('[refund-fraud] WARNING: expected a refundWithoutPurchase flag, got:', result.body);
   }
   return result;
 }
@@ -437,6 +560,8 @@ async function triggerOddHourScenario(baseUrl) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   console.log(`SentinelPay simulator :: scenario=${args.scenario} baseUrl=${args.baseUrl}`);
+
+  await ensureMerchantAccountsRegistered(args.baseUrl);
 
   if (args.scenario === 'normal') {
     await runNormalStream(args.baseUrl, args.count, args.rate, args.continuous);
@@ -446,13 +571,21 @@ async function main() {
     await triggerStructuringScenario(args.baseUrl);
   } else if (args.scenario === 'odd-hour') {
     await triggerOddHourScenario(args.baseUrl);
+  } else if (args.scenario === 'outbound-fraud') {
+    await triggerOutboundFraudScenario(args.baseUrl);
+  } else if (args.scenario === 'refund-fraud') {
+    await triggerRefundFraudScenario(args.baseUrl);
   } else if (args.scenario === 'all') {
     await runNormalStream(args.baseUrl, 20, args.rate, false);
     await triggerFraudScenario(args.baseUrl);
     await triggerStructuringScenario(args.baseUrl);
     await triggerOddHourScenario(args.baseUrl);
+    await triggerOutboundFraudScenario(args.baseUrl);
+    await triggerRefundFraudScenario(args.baseUrl);
   } else {
-    console.error(`Unknown scenario "${args.scenario}". Use normal | fraud | structuring | odd-hour | all.`);
+    console.error(
+      `Unknown scenario "${args.scenario}". Use normal | fraud | structuring | odd-hour | outbound-fraud | refund-fraud | all.`
+    );
     process.exitCode = 1;
   }
 }
@@ -471,6 +604,8 @@ module.exports = {
   triggerFraudScenario,
   triggerStructuringScenario,
   triggerOddHourScenario,
+  triggerOutboundFraudScenario,
+  triggerRefundFraudScenario,
   randomId,
   randomGateway,
   randomMerchantAccount,

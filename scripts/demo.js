@@ -103,12 +103,17 @@ function printMenu() {
   console.log(`
 Dashboard: ${BASE_URL}  (ambient traffic is running in the background)
 ------------------------------------------------------------------------
-  1) Fraud attack        velocity + impossible travel + new device -> block
-  2) Structuring pattern  6 transfers -> 3 mules -> 2 rapid withdrawals -> grouped alert
-  3) Odd-hour flag        transaction outside the account's typical active hours
-  4) All of the above, back to back
-  5) Latency benchmark (500 legit transactions, prints p50/p95/p99)
+  1) Outbound fraud       compromised business account rapidly drains funds -> block
+  2) Refund fraud         large refund with no matching prior purchase -> flagged
+  3) Structuring pattern  6 transfers -> 3 mules -> 2 rapid withdrawals -> grouped alert
+  4) Old inbound "fraud" scenario  kept for reference — no longer blocks (see below)
+  5) Old inbound "odd-hour" scenario  kept for reference — no longer blocks (see below)
+  6) All of the above, back to back
+  7) Latency benchmark (500 legit transactions, prints p50/p95/p99)
   q) Quit — stops the server and background traffic
+
+  Fraud/AML scoring is outbound-only now (money leaving the business) — a customer
+  paying you isn't scored, so 4/5 above intentionally just show "allow".
 ------------------------------------------------------------------------
 > `);
 }
@@ -155,22 +160,30 @@ async function main() {
     const choice = line.trim().toLowerCase();
     switch (choice) {
       case '1':
-        console.log('\n--- firing fraud attack scenario ---');
-        await runScenario('fraud');
+        console.log('\n--- firing outbound fraud (account-takeover) scenario ---');
+        await runScenario('outbound-fraud');
         break;
       case '2':
+        console.log('\n--- firing refund fraud scenario ---');
+        await runScenario('refund-fraud');
+        break;
+      case '3':
         console.log('\n--- firing structuring/layering scenario ---');
         await runScenario('structuring');
         break;
-      case '3':
-        console.log('\n--- firing odd-hour scenario ---');
+      case '4':
+        console.log('\n--- firing old inbound "fraud" scenario (reference only) ---');
+        await runScenario('fraud');
+        break;
+      case '5':
+        console.log('\n--- firing old inbound "odd-hour" scenario (reference only) ---');
         await runScenario('odd-hour');
         break;
-      case '4':
+      case '6':
         console.log('\n--- firing all scenarios back to back ---');
         await runScenario('all');
         break;
-      case '5':
+      case '7':
         console.log('\n--- running latency benchmark (this takes a bit) ---');
         await runToCompletion('node', ['simulator/benchmark.js', '--count=500']);
         break;

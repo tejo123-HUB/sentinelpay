@@ -22,12 +22,19 @@ const { getFraudProbability } = require('../ml/mlClient');
 // routes that actually need it lets an unmatched path (style.css, a 404, anything) fall through
 // past this router entirely, the same as it would have with no auth middleware in the chain at all.
 const { requireApiKey } = require('../middleware/apiKeyAuth');
+const { isBusinessAccount } = require('../businessAccounts');
+const getOutboundContext = require('../outboundContext');
+const applyOutboundRestrictors = require('../outboundRestrictor');
 
 const velocity = require('../rules/velocity');
 const impossibleTravel = require('../rules/impossibleTravel');
 const amountAnomaly = require('../rules/amountAnomaly');
 const deviceMismatch = require('../rules/deviceMismatch');
 const oddHour = require('../rules/oddHour');
+const refundWithoutPurchase = require('../rules/refundWithoutPurchase');
+const payoutToNewReceiver = require('../rules/payoutToNewReceiver');
+const outboundRatioAnomaly = require('../rules/outboundRatioAnomaly');
+const outboundFanOutBurst = require('../rules/outboundFanOutBurst');
 
 const RULE_DETECTORS = [
   { type: 'velocity', check: velocity },
@@ -35,6 +42,16 @@ const RULE_DETECTORS = [
   { type: 'amount_anomaly', check: amountAnomaly },
   { type: 'device_mismatch', check: deviceMismatch },
   { type: 'odd_hour', check: oddHour },
+];
+
+// Outbound-only detectors -- run against getOutboundContext (below), not the sender's own
+// getUserHistory. Only evaluated for transactions whose sender is a registered business account
+// (money leaving the business); see the fraud/AML scoping comment on POST /transaction.
+const OUTBOUND_RULE_DETECTORS = [
+  { type: 'refund_without_purchase', check: refundWithoutPurchase },
+  { type: 'payout_new_receiver', check: payoutToNewReceiver },
+  { type: 'outbound_ratio_anomaly', check: outboundRatioAnomaly },
+  { type: 'outbound_fan_out_burst', check: outboundFanOutBurst },
 ];
 
 const DEFAULT_LIST_LIMIT = 50;
@@ -86,17 +103,36 @@ router.post('/transaction', requireApiKey, async (req, res, next) => {
     ensureUserExists(db, input.sender_id, input.timestamp);
     ensureUserExists(db, input.receiver_id, input.timestamp);
 
-    const userHistory = getUserHistory(db, input.sender_id, nowMs);
-
-    const ruleResults = RULE_DETECTORS.map(({ type, check }) => ({
-      type,
-      ...check(input, userHistory),
-    }));
-
+    // The structuring-alert lookup always runs, regardless of direction: a known laundering
+    // ring doesn't get a pass just because it's paying the business rather than being paid by
+    // it (Task 7 DoD -- "an active structuring alert always forces block, regardless of
+    // transaction size" -- must hold for every transaction, not just outbound ones).
     const structuringLookup = findActiveAlert(db, input.sender_id, input.receiver_id, nowMs);
-    const mlProbability = await getFraudProbability(input, userHistory);
 
-    const { score, reasons } = computeFraudScore(ruleResults, structuringLookup, mlProbability);
+    // Fraud/AML behavioral scoring (the rule detectors + ML) only runs for money leaving the
+    // business -- a customer paying the business isn't a risk this system is positioned to
+    // police (that's the card network's/payment gateway's problem: stolen cards, chargebacks),
+    // while money leaving the business unaccountably is the actual theft/laundering vector this
+    // product exists to catch (architecture.md Section 4.1).
+    const outbound = isBusinessAccount(db, input.sender_id);
+
+    let ruleResults = [];
+    let mlProbability = 0;
+    if (outbound) {
+      const userHistory = getUserHistory(db, input.sender_id, nowMs);
+      const outboundContext = getOutboundContext(db, input, nowMs);
+
+      ruleResults = [
+        ...RULE_DETECTORS.map(({ type, check }) => ({ type, ...check(input, userHistory) })),
+        ...OUTBOUND_RULE_DETECTORS.map(({ type, check }) => ({ type, ...check(input, outboundContext) })),
+      ];
+      mlProbability = await getFraudProbability(input, userHistory);
+    }
+
+    let { score, reasons } = computeFraudScore(ruleResults, structuringLookup, mlProbability);
+    if (outbound) {
+      ({ score, reasons } = applyOutboundRestrictors(score, reasons, input));
+    }
     const decision = decide(score);
 
     const transactionId = `t_${crypto.randomUUID()}`;

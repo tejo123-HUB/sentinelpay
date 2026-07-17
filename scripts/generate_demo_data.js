@@ -20,7 +20,8 @@
 //
 // Usage:
 //   node scripts/generate_demo_data.js
-//   node scripts/generate_demo_data.js --count=2000 --hours=24 --fraud=5 --structuring=3 --anomalies=20
+//   node scripts/generate_demo_data.js --count=2000 --hours=24 --fraud=5 --structuring=3 \
+//     --anomalies=20 --outbound-fraud=5 --refund-fraud=5
 
 'use strict';
 
@@ -33,12 +34,19 @@ const decide = require('../server/decision');
 const { getFraudProbability } = require('../server/ml/mlClient');
 const { runScanCycle } = require('../server/structuring/backgroundJob');
 const { DEMO_CITY_HUBS, MERCHANT_RECEIVER_POOL, GATEWAY_POOL } = require('../simulator/simulate_transactions');
+const { isBusinessAccount } = require('../server/businessAccounts');
+const getOutboundContext = require('../server/outboundContext');
+const applyOutboundRestrictors = require('../server/outboundRestrictor');
 
 const velocity = require('../server/rules/velocity');
 const impossibleTravel = require('../server/rules/impossibleTravel');
 const amountAnomaly = require('../server/rules/amountAnomaly');
 const deviceMismatch = require('../server/rules/deviceMismatch');
 const oddHour = require('../server/rules/oddHour');
+const refundWithoutPurchase = require('../server/rules/refundWithoutPurchase');
+const payoutToNewReceiver = require('../server/rules/payoutToNewReceiver');
+const outboundRatioAnomaly = require('../server/rules/outboundRatioAnomaly');
+const outboundFanOutBurst = require('../server/rules/outboundFanOutBurst');
 
 const RULE_DETECTORS = [
   { type: 'velocity', check: velocity },
@@ -46,6 +54,13 @@ const RULE_DETECTORS = [
   { type: 'amount_anomaly', check: amountAnomaly },
   { type: 'device_mismatch', check: deviceMismatch },
   { type: 'odd_hour', check: oddHour },
+];
+
+const OUTBOUND_RULE_DETECTORS = [
+  { type: 'refund_without_purchase', check: refundWithoutPurchase },
+  { type: 'payout_new_receiver', check: payoutToNewReceiver },
+  { type: 'outbound_ratio_anomaly', check: outboundRatioAnomaly },
+  { type: 'outbound_fan_out_burst', check: outboundFanOutBurst },
 ];
 
 // Every insertTransaction call increments this, not just the "headline" outcome of each
@@ -56,10 +71,21 @@ const RULE_DETECTORS = [
 const TALLY = { allow: 0, step_up: 0, block: 0 };
 
 function parseArgs(argv) {
-  const defaults = { count: 1500, hours: 24, fraud: 5, structuring: 3, anomalies: 20 };
+  const defaults = {
+    count: 1500,
+    hours: 24,
+    fraud: 5,
+    structuring: 3,
+    anomalies: 20,
+    outboundFraud: 5,
+    refundFraud: 5,
+  };
   const args = { ...defaults };
   for (const arg of argv) {
-    const [key, value] = arg.replace(/^--/, '').split('=');
+    const [rawKey, value] = arg.replace(/^--/, '').split('=');
+    // CLI flags are kebab-case (--outbound-fraud=3) but the args object is camelCase --
+    // matches this file's other flags (--count, --hours, etc.) already being plain lowercase.
+    const key = rawKey.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
     if (key in defaults) args[key] = Number(value);
   }
   return args;
@@ -120,28 +146,43 @@ function pickCustomer() {
 // safe here because this script never receives input from an untrusted client, only from the
 // synthetic generators below.
 async function insertTransaction(db, input) {
-  // Mirrors validate.js's normalization for the live API (undefined merchant_id/purpose -> null)
-  // -- several of the historical event generators below don't set one, same as their live
-  // counterparts in simulator/simulate_transactions.js which rely on the API doing this.
+  // Mirrors validate.js's normalization for the live API (undefined merchant_id/purpose/
+  // device_id -> null) -- several of the historical event generators below don't set one, same
+  // as their live counterparts in simulator/simulate_transactions.js which rely on the API
+  // doing this (e.g. runRefundFraudEvent/the normal-event refund branch deliberately omit
+  // device_id -- a business-initiated payout isn't something a customer device touched).
   if (typeof input.merchant_id !== 'string') input.merchant_id = null;
   if (typeof input.purpose !== 'string') input.purpose = null;
+  if (typeof input.device_id !== 'string') input.device_id = null;
 
   const nowMs = new Date(input.timestamp).getTime();
 
   ensureUserExists(db, input.sender_id, input.timestamp);
   ensureUserExists(db, input.receiver_id, input.timestamp);
 
-  const userHistory = getUserHistory(db, input.sender_id, nowMs);
-
-  const ruleResults = RULE_DETECTORS.map(({ type, check }) => ({
-    type,
-    ...check(input, userHistory),
-  }));
-
+  // Mirrors server/routes/transactions.js: the structuring lookup always runs, but fraud/AML
+  // rule+ML scoring only runs for outbound transactions (money leaving the business) -- see the
+  // matching comment there.
   const structuringLookup = findActiveAlert(db, input.sender_id, input.receiver_id, nowMs);
-  const mlProbability = await getFraudProbability(input, userHistory);
+  const outbound = isBusinessAccount(db, input.sender_id);
 
-  const { score, reasons } = computeFraudScore(ruleResults, structuringLookup, mlProbability);
+  let ruleResults = [];
+  let mlProbability = 0;
+  if (outbound) {
+    const userHistory = getUserHistory(db, input.sender_id, nowMs);
+    const outboundContext = getOutboundContext(db, input, nowMs);
+
+    ruleResults = [
+      ...RULE_DETECTORS.map(({ type, check }) => ({ type, ...check(input, userHistory) })),
+      ...OUTBOUND_RULE_DETECTORS.map(({ type, check }) => ({ type, ...check(input, outboundContext) })),
+    ];
+    mlProbability = await getFraudProbability(input, userHistory);
+  }
+
+  let { score, reasons } = computeFraudScore(ruleResults, structuringLookup, mlProbability);
+  if (outbound) {
+    ({ score, reasons } = applyOutboundRestrictors(score, reasons, input));
+  }
   const decision = decide(score);
   const transactionId = `t_${crypto.randomUUID()}`;
 
@@ -205,13 +246,14 @@ async function runNormalEvent(db, atMs) {
   }
 
   if (roll < 0.92) {
+    // No device_id -- a business-initiated payout, not something the customer's own device
+    // touched (see the matching comment in simulator/simulate_transactions.js).
     const amount = Math.max(10, jitter(customer.typicalAmount, customer.typicalAmount * 0.2));
     return insertTransaction(db, {
       sender_id: merchantAccount,
       receiver_id: customer.id,
       amount: Math.round(amount * 100) / 100,
       timestamp: isoAt(atMs),
-      device_id: customer.device,
       merchant_id: gateway,
       purpose: `Refund - order #${Math.floor(100000 + Math.random() * 900000)}`,
       transaction_type: 'transfer',
@@ -376,14 +418,87 @@ async function runStructuringEvent(db, startMs) {
   return alerts.find((a) => a.sender_id === sender) || null;
 }
 
+// Historical version of simulator/simulate_transactions.js's triggerOutboundFraudScenario: a
+// business account rapidly drains funds to several fresh, never-paid-before receivers, from a
+// new device, with an implausible location jump -- the outbound account-takeover pattern this
+// system actually catches (unlike runFraudEvent above, which is inbound and kept only for
+// reference/comparison -- see architecture.md Section 4.1).
+async function runOutboundFraudEvent(db, startMs) {
+  const hub = DEMO_CITY_HUBS[Math.floor(Math.random() * DEMO_CITY_HUBS.length)];
+  const sender = randomMerchantAccount();
+  const gateway = randomGateway();
+  const device = randomId('d');
+
+  let t = startMs;
+  for (let i = 0; i < 5; i += 1) {
+    await insertTransaction(db, {
+      sender_id: sender,
+      receiver_id: randomId('u_drain_target_hist'),
+      amount: 500 + i * 50,
+      timestamp: isoAt(t),
+      location: { lat: hub.lat, lng: hub.lng },
+      device_id: device,
+      merchant_id: gateway,
+      transaction_type: 'transfer',
+    });
+    t += 300;
+  }
+
+  const farHub = [...DEMO_CITY_HUBS].sort(
+    (a, b) => haversine(b.lat, b.lng, hub.lat, hub.lng) - haversine(a.lat, a.lng, hub.lat, hub.lng)
+  )[0];
+
+  return insertTransaction(db, {
+    sender_id: sender,
+    receiver_id: randomId('u_drain_target_hist'),
+    amount: 550,
+    timestamp: isoAt(t),
+    location: { lat: farHub.lat, lng: farHub.lng },
+    device_id: randomId('d_new'),
+    merchant_id: gateway,
+    transaction_type: 'transfer',
+  });
+}
+
+// Historical version of triggerRefundFraudScenario: a business account issues a large
+// refund-purpose payment to a customer it has no record of ever selling anything to.
+async function runRefundFraudEvent(db, atMs) {
+  const sender = randomMerchantAccount();
+  const gateway = randomGateway();
+
+  return insertTransaction(db, {
+    sender_id: sender,
+    receiver_id: randomId('u_refund_target_hist'),
+    amount: 8000,
+    timestamp: isoAt(atMs),
+    merchant_id: gateway,
+    purpose: `Refund - order #${Math.floor(100000 + Math.random() * 900000)}`,
+    transaction_type: 'transfer',
+  });
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   console.log(
-    `[seed] generating ${args.count} normal + ${args.anomalies} anomaly + ${args.fraud} fraud + ` +
-      `${args.structuring} structuring events, evenly spread across the last ${args.hours}h`
+    `[seed] generating ${args.count} normal + ${args.anomalies} anomaly + ${args.fraud} fraud (inbound, reference only) + ` +
+      `${args.structuring} structuring + ${args.outboundFraud} outbound-fraud + ${args.refundFraud} refund-fraud events, ` +
+      `evenly spread across the last ${args.hours}h`
   );
 
   const db = initDb();
+
+  // Fraud/AML rule+ML scoring only runs for registered business accounts (see insertTransaction
+  // above) -- pre-register the simulator's known storefront accounts so seeded outbound events
+  // (and any refund/payout rows runNormalEvent generates) score under the real outbound model
+  // rather than silently auto-allowing. Mirrors simulator/simulate_transactions.js's
+  // ensureMerchantAccountsRegistered, just via a direct insert instead of the HTTP API.
+  const registerBusinessAccount = db.prepare(
+    'INSERT OR IGNORE INTO business_accounts (account_id, created_at) VALUES (?, ?)'
+  );
+  const seedTimeIso = new Date().toISOString();
+  for (const accountId of MERCHANT_RECEIVER_POOL) {
+    registerBusinessAccount.run(accountId, seedTimeIso);
+  }
 
   const nowMs = Date.now();
   const windowEndMs = nowMs - 2000;
@@ -415,6 +530,18 @@ async function main() {
   for (let i = 0; i < args.structuring; i += 1) {
     const at = windowStartMs + i * structuringSlot + Math.random() * structuringSlot;
     events.push({ at, run: () => runStructuringEvent(db, at) });
+  }
+
+  const outboundFraudSlot = windowMs / args.outboundFraud;
+  for (let i = 0; i < args.outboundFraud; i += 1) {
+    const at = windowStartMs + i * outboundFraudSlot + Math.random() * outboundFraudSlot;
+    events.push({ at, run: () => runOutboundFraudEvent(db, at) });
+  }
+
+  const refundFraudSlot = windowMs / args.refundFraud;
+  for (let i = 0; i < args.refundFraud; i += 1) {
+    const at = windowStartMs + i * refundFraudSlot + Math.random() * refundFraudSlot;
+    events.push({ at, run: () => runRefundFraudEvent(db, at) });
   }
 
   // Strict chronological order: each event's history-dependent scoring (avg spend, recent
