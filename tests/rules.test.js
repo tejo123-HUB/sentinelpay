@@ -22,6 +22,8 @@ const merchantAccountTakeover = require('../server/rules/merchantAccountTakeover
 const friendlyFraud = require('../server/rules/friendlyFraud');
 const employeeFraud = require('../server/rules/employeeFraud');
 const crossGatewayStructuring = require('../server/rules/crossGatewayStructuring');
+const duplicateTransaction = require('../server/rules/duplicateTransaction');
+const sharedIdentifierRisk = require('../server/rules/sharedIdentifierRisk');
 
 const BASE_TIME = new Date('2026-07-18T12:00:00Z').getTime();
 
@@ -765,6 +767,45 @@ test('crossGatewayStructuring: does not flag multiple gateways below the total t
   const transaction = { amount: 100, merchant_id: 'gw_b' };
   const context = { crossGatewayIds: ['gw_a'], crossGatewayTotal: 200 };
   const result = crossGatewayStructuring(transaction, context);
+
+  assert.equal(result.flagged, false);
+});
+
+// ---- duplicateTransaction (Section 16, Category 2) ----
+
+test('duplicateTransaction: flags a transaction duplicating one sent moments ago', () => {
+  const transaction = { amount: 500 };
+  const result = duplicateTransaction(transaction, { duplicateTransactionCount: 1 });
+
+  assert.equal(result.flagged, true);
+  assert.match(result.reason, /Duplicate of 1 other transaction/);
+});
+
+test('duplicateTransaction: does not flag a transaction with no recent duplicate', () => {
+  const transaction = { amount: 500 };
+  const result = duplicateTransaction(transaction, { duplicateTransactionCount: 0 });
+
+  assert.equal(result.flagged, false);
+});
+
+// ---- sharedIdentifierRisk (Section 16, Category 4/10) ----
+
+test('sharedIdentifierRisk: flags a device shared with other accounts', () => {
+  const result = sharedIdentifierRisk({}, { sharedDeviceAccountIds: ['u_a', 'u_b'], sharedIpAccountIds: [] });
+
+  assert.equal(result.flagged, true);
+  assert.match(result.reason, /Device shared with 2 other account/);
+});
+
+test('sharedIdentifierRisk: flags an IP shared with other accounts', () => {
+  const result = sharedIdentifierRisk({}, { sharedDeviceAccountIds: [], sharedIpAccountIds: ['u_a'] });
+
+  assert.equal(result.flagged, true);
+  assert.match(result.reason, /IP address shared with 1 other account/);
+});
+
+test('sharedIdentifierRisk: does not flag when neither device nor IP is shared', () => {
+  const result = sharedIdentifierRisk({}, { sharedDeviceAccountIds: [], sharedIpAccountIds: [] });
 
   assert.equal(result.flagged, false);
 });

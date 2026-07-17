@@ -13,6 +13,15 @@ const STRUCTURING_ALERT_FLOOR = 90; // if an active structuring alert matches th
 // (an active structuring_alerts row, direct or circular); this floor is what makes a Critical
 // *rule* detector (merchant account takeover, a suspected mule receiver) force the same outcome.
 const CRITICAL_SEVERITY_FLOOR = 85;
+// Section 16, Categories 19/21: a blacklisted sender/receiver always forces block, regardless of
+// direction -- same reasoning as STRUCTURING_ALERT_FLOOR, a confirmed bad actor doesn't get a
+// pass just because scoring would otherwise skip this transaction (e.g. an inbound payment).
+const BLACKLIST_FLOOR = 95;
+// A whitelisted account's score is capped here UNLESS an active structuring alert or blacklist
+// entry overrides it (checked first, below) -- whitelisting exists to reduce false positives on
+// a known-good relationship, not to give a confirmed bad actor a way out.
+const WHITELIST_CEILING = 5;
+const WATCHLIST_WEIGHT = 15; // added to the score when watchlisted, not a hard floor/ceiling
 
 /**
  * Weighting formula:
@@ -32,12 +41,19 @@ const CRITICAL_SEVERITY_FLOOR = 85;
  * `'None'` if nothing flagged) -- so a caller can render "why" at whatever level of detail it
  * needs without re-deriving it from `reasons` strings.
  *
+ * Section 16 (Categories 19/21): also applies the fraud_lists registry (`fraudListCheck`,
+ * optional -- callers that don't pass one get the pre-existing behavior unchanged). Precedence,
+ * most to least authoritative: an active structuring alert or a blacklist entry always forces
+ * block; a whitelist entry only reduces the score when neither of those apply; a watchlist entry
+ * just nudges the score up and adds a reason, never forcing an outcome on its own.
+ *
  * @param {Array<{ type: string, flagged: boolean, reason: string|null, weight: number, severity: string|null }>} ruleResults
  * @param {{ active: boolean, alert: object|null }} structuringLookup
  * @param {number} mlProbability - 0-1
+ * @param {{ blacklisted: boolean, whitelisted: boolean, watchlisted: boolean, blacklistEntries: object[], whitelistEntries: object[] }} [fraudListCheck]
  * @returns {{ score: number, reasons: string[], riskBreakdown: Array<{type: string, reason: string, weight: number, severity: string}>, severity: string }}
  */
-function computeFraudScore(ruleResults, structuringLookup, mlProbability) {
+function computeFraudScore(ruleResults, structuringLookup, mlProbability, fraudListCheck) {
   const flaggedRules = (ruleResults || []).filter((r) => r.flagged);
   const ruleWeightSum = Math.min(
     flaggedRules.reduce((sum, r) => sum + r.weight, 0),
@@ -73,6 +89,30 @@ function computeFraudScore(ruleResults, structuringLookup, mlProbability) {
     riskBreakdown.push({ type: 'structuring_alert', reason: structuringReason, weight: STRUCTURING_ALERT_FLOOR, severity: 'Critical' });
   }
 
+  if (fraudListCheck && fraudListCheck.watchlisted) {
+    score = Math.min(100, score + WATCHLIST_WEIGHT);
+    const watchlistReason = 'Account appears on the fraud watchlist';
+    reasons.push(watchlistReason);
+    riskBreakdown.push({ type: 'watchlist', reason: watchlistReason, weight: WATCHLIST_WEIGHT, severity: 'Medium' });
+  }
+
+  const structuringActive = !!(structuringLookup && structuringLookup.active);
+  const hasCriticalRuleFlag = flaggedRules.some((r) => r.severity === 'Critical');
+  if (fraudListCheck && fraudListCheck.blacklisted) {
+    score = Math.max(score, BLACKLIST_FLOOR);
+    const entryReason = fraudListCheck.blacklistEntries[0] && fraudListCheck.blacklistEntries[0].reason;
+    const blacklistReason = `Account is on the fraud blacklist${entryReason ? `: ${entryReason}` : ''}`;
+    reasons.push(blacklistReason);
+    riskBreakdown.push({ type: 'blacklist', reason: blacklistReason, weight: BLACKLIST_FLOOR, severity: 'Critical' });
+  } else if (fraudListCheck && fraudListCheck.whitelisted && !structuringActive && !hasCriticalRuleFlag) {
+    // A cap, not a floor -- only ever lowers the score, never raises it above what rules/ML
+    // alone already produced. Also never overrides a Critical-severity rule flag (merchant
+    // takeover, suspected mule) -- whitelisting exists to reduce friction from routine
+    // detectors on a known-good relationship, not to blind scoring to a genuine new red flag on
+    // an account that used to be trustworthy.
+    score = Math.min(score, WHITELIST_CEILING);
+  }
+
   const severity = riskBreakdown.reduce(
     (worst, r) => (SEVERITY_RANK[r.severity] > SEVERITY_RANK[worst] ? r.severity : worst),
     'None'
@@ -88,5 +128,8 @@ computeFraudScore.ML_MAX_CONTRIBUTION = ML_MAX_CONTRIBUTION;
 computeFraudScore.STRUCTURING_ALERT_FLOOR = STRUCTURING_ALERT_FLOOR;
 computeFraudScore.CRITICAL_SEVERITY_FLOOR = CRITICAL_SEVERITY_FLOOR;
 computeFraudScore.SEVERITY_RANK = SEVERITY_RANK;
+computeFraudScore.BLACKLIST_FLOOR = BLACKLIST_FLOOR;
+computeFraudScore.WHITELIST_CEILING = WHITELIST_CEILING;
+computeFraudScore.WATCHLIST_WEIGHT = WATCHLIST_WEIGHT;
 
 module.exports = computeFraudScore;

@@ -259,6 +259,31 @@ test('getOutboundContext: receiverMuleScore reflects the receiver\'s receive-the
   assert.equal(context.receiverMuleScore.qualifyingCycles, 2);
 });
 
+// ---- checkFraudLists (server/fraudLists.js, Section 16) ----
+
+test('checkFraudLists: detects blacklist/whitelist/watchlist membership for either sender or receiver', () => {
+  const { checkFraudLists } = require('../server/fraudLists');
+  const db = buildTestDb();
+  db.prepare('INSERT INTO fraud_lists (entry_id, list_type, account_id, reason, created_at) VALUES (?, ?, ?, ?, ?)').run(
+    'fl_1', 'blacklist', 'u_bad', 'confirmed fraud', new Date(NOW_MS).toISOString()
+  );
+  db.prepare('INSERT INTO fraud_lists (entry_id, list_type, account_id, reason, created_at) VALUES (?, ?, ?, ?, ?)').run(
+    'fl_2', 'whitelist', 'u_good', null, new Date(NOW_MS).toISOString()
+  );
+
+  const hitAsSender = checkFraudLists(db, 'u_bad', 'u_unrelated');
+  assert.equal(hitAsSender.blacklisted, true);
+  assert.equal(hitAsSender.blacklistEntries[0].reason, 'confirmed fraud');
+
+  const hitAsReceiver = checkFraudLists(db, 'u_unrelated', 'u_good');
+  assert.equal(hitAsReceiver.whitelisted, true);
+
+  const noHit = checkFraudLists(db, 'u_clean_1', 'u_clean_2');
+  assert.equal(noHit.blacklisted, false);
+  assert.equal(noHit.whitelisted, false);
+  assert.equal(noHit.watchlisted, false);
+});
+
 // ---- computeMuleScore (server/muleScore.js, Section 15.16 Feature 13) ----
 
 test('computeMuleScore: a receiver with no withdrawal-back-out history is not a mule', () => {
@@ -387,6 +412,39 @@ test('getOutboundContext: crossGatewayIds/crossGatewayTotal scoped to this speci
 
   assert.deepEqual(context.crossGatewayIds, ['gw_a']);
   assert.equal(context.crossGatewayTotal, 5000);
+});
+
+// ---- getOutboundContext: Section 16 (duplicate/shared-identifier) ----
+
+test('getOutboundContext: duplicateTransactionCount counts an identical recent transaction to the same receiver', () => {
+  const db = buildTestDb();
+  insertTransaction(db, { senderId: 'm_biz', receiverId: 'u_1', amount: 500, msAgo: 10 * 1000 });
+  insertTransaction(db, { senderId: 'm_biz', receiverId: 'u_1', amount: 999, msAgo: 10 * 1000 }); // different amount, must not count
+  insertTransaction(db, { senderId: 'm_biz', receiverId: 'u_2', amount: 500, msAgo: 10 * 1000 }); // different receiver, must not count
+
+  const context = getOutboundContext(db, { sender_id: 'm_biz', receiver_id: 'u_1', amount: 500, timestamp: new Date(NOW_MS).toISOString() }, NOW_MS);
+
+  assert.equal(context.duplicateTransactionCount, 1);
+});
+
+test('getOutboundContext: sharedDeviceAccountIds/sharedIpAccountIds exclude the sender itself', () => {
+  const db = buildTestDb();
+  for (const id of ['u_other', 'u_x', 'm_biz', 'u_y', 'u_z']) insertUser(db, id);
+  db.prepare(
+    'INSERT INTO transactions (transaction_id, sender_id, receiver_id, amount, timestamp, transaction_type, fraud_score, decision, device_id, ip_address) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run('t_shared_1', 'u_other', 'u_x', 10, new Date(NOW_MS - 60000).toISOString(), 'transfer', 0, 'allow', 'd_shared', '1.2.3.4');
+  db.prepare(
+    'INSERT INTO transactions (transaction_id, sender_id, receiver_id, amount, timestamp, transaction_type, fraud_score, decision, device_id, ip_address) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run('t_shared_2', 'm_biz', 'u_y', 10, new Date(NOW_MS - 30000).toISOString(), 'transfer', 0, 'allow', 'd_shared', '1.2.3.4');
+
+  const context = getOutboundContext(
+    db,
+    { sender_id: 'm_biz', receiver_id: 'u_z', device_id: 'd_shared', ip_address: '1.2.3.4', timestamp: new Date(NOW_MS).toISOString() },
+    NOW_MS
+  );
+
+  assert.deepEqual(context.sharedDeviceAccountIds, ['u_other']);
+  assert.deepEqual(context.sharedIpAccountIds, ['u_other']);
 });
 
 // ---- applyOutboundRestrictors ----

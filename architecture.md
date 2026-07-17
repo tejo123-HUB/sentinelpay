@@ -371,6 +371,9 @@ Ingests chargeback/dispute events (`transaction_id` optional, `customer_id`, `di
 ### `GET /analytics/*` (Section 15.16, Feature 18)
 `summary` (overview stat-card totals), `top-frauds?limit=` (most common flag types), `top-risky?dimension=customers|merchants|employees|vendors|devices|ips|countries&limit=`, `mule-accounts?limit=`, `gateway-comparison`, `trend?bucket=hour|day|week|month&lookbackHours=`, `export?format=csv|json&limit=`. All read-only, all `requireApiKey`. See Section 15.16 for field-level detail and the "recovered amount" definition.
 
+### `GET /fraud-lists?list_type=`, `POST /fraud-lists`, `DELETE /fraud-lists/:entryId` (Section 16, Categories 19/21)
+The blacklist/whitelist/watchlist registry. `POST { list_type: 'blacklist'|'whitelist'|'watchlist', account_id, reason? }` — not `INSERT OR IGNORE` like `business_accounts`: the same account can validly appear more than once over time (e.g. watchlisted, then later confirmed and blacklisted), so `entry_id` is the primary key, not `(list_type, account_id)`. `DELETE` is idempotent. Checked on **every** transaction regardless of direction (`server/fraudLists.js`'s `checkFraudLists`, called alongside the structuring-alert lookup in `routes/transactions.js`) — a blacklisted account is a confirmed bad actor whether it's paying the business or being paid by it. Precedence in `scoring.js`: an active structuring alert or a blacklist entry always forces block; a whitelist entry only reduces the score when neither of those apply, and never overrides a Critical-severity rule flag (merchant takeover, suspected mule) even on an otherwise-trusted account; a watchlist entry just adds `WATCHLIST_WEIGHT` (15) and a reason, never forcing an outcome.
+
 ### `GET /audit/summary?hours=24&bucketMinutes=60`
 Task 11 (audit trail): time-bucketed counts of `allow`/`step_up`/`block` over the given lookback window, for the trend chart. Added in Section 15.2. Returns `{ hours, bucketMinutes, totalTransactions, buckets: [{ bucket_start, allow, step_up, block }, ...] }`.
 
@@ -922,12 +925,12 @@ Legend: ✅ built · 🔶 partially covered by something that already exists · 
 
 **26. Future AI Features** — ⛔ **explicitly out of scope, per the request's own "Future" label, all six:** AI Chat Assistant · Natural Language Fraud Search · AI Fraud Investigation Assistant · AI Fraud Report Generator · Predictive Merchant Risk · AI Fraud Insights. *All six need integrating a real LLM API — a genuine new cost and architectural decision, not something to add as a side effect of a documentation pass.*
 
-**What was actually built in this pass** (all three reuse existing tables/patterns, no new external dependencies):
+**What was actually built in this pass** (all three reuse existing tables/patterns, no new external dependencies) — see `GET /fraud-lists` in Section 7 for the full precedence rules:
 - **`server/rules/duplicateTransaction.js`** (Category 2) — flags a transaction that closely duplicates one this business account sent moments ago (same receiver, same amount, within a short window) — a common accidental-double-charge or automated-replay signature distinct from every existing detector.
 - **`server/rules/sharedIdentifierRisk.js`** (Category 4/10) — flags when this transaction's `device_id` or `ip_address` has recently been used by other, unrelated accounts — the "shared device/IP graph" reduced to its actual per-transaction signal, without a graph database or visualization layer.
-- **`fraud_lists` table + `server/routes/fraudLists.js`** (Categories 19/21) — a blacklist/whitelist/watchlist registry (`list_type`, `account_id`, `reason`, `created_at`), the same editable-registry pattern as `business_accounts`. Wired into scoring as a new floor/bypass in `server/scoring.js`: a blacklisted sender or receiver always forces block (Critical severity); a whitelisted one skips rule/ML scoring entirely (auto-allow), mirroring the outbound-only gating decision in Section 15.12.
+- **`fraud_lists` table + `server/routes/fraudLists.js` + `server/fraudLists.js`** (Categories 19/21) — a blacklist/whitelist/watchlist registry (`list_type`, `account_id`, `reason`, `created_at`), the same editable-registry pattern as `business_accounts`. Checked for every transaction regardless of direction (like the structuring-alert lookup) and wired into `scoring.js`: a blacklisted sender or receiver floors the score at `BLACKLIST_FLOOR` (95, Critical severity); a whitelisted one caps the score at `WHITELIST_CEILING` (5) unless an active structuring alert or a Critical-severity rule flag says otherwise; a watchlisted one adds `WATCHLIST_WEIGHT` (15) without forcing an outcome.
 
-See the commit history on this branch for the concrete diffs; `npm test` count is recorded at the top of this section's own commit message, not duplicated here to avoid this document going stale the next time a test is added.
+`npm test`: 242 passing (up from 220 before this pass — 22 new tests across the two new detectors, `checkFraudLists`, the scoring-precedence rules, and end-to-end API coverage in the new `tests/fraudLists.test.js`).
 
 ---
 

@@ -114,6 +114,21 @@ CREATE TABLE IF NOT EXISTS disputes (
 );
 
 CREATE INDEX IF NOT EXISTS idx_disputes_customer ON disputes(customer_id);
+
+-- Section 16 (Enterprise Edition roadmap, Categories 19/21): blacklist/whitelist/watchlist
+-- registry, the same editable-registry pattern as business_accounts. An account can appear on
+-- more than one list over time (list_type + account_id is not unique) -- e.g. watchlisted, then
+-- later confirmed and blacklisted; the history stays, scoring only cares whether any row of a
+-- given type currently exists.
+CREATE TABLE IF NOT EXISTS fraud_lists (
+  entry_id TEXT PRIMARY KEY,
+  list_type TEXT NOT NULL CHECK (list_type IN ('blacklist', 'whitelist', 'watchlist')),
+  account_id TEXT NOT NULL,
+  reason TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_fraud_lists_account ON fraud_lists(account_id, list_type);
 `;
 
 function initDb(dbPath) {

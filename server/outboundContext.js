@@ -26,7 +26,7 @@ const OUTBOUND_MIN_PURCHASE_AGE_MS = 5 * 60 * 1000;
 // Section 15.16 (Features 1/2/3/7/9): refund-integrity fields, computed alongside the fields
 // above so every outbound detector shares one context object and one calling convention
 // (check(transaction, outboundContext)) rather than each rule querying the DB independently.
-const { REFUND_INTEGRITY, MERCHANT_TAKEOVER, FRIENDLY_FRAUD, EMPLOYEE_FRAUD, CROSS_GATEWAY } = require('./config');
+const { REFUND_INTEGRITY, MERCHANT_TAKEOVER, FRIENDLY_FRAUD, EMPLOYEE_FRAUD, CROSS_GATEWAY, DUPLICATE_DETECTION, SHARED_IDENTIFIER_RISK } = require('./config');
 const { computeMuleScore } = require('./muleScore');
 const { isBusinessAccount } = require('./businessAccounts');
 
@@ -250,6 +250,36 @@ function getOutboundContext(db, transaction, nowMs) {
     .prepare('SELECT COALESCE(SUM(amount), 0) AS total FROM transactions WHERE sender_id = ? AND receiver_id = ? AND timestamp >= ? AND timestamp <= ?')
     .get(businessId, counterpartyId, crossGatewaySince, transaction.timestamp);
 
+  // Section 16, Category 2: has this business account sent an identical (same receiver, same
+  // amount) transaction within the last minute? An accidental double-submit or a scripted
+  // replay signature, distinct from every existing detector.
+  const duplicateSince = new Date(nowMs - DUPLICATE_DETECTION.DUPLICATE_WINDOW_MS).toISOString();
+  const duplicateCountRow =
+    typeof transaction.amount === 'number'
+      ? db
+          .prepare(
+            'SELECT COUNT(*) AS n FROM transactions WHERE sender_id = ? AND receiver_id = ? AND amount = ? AND timestamp >= ? AND timestamp <= ?'
+          )
+          .get(businessId, counterpartyId, transaction.amount, duplicateSince, transaction.timestamp)
+      : { n: 0 };
+
+  // Section 16, Category 4/10: other accounts that have used this transaction's device_id/
+  // ip_address recently -- the per-transaction reduction of "shared device/IP graph" analysis,
+  // without a graph database or visualization layer.
+  const sharedSince = new Date(nowMs - SHARED_IDENTIFIER_RISK.SHARED_IDENTIFIER_LOOKBACK_MS).toISOString();
+  const sharedDeviceAccountIds = transaction.device_id
+    ? db
+        .prepare('SELECT DISTINCT sender_id FROM transactions WHERE device_id = ? AND sender_id != ? AND timestamp >= ? AND timestamp <= ?')
+        .all(transaction.device_id, businessId, sharedSince, transaction.timestamp)
+        .map((r) => r.sender_id)
+    : [];
+  const sharedIpAccountIds = transaction.ip_address
+    ? db
+        .prepare('SELECT DISTINCT sender_id FROM transactions WHERE ip_address = ? AND sender_id != ? AND timestamp >= ? AND timestamp <= ?')
+        .all(transaction.ip_address, businessId, sharedSince, transaction.timestamp)
+        .map((r) => r.sender_id)
+    : [];
+
   return {
     priorPurchaseTotal: priorPurchase.total,
     priorRefundTotal: priorRefund.total,
@@ -272,6 +302,9 @@ function getOutboundContext(db, transaction, nowMs) {
     employeeRefundCountToReceiver,
     crossGatewayIds: crossGatewayRows.map((r) => r.merchant_id),
     crossGatewayTotal: crossGatewayTotalRow.total,
+    duplicateTransactionCount: duplicateCountRow.n,
+    sharedDeviceAccountIds,
+    sharedIpAccountIds,
   };
 }
 

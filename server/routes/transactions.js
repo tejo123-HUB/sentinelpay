@@ -25,6 +25,7 @@ const { requireApiKey } = require('../middleware/apiKeyAuth');
 const { isBusinessAccount } = require('../businessAccounts');
 const getOutboundContext = require('../outboundContext');
 const applyOutboundRestrictors = require('../outboundRestrictor');
+const { checkFraudLists } = require('../fraudLists');
 
 const velocity = require('../rules/velocity');
 const impossibleTravel = require('../rules/impossibleTravel');
@@ -47,6 +48,8 @@ const merchantAccountTakeover = require('../rules/merchantAccountTakeover');
 const friendlyFraud = require('../rules/friendlyFraud');
 const employeeFraud = require('../rules/employeeFraud');
 const crossGatewayStructuring = require('../rules/crossGatewayStructuring');
+const duplicateTransaction = require('../rules/duplicateTransaction');
+const sharedIdentifierRisk = require('../rules/sharedIdentifierRisk');
 
 const RULE_DETECTORS = [
   { type: 'velocity', check: velocity },
@@ -76,6 +79,8 @@ const OUTBOUND_RULE_DETECTORS = [
   { type: 'friendly_fraud', check: friendlyFraud },
   { type: 'employee_fraud', check: employeeFraud },
   { type: 'cross_gateway_structuring', check: crossGatewayStructuring },
+  { type: 'duplicate_transaction', check: duplicateTransaction },
+  { type: 'shared_identifier_risk', check: sharedIdentifierRisk },
 ];
 
 const DEFAULT_LIST_LIMIT = 50;
@@ -134,6 +139,11 @@ router.post('/transaction', requireApiKey, async (req, res, next) => {
     // transaction size" -- must hold for every transaction, not just outbound ones).
     const structuringLookup = findActiveAlert(db, input.sender_id, input.receiver_id, nowMs);
 
+    // Section 16 (Categories 19/21): the fraud_lists check also always runs, regardless of
+    // direction, same reasoning as the structuring lookup above -- a blacklisted account is a
+    // confirmed bad actor either way.
+    const fraudListCheck = checkFraudLists(db, input.sender_id, input.receiver_id);
+
     // Fraud/AML behavioral scoring (the rule detectors + ML) only runs for money leaving the
     // business -- a customer paying the business isn't a risk this system is positioned to
     // police (that's the card network's/payment gateway's problem: stolen cards, chargebacks),
@@ -154,7 +164,7 @@ router.post('/transaction', requireApiKey, async (req, res, next) => {
       mlProbability = await getFraudProbability(input, userHistory);
     }
 
-    let { score, reasons, riskBreakdown, severity } = computeFraudScore(ruleResults, structuringLookup, mlProbability);
+    let { score, reasons, riskBreakdown, severity } = computeFraudScore(ruleResults, structuringLookup, mlProbability, fraudListCheck);
     if (outbound) {
       const reasonCountBeforeRestrictor = reasons.length;
       ({ score, reasons } = applyOutboundRestrictors(score, reasons, input));

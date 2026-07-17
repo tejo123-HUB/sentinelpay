@@ -88,6 +88,33 @@ const FRIENDLY_FRAUD = {
   DISPUTE_REPEAT_COUNT: 3,
 };
 
+const DUPLICATE_DETECTION = {
+  // Section 16, Category 2: a second outbound transaction to the same receiver, for the same
+  // amount, within this window reads as an accidental double-charge or automated replay rather
+  // than two genuinely separate payments.
+  DUPLICATE_WINDOW_MS: 60 * 1000,
+};
+
+const SHARED_IDENTIFIER_RISK = {
+  // Section 16, Category 4/10: how far back to look for *other* accounts using this same
+  // device_id/ip_address -- long enough to catch a slow-rotating fraud ring, short enough that
+  // an old, now-irrelevant device reassignment doesn't permanently flag two innocent accounts.
+  SHARED_IDENTIFIER_LOOKBACK_MS: 30 * 24 * 60 * 60 * 1000, // 30 days
+};
+
+const FRAUD_LISTS = {
+  // Section 16, Categories 19/21: an active blacklist entry floors the score here (above the
+  // block threshold), regardless of direction or what rule/ML scoring alone would have produced
+  // -- mirrors STRUCTURING_ALERT_FLOOR's "a known bad actor always forces block" guarantee.
+  BLACKLIST_FLOOR: 95,
+  // An active whitelist entry caps the score here, UNLESS an active structuring alert or
+  // blacklist entry says otherwise (both take precedence -- whitelisting is for reducing false
+  // positives, not for overriding a confirmed bad actor).
+  WHITELIST_CEILING: 5,
+  // A watchlist entry doesn't force any outcome, just nudges the score and adds a reason.
+  WATCHLIST_WEIGHT: 15,
+};
+
 const CIRCULAR_FLOW = {
   // Feature 6: max hops traced when looking for a cycle back to the originating merchant
   // (Merchant -> A -> Merchant is 1 hop out + 1 back; this bounds how many intermediate hops).
@@ -106,4 +133,7 @@ module.exports = {
   CROSS_GATEWAY,
   FRIENDLY_FRAUD,
   CIRCULAR_FLOW,
+  DUPLICATE_DETECTION,
+  SHARED_IDENTIFIER_RISK,
+  FRAUD_LISTS,
 };

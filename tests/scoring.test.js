@@ -109,6 +109,81 @@ test('scoring: severity is None when nothing is flagged', () => {
   assert.equal(riskBreakdown.length, 0);
 });
 
+// ---- Section 16 (Categories 19/21): fraud_lists precedence ----
+
+test('scoring: a blacklisted account forces block regardless of an otherwise clean score', () => {
+  const { score, reasons } = computeFraudScore([], { active: false, alert: null }, 0, {
+    blacklisted: true,
+    whitelisted: false,
+    watchlisted: false,
+    blacklistEntries: [{ reason: 'confirmed chargeback fraud ring' }],
+  });
+
+  assert.ok(score >= computeFraudScore.BLACKLIST_FLOOR);
+  assert.equal(decide(score), 'block');
+  assert.ok(reasons.some((r) => r.includes('fraud blacklist') && r.includes('confirmed chargeback fraud ring')));
+});
+
+test('scoring: a whitelisted account caps an otherwise moderate score', () => {
+  const ruleResults = [ruleResult(true, 45, 'amount anomaly', 'Medium', 'amount_anomaly')];
+  const { score } = computeFraudScore(ruleResults, { active: false, alert: null }, 0, {
+    blacklisted: false,
+    whitelisted: true,
+    watchlisted: false,
+  });
+
+  assert.ok(score <= computeFraudScore.WHITELIST_CEILING);
+  assert.equal(decide(score), 'allow');
+});
+
+test('scoring: blacklist takes precedence over whitelist if an account is somehow on both', () => {
+  const { score } = computeFraudScore([], { active: false, alert: null }, 0, {
+    blacklisted: true,
+    whitelisted: true,
+    watchlisted: false,
+    blacklistEntries: [{ reason: null }],
+  });
+
+  assert.ok(score >= computeFraudScore.BLACKLIST_FLOOR);
+});
+
+test('scoring: an active structuring alert overrides a whitelist entry', () => {
+  const { score } = computeFraudScore([], { active: true, alert: { reason: 'known ring' } }, 0, {
+    blacklisted: false,
+    whitelisted: true,
+    watchlisted: false,
+  });
+
+  assert.equal(decide(score), 'block');
+});
+
+test('scoring: whitelist does not suppress a Critical-severity rule flag', () => {
+  const ruleResults = [ruleResult(true, 50, 'Suspected Mule Account', 'Critical', 'mule_receiver_risk')];
+  const { score } = computeFraudScore(ruleResults, { active: false, alert: null }, 0, {
+    blacklisted: false,
+    whitelisted: true,
+    watchlisted: false,
+  });
+
+  assert.ok(score >= computeFraudScore.CRITICAL_SEVERITY_FLOOR, 'a Critical rule flag must not be washed out by whitelisting');
+});
+
+test('scoring: a watchlisted account gets a moderate nudge, not a forced outcome', () => {
+  const clean = computeFraudScore([], { active: false, alert: null }, 0, { blacklisted: false, whitelisted: false, watchlisted: false });
+  const watchlisted = computeFraudScore([], { active: false, alert: null }, 0, { blacklisted: false, whitelisted: false, watchlisted: true });
+
+  assert.equal(watchlisted.score, clean.score + computeFraudScore.WATCHLIST_WEIGHT);
+  assert.ok(watchlisted.reasons.some((r) => r.includes('fraud watchlist')));
+});
+
+test('scoring: no fraudListCheck argument behaves exactly as before (backward compatible)', () => {
+  const ruleResults = [ruleResult(true, 20, 'device mismatch', 'Low', 'device_mismatch')];
+  const { score, severity } = computeFraudScore(ruleResults, { active: false, alert: null }, 0);
+
+  assert.equal(score, 20);
+  assert.equal(severity, 'Low');
+});
+
 test('decision: threshold boundaries are exact', () => {
   assert.equal(decide(39), 'allow');
   assert.equal(decide(40), 'step_up');
