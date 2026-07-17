@@ -124,11 +124,17 @@ router.get('/analytics/mule-accounts', requireApiKey, (req, res) => {
   const limit = clampLimit(req.query.limit);
   const nowMs = Date.now();
 
+  // Excludes the business's own registered accounts, same reasoning as outboundContext.js's
+  // receiverMuleScore: a merchant receiving customer payments and paying them back out is
+  // normal operation, not the mule pattern this list exists to surface.
+  const businessAccountIds = new Set(db.prepare('SELECT account_id FROM business_accounts').all().map((r) => r.account_id));
+
   const candidates = db
     .prepare('SELECT receiver_id, COUNT(*) AS n FROM transactions GROUP BY receiver_id ORDER BY n DESC LIMIT ?')
     .all(MULE_CANDIDATE_SCAN_LIMIT);
 
   const scored = candidates
+    .filter((c) => !businessAccountIds.has(c.receiver_id))
     .map((c) => ({ account_id: c.receiver_id, ...computeMuleScore(db, c.receiver_id, nowMs) }))
     .filter((s) => s.isMule)
     .sort((a, b) => b.qualifyingCycles - a.qualifyingCycles)

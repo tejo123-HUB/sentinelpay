@@ -76,9 +76,14 @@
         <p>Real-time fraud detection &amp; structuring monitor</p>
       </div>
     </div>
-    <div class="conn-status" id="conn-status">
-      <span class="dot" id="conn-dot"></span>
-      <span id="conn-label">Connecting…</span>
+    <div class="topbar-actions">
+      <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Toggle dark mode" title="Toggle dark mode">
+        <span class="theme-toggle-icon" aria-hidden="true">◐</span>
+      </button>
+      <div class="conn-status" id="conn-status">
+        <span class="dot" id="conn-dot"></span>
+        <span id="conn-label">Connecting…</span>
+      </div>
     </div>
   </header>
 
@@ -121,6 +126,7 @@
     <button class="tab-btn active" data-view="live">Live Monitor</button>
     <button class="tab-btn" data-view="map">Map</button>
     <button class="tab-btn" data-view="audit">Audit Trail</button>
+    <button class="tab-btn" data-view="analytics">Analytics</button>
   </nav>
 
   <main class="layout view" id="view-live">
@@ -228,6 +234,102 @@
     </section>
   </main>
 
+  <main class="layout-single view hidden" id="view-analytics">
+    <section class="panel panel-analytics-summary">
+      <div class="panel-header">
+        <h2>Overview</h2>
+        <div class="analytics-export">
+          <button id="analytics-export-csv" type="button">Export CSV</button>
+          <button id="analytics-export-pdf" type="button">Export PDF</button>
+        </div>
+      </div>
+      <div class="counters analytics-counters">
+        <div class="stat-card"><span class="stat-label">Total Processed</span><span class="stat-value" id="an-total">0</span></div>
+        <div class="stat-card stat-allow"><span class="stat-label">Allowed</span><span class="stat-value" id="an-allowed">0</span></div>
+        <div class="stat-card stat-stepup"><span class="stat-label">Step-Up</span><span class="stat-value" id="an-stepup">0</span></div>
+        <div class="stat-card stat-block"><span class="stat-label">Blocked</span><span class="stat-value" id="an-blocked">0</span></div>
+        <div class="stat-card"><span class="stat-label">Fraud %</span><span class="stat-value" id="an-fraud-pct">0%</span></div>
+        <div class="stat-card stat-block"><span class="stat-label">Blocked Amount</span><span class="stat-value" id="an-blocked-amount">₹0</span></div>
+        <div class="stat-card stat-allow"><span class="stat-label">Recovered Amount</span><span class="stat-value" id="an-recovered-amount">₹0</span></div>
+        <div class="stat-card"><span class="stat-label">Avg Latency</span><span class="stat-value" id="an-latency">0ms</span></div>
+      </div>
+    </section>
+
+    <section class="panel panel-analytics-trend">
+      <div class="panel-header">
+        <h2>Fraud Trend</h2>
+        <select id="analytics-trend-bucket">
+          <option value="hour" selected>Hourly</option>
+          <option value="day">Daily</option>
+          <option value="week">Weekly</option>
+          <option value="month">Monthly</option>
+        </select>
+      </div>
+      <div class="audit-chart-wrap">
+        <canvas id="analytics-trend-chart"></canvas>
+      </div>
+    </section>
+
+    <section class="panel panel-analytics-heatmap">
+      <div class="panel-header">
+        <h2>Fraud Heatmap</h2>
+        <span class="heatmap-hint">Flagged transactions by hour of day / day of week</span>
+      </div>
+      <div class="heatmap-grid" id="analytics-heatmap"></div>
+    </section>
+
+    <section class="panel panel-analytics-top-risky">
+      <div class="panel-header">
+        <h2>Top Risky</h2>
+        <select id="analytics-risky-dimension">
+          <option value="customers">Customers</option>
+          <option value="merchants" selected>Merchants</option>
+          <option value="employees">Employees</option>
+          <option value="vendors">Vendors</option>
+          <option value="devices">Devices</option>
+          <option value="ips">IPs</option>
+          <option value="countries">Countries</option>
+        </select>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>ID</th><th>Flagged Count</th><th>Total Amount</th></tr></thead>
+          <tbody id="analytics-risky-table-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel panel-analytics-frauds">
+      <div class="panel-header"><h2>Top Fraud Categories</h2></div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Detector</th><th>Count</th><th>Avg Weight</th></tr></thead>
+          <tbody id="analytics-frauds-table-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel panel-analytics-mules">
+      <div class="panel-header"><h2>Top Mule Accounts</h2></div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Account</th><th>Qualifying Cycles</th><th>Receipts Scanned</th></tr></thead>
+          <tbody id="analytics-mules-table-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel panel-analytics-gateways">
+      <div class="panel-header"><h2>Gateway Comparison</h2></div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Gateway</th><th>Total</th><th>Fraud Rate</th><th>Total Amount</th><th>Avg Score</th></tr></thead>
+          <tbody id="analytics-gateways-table-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
   <!--
     defer (not a plain script tag) on all three: deferred scripts execute in strict document
     order after parsing finishes, so this guarantees chart.js/leaflet.js (declared earlier, in
@@ -240,5 +342,6 @@
   <script src="app.js" defer></script>
   <script src="map.js" defer></script>
   <script src="audit.js" defer></script>
+  <script src="analytics.js" defer></script>
 </body>
 </html>

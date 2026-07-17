@@ -178,6 +178,24 @@ test('getOutboundContext: referencedPurchase resolves the named purchase and its
   assert.equal(context.referencedPurchaseRefundCount, 1);
 });
 
+test('getOutboundContext: receiverMuleScore is never computed for the business\'s own registered accounts (regression)', () => {
+  // A merchant receiving customer payments and paying them back out (refunds, settlements) is
+  // normal operation -- without this exclusion, any business account with ordinary refund/payout
+  // activity technically satisfies the generic receive-then-drain heuristic and gets mislabeled
+  // a "Suspected Mule Account." Found live while visually checking the Analytics dashboard.
+  const db = buildTestDb();
+  db.prepare('INSERT INTO business_accounts (account_id, created_at) VALUES (?, ?)').run('m_biz', new Date(NOW_MS).toISOString());
+  insertTransaction(db, { senderId: 'u_customer', receiverId: 'm_biz', amount: 1000, msAgo: 20 * 60 * 1000 });
+  insertTransaction(db, { senderId: 'm_biz', receiverId: 'u_other', amount: 900, msAgo: 15 * 60 * 1000, purpose: 'Refund' });
+  insertTransaction(db, { senderId: 'u_customer2', receiverId: 'm_biz', amount: 1000, msAgo: 10 * 60 * 1000 });
+  insertTransaction(db, { senderId: 'm_biz', receiverId: 'u_other2', amount: 950, msAgo: 6 * 60 * 1000, purpose: 'Refund' });
+
+  const context = getOutboundContext(db, { sender_id: 'm_biz2', receiver_id: 'm_biz', timestamp: new Date(NOW_MS).toISOString() }, NOW_MS);
+
+  assert.equal(context.receiverMuleScore.isMule, false);
+  assert.equal(context.receiverMuleScore.qualifyingCycles, 0);
+});
+
 test('getOutboundContext: referencedPurchase is null when no reference_transaction_id is given', () => {
   const db = buildTestDb();
   const context = getOutboundContext(db, { sender_id: 'm_biz', receiver_id: 'u_1', timestamp: new Date(NOW_MS).toISOString() }, NOW_MS);

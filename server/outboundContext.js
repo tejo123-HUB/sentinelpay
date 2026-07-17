@@ -28,6 +28,7 @@ const OUTBOUND_MIN_PURCHASE_AGE_MS = 5 * 60 * 1000;
 // (check(transaction, outboundContext)) rather than each rule querying the DB independently.
 const { REFUND_INTEGRITY, MERCHANT_TAKEOVER, FRIENDLY_FRAUD, EMPLOYEE_FRAUD, CROSS_GATEWAY } = require('./config');
 const { computeMuleScore } = require('./muleScore');
+const { isBusinessAccount } = require('./businessAccounts');
 
 /**
  * @param {import('node:sqlite').DatabaseSync} db
@@ -149,7 +150,14 @@ function getOutboundContext(db, transaction, nowMs) {
   // Feature 13 (mule detection): does this transaction's receiver look like a mule account,
   // based on its own lifetime receive-then-quickly-drain history? Computed here (not inside a
   // rule file) since it needs direct DB access, same reasoning as every other field above.
-  const receiverMuleScore = computeMuleScore(db, counterpartyId, nowMs);
+  // Skipped for the business's own registered accounts: a merchant receiving customer payments
+  // and paying them back out (refunds, settlements, vendor payouts) is normal business
+  // operation, not the mule pattern this check exists to catch -- without this exclusion, any
+  // business account with ordinary refund/payout activity technically satisfies the generic
+  // receive-then-drain heuristic and gets mislabeled a "Suspected Mule Account."
+  const receiverMuleScore = isBusinessAccount(db, counterpartyId)
+    ? { qualifyingCycles: 0, receiptsScanned: 0, isMule: false }
+    : computeMuleScore(db, counterpartyId, nowMs);
 
   // Feature 4 (merchant account takeover): the most recent login for this business account
   // within the takeover window -- and, if there was one, whether its device had ever logged in

@@ -12,7 +12,7 @@ const indexHtml = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'index
 // — so without `defer` here too, `typeof Chart === 'undefined'` is always true regardless of
 // network conditions, and the chart/map silently never render. See dashboard/index.html's
 // comment above these three script tags for the full explanation.
-for (const script of ['app.js', 'map.js', 'audit.js']) {
+for (const script of ['app.js', 'map.js', 'audit.js', 'analytics.js']) {
   test(`dashboard/index.html: ${script} has defer (required for correct load order relative to CDN scripts)`, () => {
     const tagMatch = indexHtml.match(new RegExp(`<script[^>]*src="${script}"[^>]*>`));
     assert.ok(tagMatch, `expected to find a <script src="${script}"> tag`);

@@ -128,6 +128,25 @@ test('GET /analytics/mule-accounts: returns accounts with a qualifying receive-t
   }
 });
 
+test('GET /analytics/mule-accounts: excludes the business\'s own registered accounts (regression)', async () => {
+  const { server } = await freshServer();
+  try {
+    await request(server, 'POST', '/business-accounts', { account_id: 'm_mule_exclude_test' });
+    // The business account receives customer payments and pays most of it back out via
+    // refunds -- ordinary operation, satisfying the generic heuristic by construction.
+    await request(server, 'POST', '/transaction', validTransaction({ sender_id: 'u_a', receiver_id: 'm_mule_exclude_test', amount: 1000, timestamp: '2026-07-18T09:00:00Z' }));
+    await request(server, 'POST', '/transaction', validTransaction({ sender_id: 'm_mule_exclude_test', receiver_id: 'u_b', amount: 900, purpose: 'Refund', timestamp: '2026-07-18T09:05:00Z' }));
+    await request(server, 'POST', '/transaction', validTransaction({ sender_id: 'u_c', receiver_id: 'm_mule_exclude_test', amount: 1000, timestamp: '2026-07-18T09:10:00Z' }));
+    await request(server, 'POST', '/transaction', validTransaction({ sender_id: 'm_mule_exclude_test', receiver_id: 'u_d', amount: 950, purpose: 'Refund', timestamp: '2026-07-18T09:15:00Z' }));
+
+    const res = await request(server, 'GET', '/analytics/mule-accounts');
+    assert.equal(res.status, 200);
+    assert.ok(!res.body.some((r) => r.account_id === 'm_mule_exclude_test'));
+  } finally {
+    server.close();
+  }
+});
+
 test('GET /analytics/gateway-comparison: aggregates by merchant_id', async () => {
   const { server } = await freshServer();
   try {

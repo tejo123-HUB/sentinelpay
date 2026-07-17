@@ -890,3 +890,202 @@ tr.decision-step_up {
     transform: none;
   }
 }
+
+/* ==========================================================================
+   Section 15.16, Feature 15 — dark mode, Analytics tab, heatmap, print export
+   ========================================================================== */
+
+/* Dark mode: same custom-property override strategy documented in the file header, applied via
+   a `data-theme` attribute (app.js's initThemeToggle) instead of only `prefers-color-scheme`, so
+   the toggle can override the OS setting. Status hues/surfaces are the same values already
+   validated by the dataviz skill's validator against a dark card surface in the project's
+   original dark theme (architecture.md Section 15.8) — reused verbatim here, not re-invented,
+   since re-running the validator for this pass was out of scope. */
+[data-theme='dark'] {
+  --bg: #0b0f1a;
+  --surface: #0f1626;
+  --surface-sunken: #0a0e18;
+  --surface-strong: #141c30;
+
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.14);
+
+  --text: #f2f2f0;
+  --text-dim: #b7b6b0;
+  --text-faint: #8a8a86;
+  --gridline: rgba(255, 255, 255, 0.08);
+
+  --allow: #22ac74;
+  --allow-text: #22ac74;
+  --allow-wash: rgba(34, 172, 116, 0.16);
+  --stepup: #b8891b;
+  --stepup-text: #d2a53d;
+  --stepup-wash: rgba(184, 137, 27, 0.18);
+  --block: #cc4646;
+  --block-text: #ef6a6a;
+  --block-wash: rgba(204, 70, 70, 0.16);
+  --struct: #9085e9;
+  --struct-text: #9085e9;
+  --struct-wash: rgba(144, 133, 233, 0.16);
+
+  --accent: #3987e5;
+  --accent-strong: #5a9eea;
+  --accent-wash: rgba(57, 135, 229, 0.16);
+}
+
+[data-theme='dark'] .topbar {
+  background: rgba(11, 15, 26, 0.86);
+}
+
+/* Leaflet's default tiles are a light basemap by design; invert+hue-rotate only the tile pane
+   (never markers/popups, which must keep their true status colors) — the standard CSS-only trick
+   for a dark map from a light tile source, same approach as the project's original dark theme. */
+[data-theme='dark'] .leaflet-tile-pane {
+  filter: invert(1) hue-rotate(180deg) brightness(0.9) contrast(0.9);
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.theme-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-strong);
+  color: var(--text-dim);
+  font-size: 1rem;
+  cursor: pointer;
+  box-shadow: var(--shadow-xs);
+  transition: background 0.2s ease, transform 0.2s var(--ease);
+}
+.theme-toggle:hover {
+  background: var(--accent-wash);
+  color: var(--accent-strong);
+  transform: rotate(12deg);
+}
+
+/* ---- Analytics tab ---- */
+
+.analytics-counters {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+/* The original 5-card counters row only ever holds short integers ("14", "0"); this row also
+   holds currency/latency values ("₹305300.00") that overflow the same 2rem font-size at this
+   card's width -- scaled down and given an overflow safety net rather than widening every card
+   (which would push the row to fewer columns on common viewport widths). */
+.analytics-counters .stat-value {
+  font-size: 1.35rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.analytics-export {
+  display: flex;
+  gap: 0.5rem;
+}
+.analytics-export button {
+  padding: 0.4rem 0.85rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-strong);
+  color: var(--text-dim);
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+.analytics-export button:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.panel-analytics-top-risky select,
+.panel-analytics-trend select {
+  padding: 0.35rem 0.7rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-strong);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 0.82rem;
+}
+
+.heatmap-hint {
+  font-size: 0.78rem;
+  color: var(--text-faint);
+}
+
+.heatmap-grid {
+  display: grid;
+  grid-template-columns: 3.2rem repeat(24, 1fr);
+  gap: 2px;
+  padding: 1rem 1.25rem 1.25rem;
+}
+.heatmap-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  min-height: 1.5rem;
+  border-radius: 3px;
+}
+.heatmap-corner {
+  background: transparent;
+}
+.heatmap-hour-label,
+.heatmap-day-label {
+  color: var(--text-faint);
+  font-weight: 600;
+}
+.heatmap-day-label {
+  justify-content: flex-end;
+  padding-right: 0.4rem;
+}
+.heatmap-value {
+  /* Sequential single-hue ramp (dataviz skill convention): intensity 0 -> the page's own sunken
+     surface (no data reads as "empty," not "zero-colored-in-the-ramp"), intensity 1 -> the
+     accent's strong step. --heatmap-intensity is set per-cell inline by analytics.js. */
+  background: color-mix(in srgb, var(--accent-strong) calc(var(--heatmap-intensity, 0) * 100%), var(--surface-sunken));
+  color: var(--text);
+}
+
+@media (max-width: 900px) {
+  .heatmap-grid {
+    grid-template-columns: 2.4rem repeat(24, minmax(1.1rem, 1fr));
+    overflow-x: auto;
+  }
+}
+
+/* PDF export (Feature 15): triggered via window.print() from analytics.js's triggerPdfExport,
+   after adding this class -- isolates the Analytics panel for the browser's native
+   print-to-PDF, avoiding a server-side PDF dependency (this project stays dependency-light:
+   Chart.js + Leaflet only). */
+@media print {
+  body.printing-analytics .topbar,
+  body.printing-analytics .counters:not(.analytics-counters),
+  body.printing-analytics .business-accounts,
+  body.printing-analytics .tabs,
+  body.printing-analytics .view:not(#view-analytics) {
+    display: none !important;
+  }
+  body.printing-analytics #view-analytics {
+    display: block !important;
+  }
+  body.printing-analytics .panel {
+    break-inside: avoid;
+    box-shadow: none;
+    border: 1px solid #ccc;
+  }
+}

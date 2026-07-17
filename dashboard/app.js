@@ -406,7 +406,38 @@ function initTabs() {
   });
 }
 
+// ---- Dark mode (Section 15.16, Feature 15) ----
+// Applies site-wide via a `data-theme` attribute on <html> -- style.css's `[data-theme="dark"]`
+// block overrides the same custom properties every existing component already reads (--bg,
+// --surface, --text, --allow, etc.), so no component-level dark-mode logic is needed anywhere
+// else. Preference persisted in localStorage; defaults to the OS-level prefers-color-scheme on
+// first visit, same convention as style.css's own `@media (prefers-color-scheme: dark)` fallback
+// for a user who never touches the toggle at all.
+const THEME_STORAGE_KEY = 'sentinelpay-theme';
+
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  const icon = document.querySelector('.theme-toggle-icon');
+  if (icon) icon.textContent = theme === 'dark' ? '◑' : '◐';
+}
+
+function initThemeToggle() {
+  const stored = localStorage.getItem(THEME_STORAGE_KEY);
+  const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  applyTheme(stored || (prefersDark ? 'dark' : 'light'));
+
+  const btn = document.getElementById('theme-toggle');
+  if (btn) {
+    btn.addEventListener('click', () => {
+      const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+      applyTheme(next);
+      localStorage.setItem(THEME_STORAGE_KEY, next);
+    });
+  }
+}
+
 initTabs();
 initChart();
 initBusinessAccountsControl();
+initThemeToggle();
 loadBusinessAccounts().then(loadInitialData).then(connect);
