@@ -7,6 +7,7 @@ const { MAX_ID_LENGTH } = require('../validate');
 // every request reaching this router, including the dashboard's own static assets, which can't
 // attach an X-API-Key header the way authFetch()'s fetch() calls can.
 const { requireApiKey } = require('../middleware/apiKeyAuth');
+const { recordAdminAction } = require('../adminAuditLog');
 
 // GET /business-accounts — the dashboard's editable registry of the business's own account IDs,
 // used client-side to decide which side of a transaction (sender or receiver) is the business
@@ -32,6 +33,7 @@ router.post('/business-accounts', requireApiKey, (req, res) => {
     account_id,
     new Date().toISOString()
   );
+  recordAdminAction(db, { action: 'create', targetType: 'business_account', targetId: account_id, actorIp: req.ip });
 
   res.status(201).json({ account_id });
 });
@@ -41,6 +43,7 @@ router.post('/business-accounts', requireApiKey, (req, res) => {
 router.delete('/business-accounts/:accountId', requireApiKey, (req, res) => {
   const db = req.app.locals.db;
   db.prepare('DELETE FROM business_accounts WHERE account_id = ?').run(req.params.accountId);
+  recordAdminAction(db, { action: 'delete', targetType: 'business_account', targetId: req.params.accountId, actorIp: req.ip });
   res.status(204).end();
 });
 

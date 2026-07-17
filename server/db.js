@@ -130,6 +130,37 @@ CREATE TABLE IF NOT EXISTS fraud_lists (
 );
 
 CREATE INDEX IF NOT EXISTS idx_fraud_lists_account ON fraud_lists(account_id, list_type);
+
+-- Section 16, Category 13/14: the safe subset of "Investigation Notes" that doesn't need a real
+-- analyst-identity system -- free-text notes attachable to a transaction. Deliberately
+-- append-only (no DELETE route): an investigation record that could be silently erased isn't a
+-- trustworthy one. author is caller-supplied free text, same trust model as transactions.
+-- employee_id -- not a verified identity, since this build has no login system (Section 15.6).
+CREATE TABLE IF NOT EXISTS investigation_notes (
+  note_id TEXT PRIMARY KEY,
+  transaction_id TEXT NOT NULL,
+  note TEXT NOT NULL,
+  author TEXT,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (transaction_id) REFERENCES transactions(transaction_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_investigation_notes_transaction ON investigation_notes(transaction_id);
+
+-- Section 16, Category 20/21: records who (by IP, since there's no user auth) did what to the
+-- editable registries (business_accounts, fraud_lists) and when -- the same "no real identity,
+-- but a real trail" trust model as investigation_notes above.
+CREATE TABLE IF NOT EXISTS admin_audit_log (
+  log_id TEXT PRIMARY KEY,
+  action TEXT NOT NULL,
+  target_type TEXT NOT NULL,
+  target_id TEXT,
+  detail TEXT,
+  actor_ip TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_admin_audit_log_created_at ON admin_audit_log(created_at);
 `;
 
 function initDb(dbPath) {

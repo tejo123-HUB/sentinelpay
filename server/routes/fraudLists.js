@@ -7,6 +7,7 @@ const router = express.Router();
 
 const { requireApiKey } = require('../middleware/apiKeyAuth');
 const { MAX_ID_LENGTH } = require('../validate');
+const { recordAdminAction } = require('../adminAuditLog');
 
 const VALID_LIST_TYPES = ['blacklist', 'whitelist', 'watchlist'];
 const MAX_REASON_LENGTH = 256;
@@ -55,6 +56,7 @@ router.post('/fraud-lists', requireApiKey, (req, res) => {
     typeof reason === 'string' ? reason : null,
     nowIso
   );
+  recordAdminAction(db, { action: 'create', targetType: `fraud_list:${list_type}`, targetId: account_id, detail: reason, actorIp: req.ip });
 
   res.status(201).json({ entry_id: entryId, list_type, account_id, reason: typeof reason === 'string' ? reason : null, created_at: nowIso });
 });
@@ -63,6 +65,7 @@ router.post('/fraud-lists', requireApiKey, (req, res) => {
 router.delete('/fraud-lists/:entryId', requireApiKey, (req, res) => {
   const db = req.app.locals.db;
   db.prepare('DELETE FROM fraud_lists WHERE entry_id = ?').run(req.params.entryId);
+  recordAdminAction(db, { action: 'delete', targetType: 'fraud_list', targetId: req.params.entryId, actorIp: req.ip });
   res.status(204).end();
 });
 

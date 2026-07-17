@@ -215,6 +215,64 @@ All 21 features are now built and merged with passing tests. Feature 20 (100% de
 
 **For local development and the hackathon demo:** use **SQLite** in place of Cloud Spanner, and **local scikit-learn inference** in place of Vertex AI if the deployment path proves too slow to set up. Comment this clearly in code (`// PROD: Cloud Spanner — DEMO: SQLite`) so it's obvious what's a demo stand-in vs. the intended production architecture.
 
+### Sequence diagram — one `POST /transaction` call (Section 16, Category 25)
+
+Every step below happens synchronously within the one request (no async/polling pattern, CLAUDE.md hard rule). Rendered as Mermaid, which GitHub renders natively in Markdown — no diagramming tool/export step required.
+
+```mermaid
+sequenceDiagram
+    participant GW as Payment Gateway
+    participant API as POST /transaction
+    participant DB as SQLite
+    participant FL as fraud_lists check
+    participant SA as Structuring alert lookup
+    participant RE as Rule engine (outbound only)
+    participant ML as ML client
+    participant SC as scoring.js
+    participant WS as WebSocket
+
+    GW->>API: transaction payload
+    API->>API: validate + overwrite timestamp with server time
+    API->>DB: ensureUserExists (sender, receiver)
+    API->>SA: findActiveAlert(sender, receiver)
+    API->>FL: checkFraudLists(sender, receiver)
+    alt sender is a registered business account
+        API->>DB: getUserHistory + getOutboundContext
+        API->>RE: run 18 detectors
+        API->>ML: getFraudProbability
+    else inbound (customer paying the business)
+        Note over API: rule/ML scoring skipped entirely
+    end
+    API->>SC: computeFraudScore(rules, structuring, ml, fraudLists)
+    SC-->>API: score, reasons, risk_breakdown, severity, confidence
+    API->>API: decide(score) -> allow / step_up / block
+    API->>DB: insert transaction + flags
+    API->>WS: broadcast full transaction
+    API-->>GW: 201 { fraud_score, decision, severity, confidence, reasons, risk_breakdown }
+```
+
+### Decision flow diagram (Section 16, Category 25)
+
+```mermaid
+flowchart TD
+    A[Transaction received] --> B{Structuring alert<br/>or blacklist match?}
+    B -- yes --> Z[BLOCK<br/>score floored at 90-95]
+    B -- no --> C{Sender is a<br/>registered business account?}
+    C -- no --> D[Auto-ALLOW<br/>no rule/ML scoring]
+    C -- yes --> E[Run 18 detectors + ML]
+    E --> F{Any Critical-severity<br/>flag?}
+    F -- yes --> Z
+    F -- no --> G[Sum rule weights + ML contribution]
+    G --> H{Whitelisted?}
+    H -- yes --> I[Cap score at 5]
+    H -- no --> J[score as computed]
+    I --> K
+    J --> K{score}
+    K -- "< 40" --> L[ALLOW]
+    K -- "40-80" --> M[STEP-UP]
+    K -- "> 80" --> Z
+```
+
 ---
 
 ## 6. Database Schema (SQLite, demo version)
@@ -282,6 +340,8 @@ CREATE TABLE structuring_alerts (
 
 **Schema changes (Section 15.16, 21-feature extension):** `transactions` gains four nullable columns — `reference_transaction_id` (links a refund to the purchase it refunds), `employee_id` (which staff member initiated a merchant-side transaction), `country`, `ip_address` (geo-risk scoring). Two new tables: `merchant_login_events` (merchant login metadata for takeover detection, Feature 4, including a `country` column) and `disputes` (chargeback/dispute events for friendly-fraud scoring, Feature 8), both indexed on their lookup key. `flags` gains a nullable `severity` column (Feature 17). All pure additions — see Section 15.16 for the full rationale and which feature each backs.
 
+**Schema changes (Section 16, Enterprise Edition triage):** `transactions` gains `latency_ms` (scoring-pipeline processing time, Category 16/23) and `confidence` (Category 13). Three new tables: `fraud_lists` (blacklist/whitelist/watchlist registry, Categories 19/21), `investigation_notes` (append-only notes on a transaction, Category 13/14), and `admin_audit_log` (mutations to `business_accounts`/`fraud_lists`, Category 20/21). All pure additions.
+
 **Important:** `sender_id` and `receiver_id` must exist from the very first schema migration — do not add them later; the structuring detector depends on them from day one. They're directional, not role-fixed: on an ordinary payment the customer is `sender_id` and the merchant is `receiver_id`; on a refund/payout the merchant is `sender_id` and the customer is `receiver_id`.
 
 **Implementation note (Task 2):** `server/db.js` adds two extra indexes beyond the ones listed above — `idx_flags_transaction` on `flags(transaction_id)` and `idx_structuring_alerts_sender` on `structuring_alerts(sender_id)` — both pure lookup-performance additions with no schema/column changes, needed for the fast per-transaction structuring-alert lookup (Task 6) and for fetching flags per transaction. The `users.avg_transaction_amount` running average (Task 3) is maintained using an indexed `COUNT(*)` over `transactions` for the per-user transaction count rather than adding a redundant `transaction_count` column to `users`.
@@ -341,6 +401,7 @@ Accepts a single transaction and returns a decision **synchronously** — scorin
   "fraud_score": 87,
   "decision": "block",
   "severity": "High",
+  "confidence": 79,
   "reasons": [
     "3 transactions in 10 seconds",
     "412 km location jump from last transaction"
@@ -351,7 +412,9 @@ Accepts a single transaction and returns a decision **synchronously** — scorin
   ]
 }
 ```
-**`severity`/`risk_breakdown` (Section 15.16, Feature 17):** `severity` is the highest-ranked severity (`Low`/`Medium`/`High`/`Critical`) among every contributing signal, `None` if nothing was flagged. `risk_breakdown` gives per-signal detail (detector name, reason, weight, severity) beyond the flat `reasons` array, which is kept unchanged for backward compatibility. `GET /transactions` returns the same two fields per row, reconstructed from the `flags` table's new `severity` column.
+**`severity`/`risk_breakdown` (Section 15.16, Feature 17):** `severity` is the highest-ranked severity (`Low`/`Medium`/`High`/`Critical`) among every contributing signal, `None` if nothing was flagged. `risk_breakdown` gives per-signal detail (detector name, reason, weight, severity) beyond the flat `reasons` array, which is kept unchanged for backward compatibility. `GET /transactions` returns the same fields per row (`severity` reconstructed from the `flags` table's `severity` column; `confidence` from the persisted `transactions.confidence` column).
+
+**`confidence` (Section 16, Category 13):** a separate 0-100 axis from `fraud_score` — how much independent corroboration backs the decision, not how risky the transaction looks. A direct hit against a known record (an active structuring alert, a blacklist entry) is near-certain (99) regardless of how many other detectors also fired; otherwise confidence scales with the number of independently agreeing detectors and whether the ML signal agrees directionally, or — when no rule fired at all — how clean the ML probability itself is. See `server/scoring.js`'s `computeFraudScore` for the exact formula.
 
 ### `GET /transactions?limit=50&decision=block,step_up`
 Returns recent transactions with their decisions and flag reasons, for the dashboard's live table and the Task 11 audit trail. `decision` (optional, comma-separated, one or more of `allow`/`step_up`/`block`) filters the results — added when building the audit trail (Section 15.2).
@@ -373,6 +436,12 @@ Ingests chargeback/dispute events (`transaction_id` optional, `customer_id`, `di
 
 ### `GET /fraud-lists?list_type=`, `POST /fraud-lists`, `DELETE /fraud-lists/:entryId` (Section 16, Categories 19/21)
 The blacklist/whitelist/watchlist registry. `POST { list_type: 'blacklist'|'whitelist'|'watchlist', account_id, reason? }` — not `INSERT OR IGNORE` like `business_accounts`: the same account can validly appear more than once over time (e.g. watchlisted, then later confirmed and blacklisted), so `entry_id` is the primary key, not `(list_type, account_id)`. `DELETE` is idempotent. Checked on **every** transaction regardless of direction (`server/fraudLists.js`'s `checkFraudLists`, called alongside the structuring-alert lookup in `routes/transactions.js`) — a blacklisted account is a confirmed bad actor whether it's paying the business or being paid by it. Precedence in `scoring.js`: an active structuring alert or a blacklist entry always forces block; a whitelist entry only reduces the score when neither of those apply, and never overrides a Critical-severity rule flag (merchant takeover, suspected mule) even on an otherwise-trusted account; a watchlist entry just adds `WATCHLIST_WEIGHT` (15) and a reason, never forcing an outcome.
+
+### `POST /investigation-notes`, `GET /investigation-notes?transaction_id=` (Section 16, Category 13/14)
+Free-text notes attachable to a transaction (`transaction_id`, `note`, `author?`) — the safe, tractable subset of "Investigation Notes"/"Investigation Timeline" that doesn't require the full Fraud Investigation Module (case assignment, analyst identity, workflow state), which this build has deliberately declined (Section 16, Category 14). No DELETE route — notes are append-only, since an investigation record that could be silently erased isn't a trustworthy one. `author` is caller-supplied free text, not a verified identity (this build has no login system, Section 15.6).
+
+### `GET /admin-audit-log?limit=` (Section 16, Category 20/21)
+Read-only view of every mutation to `business_accounts`/`fraud_lists` — action, target, an optional detail string, the caller's IP (there being no user identity to log instead), and when. Written by `server/adminAuditLog.js`'s `recordAdminAction`, called from `businessAccounts.js`/`fraudLists.js`'s POST/DELETE handlers.
 
 ### `GET /audit/summary?hours=24&bucketMinutes=60`
 Task 11 (audit trail): time-bucketed counts of `allow`/`step_up`/`block` over the given lookback window, for the trend chart. Added in Section 15.2. Returns `{ hours, bucketMinutes, totalTransactions, buckets: [{ bucket_start, allow, step_up, block }, ...] }`.
@@ -897,7 +966,7 @@ Legend: ✅ built · 🔶 partially covered by something that already exists · 
 
 **12. Geo Intelligence** — ✅ Geo Risk Scoring · High-Risk Country Detection · Impossible Travel Analytics · Geo Heat Map (🔶 the new fraud heatmap is hour/day, not geo — the geo visualization is the pre-existing Map tab) · Geo Fraud Analytics (🔶). High-Risk State Detection 🔶 / High-Risk City Detection ⛔ — `config.js` has `HIGH_RISK_STATES` but this schema has no `state`/`city` column to match against yet.
 
-**13. Explainability Engine** — ✅ Fraud Score · Decision · Severity · Detector Names · Human-Readable Reasons · Risk Breakdown (all Feature 17). Confidence Score ⛔ / Investigation Notes ⛔ — see #14, both are really the Investigation Module's concepts.
+**13. Explainability Engine** — ✅ Fraud Score · Decision · Severity · Detector Names · Human-Readable Reasons · Risk Breakdown (all Feature 17). **Confidence Score 🆕** (`server/scoring.js`, a separate 0-100 axis from `fraud_score` — how much independent corroboration backs the decision) / **Investigation Notes 🆕** (`POST/GET /investigation-notes` — free-text notes on a transaction, the safe subset of #14 that needs no analyst-identity system).
 
 **14. Fraud Investigation Module** — ⛔ **out of scope, all ten, flagged explicitly:** Case Management System · Case Creation · Case Assignment · Investigation Workflow · Analyst Notes · Evidence Attachment · Investigation Timeline · Case Status Tracking · Fraud Replay · Replay Timeline. *Case assignment implies assigning a case to a specific analyst — this requires a real user/analyst identity system, which this build has deliberately never had (Section 15.6: "no login system in this hackathon build," an accepted, documented limitation). Building "case assignment" with no real users to assign to would be UI theater. This is a legitimately large subsystem — comparable in size to everything in Section 15.16 combined — that needs a real decision about adding authentication first, not something to bolt on silently.*
 
@@ -911,26 +980,31 @@ Legend: ✅ built · 🔶 partially covered by something that already exists · 
 
 **19. Automation** — **Auto Blacklisting 🆕 / Auto Whitelisting 🆕** (`fraud_lists` table + `server/routes/fraudLists.js`, wired into `scoring.js`). Auto Rule Builder ⛔ / No-Code Rule Engine ⛔ / Adaptive Rule Learning ⛔ / Auto Threshold Learning ⛔ — real product-scale subsystems (a rule-authoring UI; an online-learning retraining loop), not additions that fit in the remaining time.
 
-**20. Security** — ✅ API Key Authentication · Rate Limiting · Security Headers · Configuration Management · Input Validation · XSS Protection · SQL Injection Protection · Secure Logging (all predate this pass, re-verified Sections 15.6/15.15). API Key Management 🔶 — a single shared key, no per-client key issuance/rotation UI. Audit Logs 🔶 — the `flags` table + Audit Trail tab serve this informally; no dedicated immutable log of admin actions (e.g. business-account/fraud-list edits). RBAC ⛔ — needs real users, see #14. CSRF Protection ⛔ — *not actually applicable: this is a header-authenticated JSON API with no cookie/session state for a forged request to ride on, so a CSRF token would be theater, not protection.*
+**20. Security** — ✅ API Key Authentication · Rate Limiting · Security Headers · Configuration Management · Input Validation · XSS Protection · SQL Injection Protection · Secure Logging (all predate this pass, re-verified Sections 15.6/15.15). API Key Management 🔶 — a single shared key, no per-client key issuance/rotation UI. **Audit Logs 🆕** (`admin_audit_log` table + `GET /admin-audit-log` — every `business_accounts`/`fraud_lists` mutation, by caller IP since there's no user identity). RBAC ⛔ — needs real users, see #14. CSRF Protection ⛔ — *not actually applicable: this is a header-authenticated JSON API with no cookie/session state for a forged request to ride on, so a CSRF token would be theater, not protection.*
 
 **21. Fraud Intelligence** — **Blacklist Management 🆕 / Whitelist Management 🆕 / Watchlist Management 🆕** (same `fraud_lists` addition as #19). ✅ High-Risk Country Database (`config.js`) · Known Fraud Ring Database (`structuring_alerts`, already the canonical record of every detected ring). Fraud Signature Database 🔶 — the `flag_type` taxonomy across 18 detectors serves this role informally. Known Mule Database 🔶 — computed on demand (`computeMuleScore`), not persisted as a standing list.
 
-**22. Simulator & Demo** — ✅ Normal Transaction Simulation · Refund Fraud Simulation · Structuring Simulation · Velocity Attack Simulation (all predate this pass) · One-Click Demo Scenarios (`scripts/demo.js`). Merchant Takeover Simulation ⛔ / Mule Account Simulation ⛔ / Fraud Ring Simulation 🔶 (structuring covers this) — the detectors themselves are fully built and were demonstrated live via direct API calls (this section's own live-verification pass, and Feature 4/13's test suites); dedicated simulator scenarios for them are a small, real remaining task, not fundamentally blocked. Fraud Replay ⛔ — ties to the Investigation Module, #14.
+**22. Simulator & Demo** — ✅ Normal Transaction Simulation · Refund Fraud Simulation · Structuring Simulation · Velocity Attack Simulation (all predate this pass) · One-Click Demo Scenarios (`scripts/demo.js`, now 9 options) · **Merchant Takeover Simulation 🆕** / **Mule Account Simulation 🆕** (`--scenario=merchant-takeover`/`--scenario=mule`, both verified live end-to-end). Fraud Ring Simulation 🔶 (structuring covers this). Fraud Replay ⛔ — ties to the Investigation Module, #14.
 
 **23. Performance** — ✅ Low Latency Processing · Background Jobs · Optimized Queries · Database Indexing · Benchmark Tool (all predate this pass). Load Testing ⛔ — beyond `benchmark.js`'s 500-request run, no dedicated load-test suite. Health Monitoring 🔶 — `GET /health` exists, no aggregated uptime/metrics dashboard.
 
 **24. Testing** — ✅ Unit Tests · API Tests · Integration Tests · Dashboard Tests · WebSocket Tests · ML Tests — 220 tests as of this section (up from 128 before Section 15.16). Security Tests 🔶 — covered via the review passes (Sections 15.6, 15.15), not a dedicated automated security-test file. Performance Tests 🔶 — `benchmark.js`.
 
-**25. Documentation** — ✅ API Documentation (Section 7) · Architecture Documentation (this document) · Database Schema (Section 6) · User Manual (`user-manual.md`). Sequence Diagrams ⛔ / Flow Diagrams ⛔ / Deployment Guide ⛔ — not produced as formal diagrams; Section 5's ASCII diagram and Section 12's demo script cover the same ground informally. Developer Guide 🔶 — `CLAUDE.md` + this document serve that role.
+**25. Documentation** — ✅ API Documentation (Section 7) · Architecture Documentation (this document) · Database Schema (Section 6) · User Manual (`user-manual.md`) · **Sequence Diagrams 🆕** / **Flow Diagrams 🆕** (Section 5, Mermaid — GitHub renders it natively, no new tooling). Deployment Guide ⛔ — not produced. Developer Guide 🔶 — `CLAUDE.md` + this document serve that role.
 
 **26. Future AI Features** — ⛔ **explicitly out of scope, per the request's own "Future" label, all six:** AI Chat Assistant · Natural Language Fraud Search · AI Fraud Investigation Assistant · AI Fraud Report Generator · Predictive Merchant Risk · AI Fraud Insights. *All six need integrating a real LLM API — a genuine new cost and architectural decision, not something to add as a side effect of a documentation pass.*
 
-**What was actually built in this pass** (all three reuse existing tables/patterns, no new external dependencies) — see `GET /fraud-lists` in Section 7 for the full precedence rules:
-- **`server/rules/duplicateTransaction.js`** (Category 2) — flags a transaction that closely duplicates one this business account sent moments ago (same receiver, same amount, within a short window) — a common accidental-double-charge or automated-replay signature distinct from every existing detector.
-- **`server/rules/sharedIdentifierRisk.js`** (Category 4/10) — flags when this transaction's `device_id` or `ip_address` has recently been used by other, unrelated accounts — the "shared device/IP graph" reduced to its actual per-transaction signal, without a graph database or visualization layer.
-- **`fraud_lists` table + `server/routes/fraudLists.js` + `server/fraudLists.js`** (Categories 19/21) — a blacklist/whitelist/watchlist registry (`list_type`, `account_id`, `reason`, `created_at`), the same editable-registry pattern as `business_accounts`. Checked for every transaction regardless of direction (like the structuring-alert lookup) and wired into `scoring.js`: a blacklisted sender or receiver floors the score at `BLACKLIST_FLOOR` (95, Critical severity); a whitelisted one caps the score at `WHITELIST_CEILING` (5) unless an active structuring alert or a Critical-severity rule flag says otherwise; a watchlisted one adds `WATCHLIST_WEIGHT` (15) without forcing an outcome.
+**What was actually built across this pass and the follow-up round** (every item reuses existing tables/patterns; the only new external dependency across all of it is zero — Mermaid diagrams render via GitHub's native support, no diagramming tool):
+- **`server/rules/duplicateTransaction.js`** (Category 2) — flags a transaction that closely duplicates one this business account sent moments ago (same receiver, same amount, within a short window).
+- **`server/rules/sharedIdentifierRisk.js`** (Category 4/10) — flags when this transaction's `device_id` or `ip_address` has recently been used by other, unrelated accounts.
+- **`fraud_lists` table + `server/routes/fraudLists.js` + `server/fraudLists.js`** (Categories 19/21) — a blacklist/whitelist/watchlist registry, the same editable-registry pattern as `business_accounts`. See `GET /fraud-lists` in Section 7 for the full precedence rules wired into `scoring.js`.
+- **`--scenario=merchant-takeover` / `--scenario=mule`** (Category 22, `simulator/simulate_transactions.js`) — live end-to-end demonstrations of the already-built merchant-takeover and mule detectors, wired into `scripts/demo.js`'s menu.
+- **`confidence` field** (Category 13, `server/scoring.js`) — a 0-100 axis separate from `fraud_score`, measuring corroboration rather than risk; persisted via a new `transactions.confidence` column.
+- **`investigation_notes` table + `POST/GET /investigation-notes`** (Category 13/14) — free-text, append-only notes on a transaction; the safe subset of the declined Fraud Investigation Module that needs no analyst-identity system.
+- **`admin_audit_log` table + `server/adminAuditLog.js` + `GET /admin-audit-log`** (Category 20/21) — every `business_accounts`/`fraud_lists` mutation, logged by caller IP.
+- **Sequence + flow diagrams** (Category 25, Section 5) — Mermaid, rendered natively by GitHub.
 
-`npm test`: 242 passing (up from 220 before this pass — 22 new tests across the two new detectors, `checkFraudLists`, the scoring-precedence rules, and end-to-end API coverage in the new `tests/fraudLists.test.js`).
+`npm test`: 254 passing (up from 220 before Section 16 started — new tests across every item above, all in dedicated per-concern test files following this project's existing convention).
 
 ---
 
