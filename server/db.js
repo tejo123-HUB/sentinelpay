@@ -206,6 +206,22 @@ CREATE TABLE IF NOT EXISTS custom_rules (
 );
 
 CREATE INDEX IF NOT EXISTS idx_custom_rules_enabled ON custom_rules(enabled);
+
+-- Section 16, Category 18: generated report snapshots (daily/weekly/monthly), produced by a
+-- background job (server/scheduledReports.js) on the same periodic-tick pattern as the
+-- structuring background job. Delivery (email, via the real notification engine, Category 17)
+-- is a side effect of generation, not a separate unimplemented step.
+CREATE TABLE IF NOT EXISTS scheduled_reports (
+  report_id TEXT PRIMARY KEY,
+  report_type TEXT NOT NULL CHECK (report_type IN ('daily', 'weekly', 'monthly')),
+  period_start TEXT NOT NULL,
+  period_end TEXT NOT NULL,
+  summary_json TEXT NOT NULL,
+  emailed INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_scheduled_reports_type_period ON scheduled_reports(report_type, period_end);
 `;
 
 function initDb(dbPath) {

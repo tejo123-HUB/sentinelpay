@@ -34,6 +34,8 @@ const adminAuditLogRouter = require('./routes/adminAuditLog');
 const casesRouter = require('./routes/cases');
 const notificationsRouter = require('./routes/notifications');
 const customRulesRouter = require('./routes/customRules');
+const scheduledReportsRouter = require('./routes/scheduledReports');
+const { startScheduledReportsJob } = require('./scheduledReports');
 const { attachWebSocketServer } = require('./websocket');
 const { startStructuringJob } = require('./structuring/backgroundJob');
 const { API_KEY, USING_DEFAULT_API_KEY } = require('./middleware/apiKeyAuth');
@@ -117,6 +119,7 @@ app.use('/', adminAuditLogRouter);
 app.use('/', casesRouter);
 app.use('/', notificationsRouter);
 app.use('/', customRulesRouter);
+app.use('/', scheduledReportsRouter);
 app.use(express.static(dashboardDir));
 
 // Malformed JSON body -> 400 with a clear message, instead of falling through to the
@@ -141,6 +144,8 @@ app.locals.wss = wss;
 startStructuringJob(db, (type, data) => {
   if (wss && typeof wss.broadcast === 'function') wss.broadcast(type, data);
 });
+
+startScheduledReportsJob(db);
 
 // Without an explicit HOST, Node binds to all network interfaces (0.0.0.0) by default — so a
 // forgotten API_KEY didn't just mean "insecure," it meant "insecure and reachable by every other
