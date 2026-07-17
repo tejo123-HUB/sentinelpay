@@ -4,9 +4,9 @@ let auditChart = null;
 let auditInitialized = false;
 
 // Same validated status palette as app.js's CHART_COLORS (dataviz skill's validate_palette.js
-// against this dashboard's dark surface, see style.css's file header) — duplicated per file since
-// each renders to its own <canvas> and can't share CSS custom properties.
-const AUDIT_CHART_COLORS = { allow: '#22ac74', stepup: '#b8891b', block: '#cc4646' };
+// against this dashboard's light surface, see style.css's file header) — duplicated per file
+// since each renders to its own <canvas> and can't share CSS custom properties.
+const AUDIT_CHART_COLORS = { allow: '#0ca30c', stepup: '#e0940a', block: '#d03b3b' };
 
 function auditLineDataset(label, color) {
   return {
@@ -19,7 +19,7 @@ function auditLineDataset(label, color) {
     pointRadius: 0, // quiet until hovered — the point only appears on interaction
     pointHoverRadius: 5,
     pointHoverBackgroundColor: color,
-    pointHoverBorderColor: '#0f1626',
+    pointHoverBorderColor: '#fcfcfb',
     pointHoverBorderWidth: 2,
     pointHitRadius: 10,
   };
@@ -44,22 +44,22 @@ function initAuditChart() {
       maintainAspectRatio: false,
       interaction: { mode: 'index', intersect: false },
       scales: {
-        x: { ticks: { color: '#5b6b8c', font: { size: 11 } }, grid: { color: 'rgba(255,255,255,0.05)' } },
+        x: { ticks: { color: '#898781', font: { size: 11 } }, grid: { color: '#e1e0d9' } },
         y: {
           beginAtZero: true,
-          ticks: { color: '#5b6b8c', font: { size: 11 }, precision: 0 },
-          grid: { color: 'rgba(255,255,255,0.05)' },
+          ticks: { color: '#898781', font: { size: 11 }, precision: 0 },
+          grid: { color: '#e1e0d9' },
         },
       },
       plugins: {
         legend: {
-          labels: { color: '#8b9bc0', usePointStyle: true, pointStyle: 'circle', padding: 16, font: { size: 12, weight: '600' } },
+          labels: { color: '#52514e', usePointStyle: true, pointStyle: 'circle', padding: 16, font: { size: 12, weight: '600' } },
         },
         tooltip: {
-          backgroundColor: '#141d33',
-          titleColor: '#eef2fb',
-          bodyColor: '#8b9bc0',
-          borderColor: 'rgba(255,255,255,0.08)',
+          backgroundColor: '#ffffff',
+          titleColor: '#0b0b0b',
+          bodyColor: '#52514e',
+          borderColor: 'rgba(11,11,11,0.1)',
           borderWidth: 1,
           padding: 10,
           cornerRadius: 8,
