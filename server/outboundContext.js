@@ -263,22 +263,28 @@ function getOutboundContext(db, transaction, nowMs) {
           .get(businessId, counterpartyId, transaction.amount, duplicateSince, transaction.timestamp)
       : { n: 0 };
 
-  // Section 16, Category 4/10: other accounts that have used this transaction's device_id/
-  // ip_address recently -- the per-transaction reduction of "shared device/IP graph" analysis,
-  // without a graph database or visualization layer.
+  // Section 16, Category 4/10/11: other accounts that have used this transaction's device_id/
+  // ip_address/phone/email/identity_hash recently -- the per-transaction reduction of "shared
+  // device/IP/phone/email/identity graph" analysis, without a graph database or visualization
+  // layer. identity_hash is a caller-computed hash of a government ID (PAN/Aadhaar/etc) -- this
+  // system never sees or stores the raw document number, only the opaque token, so "shared
+  // identity document" detection (Category 11) works without collecting the PII itself.
   const sharedSince = new Date(nowMs - SHARED_IDENTIFIER_RISK.SHARED_IDENTIFIER_LOOKBACK_MS).toISOString();
-  const sharedDeviceAccountIds = transaction.device_id
-    ? db
-        .prepare('SELECT DISTINCT sender_id FROM transactions WHERE device_id = ? AND sender_id != ? AND timestamp >= ? AND timestamp <= ?')
-        .all(transaction.device_id, businessId, sharedSince, transaction.timestamp)
-        .map((r) => r.sender_id)
-    : [];
-  const sharedIpAccountIds = transaction.ip_address
-    ? db
-        .prepare('SELECT DISTINCT sender_id FROM transactions WHERE ip_address = ? AND sender_id != ? AND timestamp >= ? AND timestamp <= ?')
-        .all(transaction.ip_address, businessId, sharedSince, transaction.timestamp)
-        .map((r) => r.sender_id)
-    : [];
+  // `column` is always one of the five hardcoded string literals passed below, never derived
+  // from request input -- safe to interpolate directly, the same reasoning already applied to
+  // this file's other dynamically-built IN (...) clauses elsewhere in this codebase.
+  function findSharedAccountIds(column, value) {
+    if (!value) return [];
+    return db
+      .prepare(`SELECT DISTINCT sender_id FROM transactions WHERE ${column} = ? AND sender_id != ? AND timestamp >= ? AND timestamp <= ?`)
+      .all(value, businessId, sharedSince, transaction.timestamp)
+      .map((r) => r.sender_id);
+  }
+  const sharedDeviceAccountIds = findSharedAccountIds('device_id', transaction.device_id);
+  const sharedIpAccountIds = findSharedAccountIds('ip_address', transaction.ip_address);
+  const sharedPhoneAccountIds = findSharedAccountIds('phone', transaction.phone);
+  const sharedEmailAccountIds = findSharedAccountIds('email', transaction.email);
+  const sharedIdentityHashAccountIds = findSharedAccountIds('identity_hash', transaction.identity_hash);
 
   return {
     priorPurchaseTotal: priorPurchase.total,
@@ -305,6 +311,9 @@ function getOutboundContext(db, transaction, nowMs) {
     duplicateTransactionCount: duplicateCountRow.n,
     sharedDeviceAccountIds,
     sharedIpAccountIds,
+    sharedPhoneAccountIds,
+    sharedEmailAccountIds,
+    sharedIdentityHashAccountIds,
   };
 }
 

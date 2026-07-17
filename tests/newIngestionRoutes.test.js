@@ -212,6 +212,127 @@ test('POST /transaction: response and GET /transactions both include confidence 
   }
 });
 
+// ---- shared phone/email/identity_hash (Section 16, Category 11) ----
+
+test('POST /transaction: an outbound payment reusing a phone number seen on an unrelated account is flagged', async () => {
+  const { server } = await freshServer();
+  try {
+    await request(server, 'POST', '/business-accounts', { account_id: 'm_shared_phone_e2e' });
+    // An ordinary (inbound, non-business) transaction establishes 'p_shared_999' as already
+    // associated with a different sender before the outbound payment below reuses it. Device IDs
+    // are deliberately different so the shared-device check (which outranks phone in the
+    // sharedIdentifierRisk CHECKS precedence order) doesn't mask the phone signal being tested.
+    await request(server, 'POST', '/transaction', validTransaction({
+      sender_id: 'u_other_account',
+      receiver_id: 'u_someone_else',
+      device_id: 'd_other_account',
+      phone: 'p_shared_999',
+    }));
+
+    const payout = await request(
+      server,
+      'POST',
+      '/transaction',
+      validTransaction({
+        sender_id: 'm_shared_phone_e2e',
+        receiver_id: 'u_payout_target',
+        device_id: 'd_payout_device',
+        phone: 'p_shared_999',
+      })
+    );
+
+    assert.equal(payout.status, 201);
+    assert.ok(payout.body.reasons.some((r) => r.includes('Phone number shared with')));
+  } finally {
+    server.close();
+  }
+});
+
+test('POST /transaction: an outbound payment reusing an identity_hash outranks a merely shared device', async () => {
+  const { server } = await freshServer();
+  try {
+    await request(server, 'POST', '/business-accounts', { account_id: 'm_shared_hash_e2e' });
+    await request(server, 'POST', '/transaction', validTransaction({
+      sender_id: 'u_other_account_2',
+      receiver_id: 'u_someone_else_2',
+      device_id: 'd_test',
+      identity_hash: 'h_shared_abcdef',
+    }));
+
+    const payout = await request(
+      server,
+      'POST',
+      '/transaction',
+      validTransaction({
+        sender_id: 'm_shared_hash_e2e',
+        receiver_id: 'u_payout_target_2',
+        device_id: 'd_test',
+        identity_hash: 'h_shared_abcdef',
+      })
+    );
+
+    assert.equal(payout.status, 201);
+    assert.ok(payout.body.reasons.some((r) => r.includes('Identity document hash shared with')));
+  } finally {
+    server.close();
+  }
+});
+
+test('POST /transaction: phone/email/identity_hash are accepted but not echoed back in the response or GET /transactions', async () => {
+  const { server } = await freshServer();
+  try {
+    const posted = await request(
+      server,
+      'POST',
+      '/transaction',
+      validTransaction({ phone: 'p_privacy_test', email: 'e_privacy_test@example.com', identity_hash: 'h_privacy_test' })
+    );
+    assert.equal(posted.status, 201);
+    assert.equal(posted.body.phone, undefined);
+    assert.equal(posted.body.email, undefined);
+    assert.equal(posted.body.identity_hash, undefined);
+
+    const list = await request(server, 'GET', '/transactions?limit=10');
+    const found = list.body.find((t) => t.transaction_id === posted.body.transaction_id);
+    assert.ok(found);
+    assert.equal(found.phone, undefined);
+    assert.equal(found.email, undefined);
+    assert.equal(found.identity_hash, undefined);
+  } finally {
+    server.close();
+  }
+});
+
+test('POST /transaction: a shared identity_hash is Critical severity (weight escalates outbound risk sharply)', async () => {
+  const { server } = await freshServer();
+  try {
+    await request(server, 'POST', '/business-accounts', { account_id: 'm_shared_hash_severity_e2e' });
+    await request(server, 'POST', '/transaction', validTransaction({
+      sender_id: 'u_other_account_3',
+      receiver_id: 'u_someone_else_3',
+      identity_hash: 'h_shared_severity',
+    }));
+
+    const payout = await request(
+      server,
+      'POST',
+      '/transaction',
+      validTransaction({
+        sender_id: 'm_shared_hash_severity_e2e',
+        receiver_id: 'u_payout_target_3',
+        identity_hash: 'h_shared_severity',
+      })
+    );
+
+    assert.equal(payout.status, 201);
+    const found = payout.body.risk_breakdown.find((r) => r.reason.includes('Identity document hash shared with'));
+    assert.ok(found);
+    assert.equal(found.severity, 'High');
+  } finally {
+    server.close();
+  }
+});
+
 test('POST /transaction: a repeat-dispute customer elevates a refund\'s risk (Section 15.16, Feature 8)', async () => {
   const { server } = await freshServer();
   try {

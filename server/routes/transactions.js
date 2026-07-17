@@ -196,8 +196,8 @@ router.post('/transaction', requireApiKey, requireRole('analyst'), async (req, r
 
     db.prepare(
       `INSERT INTO transactions
-        (transaction_id, sender_id, receiver_id, amount, timestamp, location_lat, location_lng, device_id, merchant_id, purpose, transaction_type, fraud_score, decision, reference_transaction_id, employee_id, country, ip_address, latency_ms, confidence)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        (transaction_id, sender_id, receiver_id, amount, timestamp, location_lat, location_lng, device_id, merchant_id, purpose, transaction_type, fraud_score, decision, reference_transaction_id, employee_id, country, ip_address, latency_ms, confidence, phone, email, identity_hash)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       transactionId,
       input.sender_id,
@@ -217,7 +217,10 @@ router.post('/transaction', requireApiKey, requireRole('analyst'), async (req, r
       input.country,
       input.ip_address,
       latencyMs,
-      confidence
+      confidence,
+      input.phone,
+      input.email,
+      input.identity_hash
     );
 
     const flagInsert = db.prepare(

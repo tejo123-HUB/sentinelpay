@@ -809,6 +809,33 @@ test('sharedIdentifierRisk: flags an IP shared with other accounts', () => {
   assert.match(result.reason, /IP address shared with 1 other account/);
 });
 
+test('sharedIdentifierRisk: flags a shared phone number', () => {
+  const result = sharedIdentifierRisk({}, { sharedDeviceAccountIds: [], sharedIpAccountIds: [], sharedPhoneAccountIds: ['u_a'] });
+
+  assert.equal(result.flagged, true);
+  assert.match(result.reason, /Phone number shared with 1 other account/);
+  assert.equal(result.severity, 'Medium');
+});
+
+test('sharedIdentifierRisk: flags a shared email address', () => {
+  const result = sharedIdentifierRisk({}, { sharedDeviceAccountIds: [], sharedIpAccountIds: [], sharedEmailAccountIds: ['u_a', 'u_b'] });
+
+  assert.equal(result.flagged, true);
+  assert.match(result.reason, /Email address shared with 2 other account/);
+});
+
+test('sharedIdentifierRisk: a shared identity-document hash is Critical-adjacent High severity and takes precedence over a shared device', () => {
+  const result = sharedIdentifierRisk(
+    {},
+    { sharedDeviceAccountIds: ['u_a'], sharedIpAccountIds: [], sharedIdentityHashAccountIds: ['u_c'] }
+  );
+
+  assert.equal(result.flagged, true);
+  assert.match(result.reason, /Identity document hash shared with 1 other account/);
+  assert.equal(result.severity, 'High');
+  assert.equal(result.weight, sharedIdentifierRisk.SHARED_IDENTITY_HASH_WEIGHT);
+});
+
 test('sharedIdentifierRisk: does not flag when neither device nor IP is shared', () => {
   const result = sharedIdentifierRisk({}, { sharedDeviceAccountIds: [], sharedIpAccountIds: [] });
 

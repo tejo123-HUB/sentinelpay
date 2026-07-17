@@ -36,6 +36,9 @@ CREATE TABLE IF NOT EXISTS transactions (
   ip_address TEXT, -- for geo-risk IP-range scoring (Section 15.16, Feature 14); optional
   latency_ms REAL, -- scoring-pipeline processing time for this request (Section 15.16, Feature 18 analytics); not a scoring input
   confidence REAL, -- 0-100, how much independent corroboration backs the decision (Section 16, Category 13); distinct from fraud_score
+  phone TEXT, -- optional, for shared-phone detection (Section 16, Category 11)
+  email TEXT, -- optional, for shared-email detection (Section 16, Category 11)
+  identity_hash TEXT, -- optional, caller-computed hash of a government ID (PAN/Aadhaar/etc) -- this system never receives or stores the raw document number, only an opaque token, so shared-identity-document detection works without collecting the PII itself (Section 16, Category 11)
   FOREIGN KEY (sender_id) REFERENCES users(user_id),
   FOREIGN KEY (receiver_id) REFERENCES users(user_id)
 );

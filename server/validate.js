@@ -32,6 +32,9 @@ function validateTransactionInput(body) {
     employee_id,
     country,
     ip_address,
+    phone,
+    email,
+    identity_hash,
   } = body;
 
   if (typeof sender_id !== 'string' || sender_id.trim() === '' || sender_id.length > MAX_ID_LENGTH) {
@@ -98,6 +101,20 @@ function validateTransactionInput(body) {
   if (typeof ip_address === 'string' && ip_address.length > MAX_ID_LENGTH) {
     return { valid: false, error: `ip_address must be at most ${MAX_ID_LENGTH} characters` };
   }
+  if (typeof phone === 'string' && phone.length > MAX_ID_LENGTH) {
+    return { valid: false, error: `phone must be at most ${MAX_ID_LENGTH} characters` };
+  }
+  if (typeof email === 'string' && email.length > MAX_ID_LENGTH) {
+    return { valid: false, error: `email must be at most ${MAX_ID_LENGTH} characters` };
+  }
+  // identity_hash: this system never receives or validates a raw PAN/Aadhaar/government ID
+  // number -- the caller computes a hash of it themselves and sends only the opaque token, so
+  // shared-identity-document detection works without this system ever holding the PII itself
+  // (Section 16, Category 11). Bounded generously enough for a SHA-256 hex digest (64 chars) or
+  // similar, with headroom.
+  if (typeof identity_hash === 'string' && identity_hash.length > MAX_ID_LENGTH) {
+    return { valid: false, error: `identity_hash must be at most ${MAX_ID_LENGTH} characters` };
+  }
 
   return {
     valid: true,
@@ -115,6 +132,9 @@ function validateTransactionInput(body) {
       employee_id: typeof employee_id === 'string' ? employee_id : null,
       country: typeof country === 'string' ? country : null,
       ip_address: typeof ip_address === 'string' ? ip_address : null,
+      phone: typeof phone === 'string' ? phone : null,
+      email: typeof email === 'string' ? email : null,
+      identity_hash: typeof identity_hash === 'string' ? identity_hash : null,
     },
   };
 }
