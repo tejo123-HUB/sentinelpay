@@ -370,3 +370,93 @@ test('alertLookup.findActiveAlert: fast per-transaction lookup finds sender and 
   const noHit = findActiveAlert(db, 'unrelated_1', 'unrelated_2', nowMs);
   assert.equal(noHit.active, false);
 });
+
+// ---- detectCircularFlow (Section 15.16, Feature 6) ----
+
+const detectCircularFlow = require('../server/structuring/circularFlow');
+
+test('detectCircularFlow: detects a direct Merchant -> A -> Merchant cycle', () => {
+  const transactions = [
+    { sender_id: 'M', receiver_id: 'A', amount: 1000, timestamp: iso(-3000) },
+    { sender_id: 'A', receiver_id: 'M', amount: 900, timestamp: iso(-1000) },
+  ];
+
+  const cycles = detectCircularFlow(transactions, ['M']);
+
+  assert.equal(cycles.length, 1);
+  assert.deepEqual(cycles[0].path, ['M', 'A', 'M']);
+  assert.equal(cycles[0].originId, 'M');
+  assert.equal(cycles[0].totalAmount, 1900);
+});
+
+test('detectCircularFlow: detects a Merchant -> A -> B -> Merchant cycle', () => {
+  const transactions = [
+    { sender_id: 'M', receiver_id: 'A', amount: 500, timestamp: iso(-5000) },
+    { sender_id: 'A', receiver_id: 'B', amount: 480, timestamp: iso(-3000) },
+    { sender_id: 'B', receiver_id: 'M', amount: 460, timestamp: iso(-1000) },
+  ];
+
+  const cycles = detectCircularFlow(transactions, ['M']);
+
+  assert.equal(cycles.length, 1);
+  assert.deepEqual(cycles[0].path, ['M', 'A', 'B', 'M']);
+});
+
+test('detectCircularFlow: detects a Merchant -> A -> B -> C -> Merchant cycle', () => {
+  const transactions = [
+    { sender_id: 'M', receiver_id: 'A', amount: 500, timestamp: iso(-7000) },
+    { sender_id: 'A', receiver_id: 'B', amount: 480, timestamp: iso(-5000) },
+    { sender_id: 'B', receiver_id: 'C', amount: 460, timestamp: iso(-3000) },
+    { sender_id: 'C', receiver_id: 'M', amount: 440, timestamp: iso(-1000) },
+  ];
+
+  const cycles = detectCircularFlow(transactions, ['M']);
+
+  assert.equal(cycles.length, 1);
+  assert.deepEqual(cycles[0].path, ['M', 'A', 'B', 'C', 'M']);
+});
+
+test('detectCircularFlow: does not flag a straight-line payout with no path back to the origin', () => {
+  const transactions = [
+    { sender_id: 'M', receiver_id: 'A', amount: 500, timestamp: iso(-3000) },
+    { sender_id: 'A', receiver_id: 'B', amount: 480, timestamp: iso(-1000) },
+  ];
+
+  const cycles = detectCircularFlow(transactions, ['M']);
+
+  assert.equal(cycles.length, 0);
+});
+
+test('detectCircularFlow: does not flag a cycle exceeding the configured max hops', () => {
+  const config = require('../server/config');
+  // One more intermediate hop than MAX_CYCLE_HOPS allows.
+  const chain = ['M', 'A', 'B', 'C', 'D', 'M'].slice(0, config.CIRCULAR_FLOW.MAX_CYCLE_HOPS + 3);
+  const transactions = [];
+  for (let i = 0; i < chain.length - 1; i += 1) {
+    transactions.push({ sender_id: chain[i], receiver_id: chain[i + 1], amount: 100, timestamp: iso(-1000 * (chain.length - i)) });
+  }
+
+  const cycles = detectCircularFlow(transactions, ['M']);
+
+  assert.equal(cycles.length, 0);
+});
+
+test('backgroundJob.runScanCycle: a circular-flow cycle is persisted as a structuring_alerts row and picked up by the fast lookup', () => {
+  const db = buildTestDb();
+  const nowMs = BASE_TIME;
+  db.prepare('INSERT INTO business_accounts (account_id, created_at) VALUES (?, ?)').run('m_circular', iso(-3600000));
+
+  for (const userId of ['m_circular', 'circ_a', 'circ_b']) insertUser(db, userId, iso(-3600000));
+  insertTransaction(db, { sender_id: 'm_circular', receiver_id: 'circ_a', amount: 5000, timestamp: iso(-3000), transaction_type: 'transfer' });
+  insertTransaction(db, { sender_id: 'circ_a', receiver_id: 'circ_b', amount: 4800, timestamp: iso(-2000), transaction_type: 'transfer' });
+  insertTransaction(db, { sender_id: 'circ_b', receiver_id: 'm_circular', amount: 4600, timestamp: iso(-1000), transaction_type: 'transfer' });
+
+  const created = runScanCycle(db, nowMs);
+  const circularAlert = created.find((a) => a.reason.startsWith('Circular transaction pattern detected.'));
+  assert.ok(circularAlert, 'expected a circular-flow alert to be created');
+  assert.equal(circularAlert.sender_id, 'm_circular');
+  assert.deepEqual(JSON.parse(circularAlert.receiver_ids), ['circ_a', 'circ_b']);
+
+  const lookup = findActiveAlert(db, 'circ_a', 'someone_else', nowMs);
+  assert.equal(lookup.active, true, 'an account in the cycle should be caught by the existing fast lookup with no changes to it');
+});

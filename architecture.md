@@ -123,7 +123,7 @@ The full spec (verbatim) and design rationale live in Section 15.16; this table 
 | 3 | Improve Existing Refund Validation | ✅ built | `server/rules/refundWithoutPurchase.js` (reference-based path) |
 | 4 | Merchant Account Takeover Detection | ✅ built | `server/rules/merchantAccountTakeover.js`, `POST/GET /merchant-logins` |
 | 5 | New Vendor Risk Detection | ✅ built | `server/rules/newVendorRisk.js` |
-| 6 | Circular Money Flow Detection | ⏳ planned | extends `server/structuring/`, not yet built |
+| 6 | Circular Money Flow Detection | ✅ built | `server/structuring/circularFlow.js`, wired into `backgroundJob.js` |
 | 7 | Split Refund Detection | ✅ built | `server/rules/splitRefundDetection.js` |
 | 8 | Friendly Fraud Detection | ✅ built | `server/rules/friendlyFraud.js`, `POST/GET /disputes` |
 | 9 | Refund Velocity Detection | ✅ built | `server/rules/refundVelocity.js` |
@@ -140,7 +140,9 @@ The full spec (verbatim) and design rationale live in Section 15.16; this table 
 | 20 | Testing (100% detector coverage) | 🔄 ongoing | every feature above ships with unit + integration tests as it lands; a final coverage sweep is still pending |
 | 21 | Documentation | 🔄 ongoing | this section + Section 15.16, updated per phase as each feature lands; a final consistency pass is still pending |
 
-Thirteen detector-level features (1/2/3/4/5/7/8/9/10/11/12/13/14) plus the config foundation (19) are complete and merged with passing tests as of this table's last update. The remaining features (6/15/16/17/18) touch the graph engine, dashboard, and scoring/analytics layer broadly — see Section 15.16's phasing for the build order.
+Fourteen detector-level features (1-14) plus the config foundation (19) are complete and merged with passing tests as of this table's last update. The remaining features (15/16/17/18) touch the dashboard and scoring/analytics layer broadly — see Section 15.16's phasing for the build order.
+
+**Feature 6 design note:** circular-flow alerts reuse the existing `structuring_alerts` table and the existing fast per-transaction lookup (`alertLookup.js`) with zero changes to either — a cycle is stored with `sender_id` = the origin business account and `receiver_ids` = the intermediate hop accounts, which `alertLookup.js`'s existing sender-match/receiver-membership checks already cover for any future transaction touching any account in the cycle. This is the "reuse existing graph engine" requirement satisfied structurally, not just in spirit: no parallel alert mechanism, no new scoring-floor logic (the existing `STRUCTURING_ALERT_FLOOR` already forces block once any structuring alert — split/fan-out or circular — is active for an account). The detector itself (`server/structuring/circularFlow.js`) is a pure DFS over a 24h-lookback transaction graph, bounded to `CIRCULAR_FLOW.MAX_CYCLE_HOPS` (3) intermediate hops, run from the background job (not per-transaction — too expensive, same reasoning as the existing split/fan-out detectors) against the business's own registered accounts as cycle origins.
 
 ---
 
