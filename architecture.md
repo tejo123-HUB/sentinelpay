@@ -761,6 +761,18 @@ Replaced the dark "developer tool at night" theme (15.8) with a light, white-sur
 
 No HTML structural changes beyond the brand-mark markup and a `<link rel="icon">` addition — `dashboard/app.js`/`map.js`/`audit.js` changes are confined to the duplicated chart-color constants (documented at each site as needing to stay in sync with `style.css`'s custom properties, since Chart.js/Leaflet can't read CSS variables) plus the new count-up helper. `npm test`: unaffected (128 passing) — this was a frontend-only change with no server-side surface.
 
+### 15.15 Security-hardening pass: the ML serving pipeline and a fresh full-schema SQL sweep
+
+Every prior review pass (15.1–15.13) was scoped to whichever feature had just landed. This pass deliberately targeted the areas that had *never* been explicitly security-reviewed on their own — the ML serving pipeline (`ml/serve.py`, `server/ml/mlClient.js`, `server/ml/features.js`) — plus a fresh full-codebase SQL injection sweep to catch anything the accumulated feature set might have introduced by later code interacting with earlier code, not just what each individual PR touched.
+
+**One real bug, fixed:** `ml/serve.py`'s `do_POST` computed `length = int(self.headers.get("Content-Length", 0))` *outside* the `try`/`except` that wraps the rest of request handling — a request with a non-numeric `Content-Length` header raised an unhandled `ValueError` instead of the clean 400 JSON error every other malformed-input path returns. Not a crash of the server (`ThreadingHTTPServer` isolates each connection to its own thread), but a real robustness gap — verified live: before the fix, a malformed header produced an unhandled exception in the server log; after moving the `int()` call inside the `try`, the same request returns `400 {"error": "invalid literal for int() with base 10: '...'"}`, and the server continues serving subsequent requests normally (confirmed with a follow-up `/health` check and a valid `/predict` call, both succeeding immediately after).
+
+**Two clean sweeps, no findings:**
+- **SQL injection**, across every `db.prepare()` call in `server/routes/*.js`, `server/*.js`, `server/structuring/*.js`, `server/businessAccounts.js`, and `scripts/generate_demo_data.js` (16 call sites), plus every `db.exec()` call (only ever fixed pragma/schema strings in `server/db.js`, never request-derived). The two places SQL text is built dynamically (`GET /transactions`'s decision-filter `IN (...)` clause and its flags lookup) were checked with extra care: the interpolated part is always just a `?`-placeholder count, and the actual filter values are both bound parameters *and* pre-validated against a fixed whitelist (`VALID_DECISIONS`) before ever reaching the query.
+- **The ML pipeline**, end to end: no eval/exec/shell/deserialization gadgets anywhere (model persistence is deliberately plain JSON, not pickle — `ml/train_model.py`'s own comment notes this was chosen specifically to avoid that risk class); `ml/serve.py` binds only to `127.0.0.1`, never network-exposed; attacker-controlled `amount`/`location` values are guaranteed finite numbers by `validate.js` before they ever reach feature extraction, so there's no path to a NaN fraud score silently defeating detection; the fail-open-to-probability-0 behavior on ML failure is intentional and documented (rules + the structuring lookup still fully apply), not a gap.
+
+`npm test`: 128 passing, unchanged (this pass fixed a Python-only file with no JS test surface; verified separately via live `curl` checks, described above).
+
 ---
 
 *Document prepared for Digital Campus 2.0 on Google Cloud — Hack Sprint (24 July 2026). This is the team's single source of truth — keep it up to date as the project evolves.*
