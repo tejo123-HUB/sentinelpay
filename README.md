@@ -86,9 +86,23 @@ node simulator/simulate_transactions.js --scenario=structuring
 # The odd-hour rule, live -> flags a transaction outside the account's usual active hours
 node simulator/simulate_transactions.js --scenario=odd-hour
 
-# All four in sequence
+# Compromised business account draining funds via rapid payouts -> block
+node simulator/simulate_transactions.js --scenario=outbound-fraud
+
+# A large refund with no matching prior purchase -> flagged
+node simulator/simulate_transactions.js --scenario=refund-fraud
+
+# Unrecognized-device merchant login followed by an immediate refund -> block
+node simulator/simulate_transactions.js --scenario=merchant-takeover
+
+# A payout to a receiver with a receive-then-quickly-drain history -> block
+node simulator/simulate_transactions.js --scenario=mule
+
+# Every scenario above, in sequence
 node simulator/simulate_transactions.js --scenario=all
 ```
+
+Or run `npm run demo` for an interactive menu covering all of the above — see "Running the demo" further up.
 
 The structuring scenario polls `GET /alerts` for you and prints the created alert once the
 background job (runs every 7s by default) picks it up — usually within one or two cycles.
@@ -107,7 +121,7 @@ around the scoring logic itself, which runs completely unmodified.
 npm test
 ```
 
-242 tests across the rule engine (18 detectors — the original 5 general-purpose rules plus 13
+254 tests across the rule engine (18 detectors — the original 5 general-purpose rules plus 13
 outbound-only detectors covering refund integrity, account/vendor risk, merchant/employee/
 cross-gateway fraud, mule and circular-flow laundering, geo risk, duplicate transactions, and
 shared-device/IP risk), the structuring/circular-flow engine (including end-to-end DB integration
@@ -129,11 +143,12 @@ merchant/employee/cross-gateway fraud (account takeover via login tracking, empl
 abuse, cross-gateway structuring), circular money-flow detection, duplicate-transaction and
 shared-device/IP checks, and an editable blacklist/whitelist/watchlist registry — 18 rule
 detectors plus the 4-detector structuring/circular-flow engine in total, all with configurable
-thresholds (`server/config.js`), a severity on every flag, and a `risk_breakdown` in every
-`POST /transaction` response. New ingestion endpoints: `POST /merchant-logins`, `POST /disputes`,
-`POST /fraud-lists`. New read endpoints: `GET /analytics/*` (summary, trends, top-risky lists,
-gateway comparison, CSV/JSON export). Full design rationale, what's built vs. explicitly out of
-scope, and why: `architecture.md` Sections 15.16 and 16.
+thresholds (`server/config.js`), a severity on every flag, a `confidence` score separate from
+`fraud_score`, and a `risk_breakdown` in every `POST /transaction` response. New ingestion
+endpoints: `POST /merchant-logins`, `POST /disputes`, `POST /fraud-lists`,
+`POST /investigation-notes`. New read endpoints: `GET /analytics/*` (summary, trends, top-risky
+lists, gateway comparison, CSV/JSON export), `GET /admin-audit-log`. Full design rationale,
+what's built vs. explicitly out of scope, and why: `architecture.md` Sections 15.16 and 16.
 
 ## Measuring latency / false-positive behavior
 
