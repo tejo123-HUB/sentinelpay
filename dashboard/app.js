@@ -32,6 +32,23 @@ const alertsList = document.getElementById('alerts-list');
 const connDot = document.getElementById('conn-dot');
 const connLabel = document.getElementById('conn-label');
 
+// The registry of the business's own account IDs (server-persisted, editable from the strip
+// above the tabs). There's no schema flag for "this ID belongs to the business" — this Set,
+// loaded from GET /business-accounts, is what tells resolveCounterpartyId (below) which side of
+// a transaction to hide. Shared globally with audit.js/map.js (classic <script> tags, one
+// global scope), same as escapeHtml/authFetch above.
+const businessAccountIds = new Set();
+
+// Exactly one side known -> show the other (the customer). Neither (or, degenerately, both)
+// known -> we can't tell which side is the customer yet, so show both rather than guessing.
+function resolveCounterpartyId(tx) {
+  const senderIsBusiness = businessAccountIds.has(tx.sender_id);
+  const receiverIsBusiness = businessAccountIds.has(tx.receiver_id);
+  if (senderIsBusiness && !receiverIsBusiness) return tx.receiver_id;
+  if (receiverIsBusiness && !senderIsBusiness) return tx.sender_id;
+  return `${tx.sender_id} → ${tx.receiver_id}`;
+}
+
 let decisionChart = null;
 
 // Validated status palette (dataviz skill's validate_palette.js against this dashboard's dark
@@ -107,8 +124,7 @@ function updateCounters(decision) {
 function addTransactionRow(tx, { prepend = true } = {}) {
   const row = document.createElement('tr');
 
-  const senderLabel = escapeHtml(tx.sender_id || '—');
-  const receiverLabel = escapeHtml(tx.receiver_id || '—');
+  const idLabel = escapeHtml(resolveCounterpartyId(tx) || '—');
   const amountLabel = tx.amount != null ? `₹${Number(tx.amount).toFixed(2)}` : '—';
   const typeLabel = escapeHtml(tx.transaction_type || '—');
   const gatewayLabel = escapeHtml(tx.merchant_id || '—');
@@ -120,8 +136,7 @@ function addTransactionRow(tx, { prepend = true } = {}) {
 
   row.innerHTML = `
     <td>${formatTime(tx.timestamp || new Date().toISOString())}</td>
-    <td>${senderLabel}</td>
-    <td>${receiverLabel}</td>
+    <td>${idLabel}</td>
     <td>${amountLabel}</td>
     <td>${typeLabel}</td>
     <td>${gatewayLabel}</td>
@@ -171,6 +186,113 @@ function addAlertCard(alert, { prepend = true } = {}) {
 
   counts.alerts += 1;
   document.getElementById('count-alerts').textContent = counts.alerts;
+}
+
+async function reloadTransactionTable() {
+  // Re-renders the live table from a fresh fetch so a business-accounts change applies
+  // retroactively to already-rendered rows, not just new ones. Deliberately does not touch
+  // `counts` — those stay tied to the cumulative live event stream, not to what's displayed.
+  try {
+    const res = await authFetch('/transactions?limit=50');
+    const transactions = await res.json();
+    txTableBody.innerHTML = '';
+    for (const tx of [...transactions].reverse()) {
+      addTransactionRow(tx, { prepend: false });
+    }
+  } catch (err) {
+    console.error('Failed to reload transaction table:', err);
+  }
+}
+
+function renderBusinessAccountsList() {
+  const list = document.getElementById('business-accounts-list');
+  if (!list) return;
+  list.innerHTML = '';
+  if (businessAccountIds.size === 0) {
+    list.innerHTML = '<span class="empty-state">No business accounts registered yet.</span>';
+    return;
+  }
+  for (const accountId of businessAccountIds) {
+    const chip = document.createElement('span');
+    chip.className = 'business-account-chip';
+    chip.innerHTML = `${escapeHtml(accountId)} <button class="business-account-remove" data-account-id="${escapeHtml(accountId)}" aria-label="Remove ${escapeHtml(accountId)}">×</button>`;
+    list.appendChild(chip);
+  }
+}
+
+async function loadBusinessAccounts() {
+  try {
+    const res = await authFetch('/business-accounts');
+    const rows = await res.json();
+    businessAccountIds.clear();
+    for (const row of rows) businessAccountIds.add(row.account_id);
+  } catch (err) {
+    console.error('Failed to load business accounts:', err);
+  }
+  renderBusinessAccountsList();
+}
+
+// audit.js's refreshAuditTable (loaded after this script, deferred) becomes a plain global
+// function the same way this file's own top-level functions do — safe to call directly by the
+// time a user can actually click Add/Remove (all deferred scripts have already run by then).
+async function onBusinessAccountsChanged() {
+  renderBusinessAccountsList();
+  await reloadTransactionTable();
+  if (typeof refreshAuditTable === 'function') refreshAuditTable();
+}
+
+async function addBusinessAccount(accountId) {
+  const trimmed = accountId.trim();
+  if (!trimmed) return;
+  try {
+    const res = await authFetch('/business-accounts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ account_id: trimmed }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      console.error('Failed to add business account:', body && body.error);
+      return;
+    }
+    businessAccountIds.add(trimmed);
+    await onBusinessAccountsChanged();
+  } catch (err) {
+    console.error('Failed to add business account:', err);
+  }
+}
+
+async function removeBusinessAccount(accountId) {
+  try {
+    await authFetch(`/business-accounts/${encodeURIComponent(accountId)}`, { method: 'DELETE' });
+    businessAccountIds.delete(accountId);
+    await onBusinessAccountsChanged();
+  } catch (err) {
+    console.error('Failed to remove business account:', err);
+  }
+}
+
+function initBusinessAccountsControl() {
+  const input = document.getElementById('business-account-input');
+  const addBtn = document.getElementById('business-account-add');
+  const list = document.getElementById('business-accounts-list');
+  if (!input || !addBtn || !list) return;
+
+  const submit = () => {
+    if (!input.value.trim()) return;
+    addBusinessAccount(input.value);
+    input.value = '';
+  };
+  addBtn.addEventListener('click', submit);
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') submit();
+  });
+
+  list.addEventListener('click', (event) => {
+    const btn = event.target.closest('.business-account-remove');
+    if (!btn) return;
+    removeBusinessAccount(btn.dataset.accountId);
+  });
 }
 
 async function loadInitialData() {
@@ -257,4 +379,5 @@ function initTabs() {
 
 initTabs();
 initChart();
-loadInitialData().then(connect);
+initBusinessAccountsControl();
+loadBusinessAccounts().then(loadInitialData).then(connect);

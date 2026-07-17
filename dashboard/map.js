@@ -66,11 +66,11 @@ function plotTransaction(tx) {
     weight: tx.decision === 'block' ? 2 : 1,
   }).addTo(map);
 
-  const senderLabel = escapeHtml(tx.sender_id || '—');
+  const idLabel = escapeHtml(resolveCounterpartyId(tx) || '—');
   const purposeLabel = escapeHtml(tx.purpose || '');
   const reasonsLabel = escapeHtml((tx.reasons || []).join('; '));
   marker.bindPopup(
-    `<strong>${senderLabel}</strong><br>${escapeHtml(tx.decision || '')} · score ${tx.fraud_score ?? '—'}${
+    `<strong>${idLabel}</strong><br>${escapeHtml(tx.decision || '')} · score ${tx.fraud_score ?? '—'}${
       purposeLabel ? `<br>${purposeLabel}` : ''
     }${reasonsLabel ? `<br>${reasonsLabel}` : ''}`
   );

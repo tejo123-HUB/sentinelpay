@@ -98,7 +98,7 @@ async function refreshAuditTable() {
 
     tbody.innerHTML = '';
     if (transactions.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No matching transactions.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No matching transactions.</td></tr>';
       return;
     }
 
@@ -108,8 +108,7 @@ async function refreshAuditTable() {
       row.className = `decision-${decisionClass}`;
       row.innerHTML = `
         <td>${escapeHtml(new Date(tx.timestamp).toLocaleString())}</td>
-        <td>${escapeHtml(tx.sender_id)}</td>
-        <td>${escapeHtml(tx.receiver_id)}</td>
+        <td>${escapeHtml(resolveCounterpartyId(tx))}</td>
         <td>₹${Number(tx.amount).toFixed(2)}</td>
         <td>${escapeHtml(tx.merchant_id || '—')}</td>
         <td class="reasons">${escapeHtml(tx.purpose || '—')}</td>

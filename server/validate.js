@@ -88,4 +88,4 @@ function validateTransactionInput(body) {
   };
 }
 
-module.exports = { validateTransactionInput, VALID_TRANSACTION_TYPES, MAX_AMOUNT, MAX_PURPOSE_LENGTH };
+module.exports = { validateTransactionInput, VALID_TRANSACTION_TYPES, MAX_AMOUNT, MAX_PURPOSE_LENGTH, MAX_ID_LENGTH };

@@ -67,6 +67,15 @@ CREATE INDEX IF NOT EXISTS idx_structuring_alerts_sender ON structuring_alerts(s
 -- job's cooldown check both filter/order structuring_alerts by created_at with no supporting
 -- index — fine at demo-table sizes, but a full scan waiting to happen at real volume.
 CREATE INDEX IF NOT EXISTS idx_structuring_alerts_created_at ON structuring_alerts(created_at);
+
+-- User-editable registry of the business's own account IDs (e.g. its storefront/receiver
+-- accounts), so the dashboard can tell which side of a transaction is the business vs. the
+-- customer instead of guessing from ID naming conventions. No FK to users -- an ID can be
+-- registered before or independent of having any transactions.
+CREATE TABLE IF NOT EXISTS business_accounts (
+  account_id TEXT PRIMARY KEY,
+  created_at TEXT NOT NULL
+);
 `;
 
 function initDb(dbPath) {

@@ -225,6 +225,95 @@ test('GET /audit/summary buckets transactions by time and decision', async () =>
   }
 });
 
+// ---- Business accounts registry ----
+
+test('GET /business-accounts starts empty', async () => {
+  const { server } = await freshServer();
+  try {
+    const res = await request(server, 'GET', '/business-accounts');
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body, []);
+  } finally {
+    server.close();
+  }
+});
+
+test('POST /business-accounts registers an account, GET reflects it, DELETE removes it', async () => {
+  const { server } = await freshServer();
+  try {
+    const posted = await request(server, 'POST', '/business-accounts', { account_id: 'm_store_electronics' });
+    assert.equal(posted.status, 201);
+    assert.equal(posted.body.account_id, 'm_store_electronics');
+
+    const afterAdd = await request(server, 'GET', '/business-accounts');
+    assert.equal(afterAdd.body.length, 1);
+    assert.equal(afterAdd.body[0].account_id, 'm_store_electronics');
+    assert.equal(typeof afterAdd.body[0].created_at, 'string');
+
+    const deleted = await request(server, 'DELETE', '/business-accounts/m_store_electronics');
+    assert.equal(deleted.status, 204);
+
+    const afterDelete = await request(server, 'GET', '/business-accounts');
+    assert.deepEqual(afterDelete.body, []);
+  } finally {
+    server.close();
+  }
+});
+
+test('POST /business-accounts re-adding the same account_id is a no-op, not an error', async () => {
+  const { server } = await freshServer();
+  try {
+    await request(server, 'POST', '/business-accounts', { account_id: 'm_store_apparel' });
+    const second = await request(server, 'POST', '/business-accounts', { account_id: 'm_store_apparel' });
+    assert.equal(second.status, 201);
+
+    const res = await request(server, 'GET', '/business-accounts');
+    assert.equal(res.body.length, 1);
+  } finally {
+    server.close();
+  }
+});
+
+test('DELETE /business-accounts/:id on an unregistered id is a no-op, not a 404', async () => {
+  const { server } = await freshServer();
+  try {
+    const res = await request(server, 'DELETE', '/business-accounts/never_registered');
+    assert.equal(res.status, 204);
+  } finally {
+    server.close();
+  }
+});
+
+test('POST /business-accounts rejects a missing or overlong account_id', async () => {
+  const { server } = await freshServer();
+  try {
+    const missing = await request(server, 'POST', '/business-accounts', {});
+    assert.equal(missing.status, 400);
+    assert.match(missing.body.error, /account_id/);
+
+    const overlong = await request(server, 'POST', '/business-accounts', { account_id: 'x'.repeat(200) });
+    assert.equal(overlong.status, 400);
+  } finally {
+    server.close();
+  }
+});
+
+test('business-accounts routes reject a request with no X-API-Key header (regression)', async () => {
+  const { server } = await freshServer();
+  try {
+    const getRes = await request(server, 'GET', '/business-accounts', null, { 'X-API-Key': undefined });
+    assert.equal(getRes.status, 401);
+
+    const postRes = await request(server, 'POST', '/business-accounts', { account_id: 'm_x' }, { 'X-API-Key': undefined });
+    assert.equal(postRes.status, 401);
+
+    const deleteRes = await request(server, 'DELETE', '/business-accounts/m_x', null, { 'X-API-Key': undefined });
+    assert.equal(deleteRes.status, 401);
+  } finally {
+    server.close();
+  }
+});
+
 // ---- Security regression: every route requires a valid API key ----
 
 test('POST /transaction: rejects a request with no X-API-Key header', async () => {

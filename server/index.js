@@ -24,6 +24,7 @@ if (!process.__sentinelpayUnhandledRejectionHandlerInstalled) {
 
 const { initDb } = require('./db');
 const transactionsRouter = require('./routes/transactions');
+const businessAccountsRouter = require('./routes/businessAccounts');
 const { attachWebSocketServer } = require('./websocket');
 const { startStructuringJob } = require('./structuring/backgroundJob');
 const { API_KEY, USING_DEFAULT_API_KEY } = require('./middleware/apiKeyAuth');
@@ -97,6 +98,7 @@ app.get('/index.html', serveDashboardIndex);
 // explicit fetch() calls can), so the entire dashboard rendered unstyled and inert. See the
 // comment on transactionsRouter's requireApiKey import for the full explanation.
 app.use('/', transactionsRouter);
+app.use('/', businessAccountsRouter);
 app.use(express.static(dashboardDir));
 
 // Malformed JSON body -> 400 with a clear message, instead of falling through to the

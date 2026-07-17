@@ -324,6 +324,112 @@ body {
   background: linear-gradient(160deg, var(--accent), #2c6fc0);
 }
 
+/* ---- Business accounts registry ---- */
+
+.business-accounts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem 1.25rem;
+  padding: 0.9rem 2rem;
+  margin: 0 2rem;
+  background: linear-gradient(165deg, var(--surface-2), var(--surface-1));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.business-accounts-label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 11rem;
+}
+
+.business-accounts-label > span:first-child {
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.business-accounts-hint {
+  font-size: 0.72rem;
+  color: var(--text-faint);
+  max-width: 22rem;
+}
+
+.business-accounts-input-row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.business-accounts-input-row input {
+  background: var(--surface-1);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.45rem 0.75rem;
+  font-size: 0.8rem;
+  min-width: 14rem;
+}
+
+.business-accounts-input-row input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.business-accounts-input-row button {
+  cursor: pointer;
+  background: linear-gradient(160deg, var(--accent), #2c6fc0);
+  color: #f4f8ff;
+  font-weight: 700;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 0.45rem 0.9rem;
+  font-size: 0.8rem;
+  box-shadow: 0 4px 12px -3px rgba(57, 135, 229, 0.5);
+  transition: transform 0.15s var(--ease), box-shadow 0.15s var(--ease);
+}
+
+.business-accounts-input-row button:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px -3px rgba(57, 135, 229, 0.6);
+}
+
+.business-accounts-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  flex: 1 1 auto;
+}
+
+.business-account-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: rgba(57, 135, 229, 0.12);
+  border: 1px solid rgba(57, 135, 229, 0.3);
+  border-radius: 999px;
+  padding: 0.3rem 0.4rem 0.3rem 0.75rem;
+  font-size: 0.78rem;
+  color: var(--text);
+}
+
+.business-account-remove {
+  cursor: pointer;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  font-size: 0.9rem;
+  line-height: 1;
+  padding: 0.15rem 0.35rem;
+  border-radius: 999px;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.business-account-remove:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+}
+
 /* ---- Panels (shared by all three views) ---- */
 
 .panel {
@@ -683,6 +789,14 @@ tr.decision-step_up {
   .tabs {
     padding: 0.75rem 1rem;
     overflow-x: auto;
+  }
+  .business-accounts {
+    margin: 0 1rem;
+    padding: 0.75rem 1rem;
+  }
+  .business-accounts-input-row input {
+    min-width: 0;
+    flex: 1 1 auto;
   }
 }
 

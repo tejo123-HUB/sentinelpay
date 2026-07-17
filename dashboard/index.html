@@ -62,6 +62,18 @@
     </div>
   </section>
 
+  <section class="business-accounts">
+    <div class="business-accounts-label">
+      <span>Business Accounts</span>
+      <span class="business-accounts-hint">IDs that belong to your business — the live/audit tables collapse Sender + Receiver into one "ID" column showing whichever side is the customer</span>
+    </div>
+    <div class="business-accounts-input-row">
+      <input type="text" id="business-account-input" placeholder="e.g. m_store_electronics" />
+      <button id="business-account-add">Add</button>
+    </div>
+    <div class="business-accounts-list" id="business-accounts-list"></div>
+  </section>
+
   <nav class="tabs" id="view-tabs">
     <button class="tab-btn active" data-view="live">Live Monitor</button>
     <button class="tab-btn" data-view="map">Map</button>
@@ -91,8 +103,7 @@
           <thead>
             <tr>
               <th>Time</th>
-              <th>Sender</th>
-              <th>Receiver</th>
+              <th>ID</th>
               <th>Amount</th>
               <th>Type</th>
               <th>Gateway</th>
@@ -159,8 +170,7 @@
           <thead>
             <tr>
               <th>Time</th>
-              <th>Sender</th>
-              <th>Receiver</th>
+              <th>ID</th>
               <th>Amount</th>
               <th>Gateway</th>
               <th>Purpose</th>

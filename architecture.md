@@ -224,6 +224,8 @@ CREATE TABLE structuring_alerts (
 
 **Schema change (merchant/multi-gateway reframe):** added `purpose TEXT` (nullable) to `transactions` — a pure addition, same as `reason` above, not a retrofit of `sender_id`/`receiver_id`. Mainly populated on merchant-initiated outgoing transactions (refunds, payouts, vendor settlements) as analyst-facing context, not a scoring input.
 
+**Schema change (dashboard ID-column collapse):** added a new table, `business_accounts (account_id TEXT PRIMARY KEY, created_at TEXT NOT NULL)` — the dashboard's editable registry of the business's own account IDs (see Section 7's `/business-accounts` routes), used to resolve which side of a `sender_id`/`receiver_id` pair is the customer. No FK to `users`, deliberately: an ID can be registered before or independent of having any transactions.
+
 **Important:** `sender_id` and `receiver_id` must exist from the very first schema migration — do not add them later; the structuring detector depends on them from day one. They're directional, not role-fixed: on an ordinary payment the customer is `sender_id` and the merchant is `receiver_id`; on a refund/payout the merchant is `sender_id` and the customer is `receiver_id`.
 
 **Implementation note (Task 2):** `server/db.js` adds two extra indexes beyond the ones listed above — `idx_flags_transaction` on `flags(transaction_id)` and `idx_structuring_alerts_sender` on `structuring_alerts(sender_id)` — both pure lookup-performance additions with no schema/column changes, needed for the fast per-transaction structuring-alert lookup (Task 6) and for fetching flags per transaction. The `users.avg_transaction_amount` running average (Task 3) is maintained using an indexed `COUNT(*)` over `transactions` for the per-user transaction count rather than adding a redundant `transaction_count` column to `users`.
@@ -292,6 +294,9 @@ Returns recent transactions with their decisions and flag reasons, for the dashb
 
 ### `GET /alerts`
 Returns active structuring/layering alerts (grouped, not per-transaction).
+
+### `GET /business-accounts`, `POST /business-accounts`, `DELETE /business-accounts/:accountId`
+The dashboard's editable registry of the business's own account IDs. There's no schema flag marking an ID as "the business" vs. "a customer" — `merchant_id` identifies which *gateway* a transaction came through, not which party in `sender_id`/`receiver_id` is the business. This registry is what lets the dashboard collapse the Sender/Receiver pair into a single "ID" column showing only the customer: `GET` returns `[{ account_id, created_at }, ...]`; `POST { account_id }` registers one (`INSERT OR IGNORE` — re-adding is a no-op, not an error); `DELETE /business-accounts/:accountId` removes one (idempotent — removing an unregistered ID still returns `204`). Analyst-facing only, like `purpose`/`merchant_id` — not a scoring input.
 
 ### `GET /audit/summary?hours=24&bucketMinutes=60`
 Task 11 (audit trail): time-bucketed counts of `allow`/`step_up`/`block` over the given lookback window, for the trend chart. Added in Section 15.2. Returns `{ hours, bucketMinutes, totalTransactions, buckets: [{ bucket_start, allow, step_up, block }, ...] }`.
@@ -697,6 +702,17 @@ The product framing was corrected: SentinelPay is built for **a merchant busines
 6. **`architecture.md`/`user-manual.md`/`README.md`** reframed accordingly (Sections 1–3, 5–7 here; Sections 1, 2, and 9 of `user-manual.md` — the latter's AML-reporting language was also corrected to attribute the statutory reporting obligation to the business's payment processor/banking partner, not the merchant itself).
 
 No new `transaction_type` enum value was added (refunds are modeled as `'transfer'` + `purpose`, not a new `'refund'` type) and no new fraud/scoring logic was added keyed off `purpose` or `merchant_id` — both remain explainability-only. `npm test`: 91 tests passing (up from 87; two `validate.test.js` cases and one `api.test.js` round-trip test cover `purpose`, one `websocket.test.js` assertion extended to cover `merchant_id`/`purpose` in the broadcast payload).
+
+### 15.11 Dashboard ID-column collapse, backed by an editable business-accounts registry
+
+On any given row, one side of `sender_id`/`receiver_id` is always one of the business's own accounts and the other is the customer — showing both separately (as "Sender"/"Receiver") was redundant now that the direction is understood (Section 15.10). Fixed:
+
+1. **New table `business_accounts`** (`account_id TEXT PRIMARY KEY, created_at TEXT NOT NULL`, Section 6) — an editable registry of the business's own account IDs. No FK to `users`, deliberately: an ID can be registered before or independent of having any transactions.
+2. **New routes** `GET`/`POST`/`DELETE /business-accounts` (`server/routes/businessAccounts.js`, Section 7), mounted the same way `transactionsRouter` is — `requireApiKey` per-route, not a blanket `router.use()`, for the same reason as `transactions.js` (a blanket gate would 401 the dashboard's own static assets). `validate.js`'s `MAX_ID_LENGTH` is now exported and reused for `account_id` validation rather than duplicated.
+3. **Dashboard**: both the live and audit tables' separate `Sender`/`Receiver` columns collapsed into one `ID` column. `resolveCounterpartyId(tx)` (`dashboard/app.js`, shared globally with `audit.js`/`map.js`) looks up `sender_id`/`receiver_id` against the registry: exactly one side known → show the other (the customer); neither (or both) known → show `"sender → receiver"` rather than guess. A new always-visible strip between the counters and the tabs (`.business-accounts` in `style.css`, styled to match the existing `.audit-filters` input/button look) lets the account IDs be added/removed live; any registry change re-fetches and re-renders the live table from scratch so it applies retroactively to already-drawn rows, not just new ones (counters are untouched — they track the cumulative live event stream, not what's currently displayed).
+4. **Deliberately unchanged**: the scoring/decision pipeline (this registry is dashboard display logic only, never a detection input) and `merchant_id`'s meaning (still "which gateway," orthogonal to "which side is the business").
+
+`npm test`: 97 tests passing (up from 91; six new `api.test.js` cases cover the three routes, including the no-op-not-error re-add/re-delete behavior and the missing-API-key regression).
 
 ---
 
