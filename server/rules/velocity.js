@@ -22,10 +22,11 @@ function velocity(transaction, userHistory) {
       flagged: true,
       reason: `${recentCount + 1} transactions in ${Math.round(VELOCITY_WINDOW_MS / 1000)} seconds`,
       weight: VELOCITY_WEIGHT,
+      severity: 'Medium', // Section 15.16, Feature 17: severity backfilled onto the original 5 rule detectors for uniform explainability
     };
   }
 
-  return { flagged: false, reason: null, weight: 0 };
+  return { flagged: false, reason: null, weight: 0, severity: null };
 }
 
 velocity.VELOCITY_WINDOW_MS = VELOCITY_WINDOW_MS;

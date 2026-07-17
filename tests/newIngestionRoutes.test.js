@@ -166,6 +166,37 @@ test('POST /disputes: rejects a missing customer_id or dispute_type', async () =
   }
 });
 
+test('POST /transaction: response includes severity and risk_breakdown (Section 15.16, Feature 17)', async () => {
+  const { server } = await freshServer();
+  try {
+    await request(server, 'POST', '/business-accounts', { account_id: 'm_explain_e2e' });
+    await request(server, 'POST', '/merchant-logins', { merchant_id: 'm_explain_e2e', device_id: 'd_known' });
+    await request(server, 'POST', '/merchant-logins', { merchant_id: 'm_explain_e2e', device_id: 'd_attacker' });
+
+    const res = await request(
+      server,
+      'POST',
+      '/transaction',
+      validTransaction({ sender_id: 'm_explain_e2e', receiver_id: 'u_victim_2', purpose: 'Refund' })
+    );
+
+    assert.equal(res.status, 201);
+    assert.equal(res.body.decision, 'block');
+    assert.equal(res.body.severity, 'Critical');
+    assert.ok(Array.isArray(res.body.risk_breakdown));
+    assert.ok(res.body.risk_breakdown.some((r) => r.severity === 'Critical'));
+    assert.ok(res.body.risk_breakdown.every((r) => typeof r.reason === 'string'));
+
+    const list = await request(server, 'GET', '/transactions?limit=10');
+    const found = list.body.find((t) => t.transaction_id === res.body.transaction_id);
+    assert.ok(found);
+    assert.equal(found.severity, 'Critical');
+    assert.ok(Array.isArray(found.risk_breakdown) && found.risk_breakdown.length > 0);
+  } finally {
+    server.close();
+  }
+});
+
 test('POST /transaction: a repeat-dispute customer elevates a refund\'s risk (Section 15.16, Feature 8)', async () => {
   const { server } = await freshServer();
   try {

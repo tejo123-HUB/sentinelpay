@@ -153,9 +153,19 @@ router.post('/transaction', requireApiKey, async (req, res, next) => {
       mlProbability = await getFraudProbability(input, userHistory);
     }
 
-    let { score, reasons } = computeFraudScore(ruleResults, structuringLookup, mlProbability);
+    let { score, reasons, riskBreakdown, severity } = computeFraudScore(ruleResults, structuringLookup, mlProbability);
     if (outbound) {
+      const reasonCountBeforeRestrictor = reasons.length;
       ({ score, reasons } = applyOutboundRestrictors(score, reasons, input));
+      // applyOutboundRestrictors is a pure amount-based floor, not a detector -- it has no
+      // `type`/`severity` of its own, but riskBreakdown should still account for any reason it
+      // appended so the two stay in sync (Feature 17: every reason traceable in the breakdown).
+      if (reasons.length > reasonCountBeforeRestrictor) {
+        riskBreakdown = [
+          ...riskBreakdown,
+          { type: 'outbound_amount_restrictor', reason: reasons[reasons.length - 1], weight: null, severity: 'Medium' },
+        ];
+      }
     }
     const decision = decide(score);
 
@@ -186,17 +196,27 @@ router.post('/transaction', requireApiKey, async (req, res, next) => {
     );
 
     const flagInsert = db.prepare(
-      'INSERT INTO flags (flag_id, transaction_id, flag_type, reason, weight, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+      'INSERT INTO flags (flag_id, transaction_id, flag_type, reason, weight, severity, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
     );
     for (const r of ruleResults) {
       if (r.flagged) {
-        flagInsert.run(`fl_${crypto.randomUUID()}`, transactionId, r.type, r.reason, r.weight, input.timestamp);
+        flagInsert.run(`fl_${crypto.randomUUID()}`, transactionId, r.type, r.reason, r.weight, r.severity || null, input.timestamp);
       }
     }
 
     updateUserAfterTransaction(db, input.sender_id, input);
 
-    const responseBody = { transaction_id: transactionId, fraud_score: score, decision, reasons };
+    // Section 15.16, Feature 17: every response includes fraud_score, decision, severity,
+    // detector names + human-readable reasons (risk_breakdown), and the plain reasons array
+    // (kept for backward compatibility with existing callers/tests).
+    const responseBody = {
+      transaction_id: transactionId,
+      fraud_score: score,
+      decision,
+      severity,
+      reasons,
+      risk_breakdown: riskBreakdown,
+    };
 
     // The WS broadcast carries the full transaction, not just the POST response shape: the
     // live dashboard table (sender/receiver/amount/type/time columns) and the map view
@@ -263,14 +283,28 @@ router.get('/transactions', requireApiKey, (req, res) => {
 
   const transactionIds = rows.map((r) => r.transaction_id);
   const reasonsByTransaction = new Map();
+  const breakdownByTransaction = new Map();
   if (transactionIds.length > 0) {
     const flagRows = db
-      .prepare(`SELECT transaction_id, reason FROM flags WHERE transaction_id IN (${transactionIds.map(() => '?').join(',')})`)
+      .prepare(
+        `SELECT transaction_id, flag_type, reason, weight, severity FROM flags WHERE transaction_id IN (${transactionIds.map(() => '?').join(',')})`
+      )
       .all(...transactionIds);
     for (const f of flagRows) {
       if (!reasonsByTransaction.has(f.transaction_id)) reasonsByTransaction.set(f.transaction_id, []);
       reasonsByTransaction.get(f.transaction_id).push(f.reason);
+      if (!breakdownByTransaction.has(f.transaction_id)) breakdownByTransaction.set(f.transaction_id, []);
+      breakdownByTransaction.get(f.transaction_id).push({ type: f.flag_type, reason: f.reason, weight: f.weight, severity: f.severity });
     }
+  }
+
+  function overallSeverity(breakdown) {
+    const rank = { Low: 1, Medium: 2, High: 3, Critical: 4 };
+    let worst = 'None';
+    for (const entry of breakdown) {
+      if (entry.severity && (rank[entry.severity] || 0) > (rank[worst] || 0)) worst = entry.severity;
+    }
+    return worst;
   }
 
   res.json(
@@ -295,6 +329,8 @@ router.get('/transactions', requireApiKey, (req, res) => {
       country: row.country,
       ip_address: row.ip_address,
       reasons: reasonsByTransaction.get(row.transaction_id) || [],
+      risk_breakdown: breakdownByTransaction.get(row.transaction_id) || [],
+      severity: overallSeverity(breakdownByTransaction.get(row.transaction_id) || []),
     }))
   );
 });

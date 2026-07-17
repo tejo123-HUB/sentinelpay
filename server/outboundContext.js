@@ -154,10 +154,21 @@ function getOutboundContext(db, transaction, nowMs) {
   // Feature 4 (merchant account takeover): the most recent login for this business account
   // within the takeover window -- and, if there was one, whether its device had ever logged in
   // for this merchant before that login (a genuinely new device, not just "not used recently").
+  //
+  // Every boundary below is "rowid" (SQLite's implicit, monotonically-increasing insertion
+  // order), not just "timestamp", as the tiebreaker -- login timestamps are server-assigned at
+  // millisecond resolution (same as transactions.timestamp elsewhere in this file), so two
+  // POST /merchant-logins calls fired fast enough (a demo/seed script, or just a loaded test
+  // suite) can legitimately land on the same millisecond. A plain "ORDER BY timestamp DESC"
+  // would then pick a tied row nondeterministically, and a strict "timestamp < recentLogin's"
+  // comparison for "previous login" would silently exclude a same-millisecond earlier login
+  // entirely -- the same class of bug already fixed once in this file (Section 15.13, finding
+  // #3) for the refund-context queries. rowid is unique even when timestamps tie, so ordering
+  // and excluding "the recent login's own row" by rowid is exact where timestamp alone is not.
   const takeoverWindowSince = new Date(nowMs - MERCHANT_TAKEOVER.TAKEOVER_WINDOW_MS).toISOString();
   const recentLogin = db
     .prepare(
-      'SELECT login_id, device_id, ip_address, location_lat, location_lng, country, timestamp FROM merchant_login_events WHERE merchant_id = ? AND timestamp >= ? AND timestamp <= ? ORDER BY timestamp DESC LIMIT 1'
+      'SELECT rowid AS rowid_, login_id, device_id, ip_address, location_lat, location_lng, country, timestamp FROM merchant_login_events WHERE merchant_id = ? AND timestamp >= ? AND timestamp <= ? ORDER BY timestamp DESC, rowid DESC LIMIT 1'
     )
     .get(businessId, takeoverWindowSince, transaction.timestamp);
 
@@ -165,16 +176,16 @@ function getOutboundContext(db, transaction, nowMs) {
   if (recentLogin) {
     const previousLogin = db
       .prepare(
-        'SELECT device_id, country FROM merchant_login_events WHERE merchant_id = ? AND timestamp < ? ORDER BY timestamp DESC LIMIT 1'
+        'SELECT device_id, country FROM merchant_login_events WHERE merchant_id = ? AND rowid != ? AND timestamp <= ? ORDER BY timestamp DESC, rowid DESC LIMIT 1'
       )
-      .get(businessId, recentLogin.timestamp);
+      .get(businessId, recentLogin.rowid_, recentLogin.timestamp);
 
     const isNewDevice =
       !!recentLogin.device_id &&
       (!previousLogin ||
         db
-          .prepare('SELECT COUNT(*) AS n FROM merchant_login_events WHERE merchant_id = ? AND device_id = ? AND timestamp < ?')
-          .get(businessId, recentLogin.device_id, recentLogin.timestamp).n === 0);
+          .prepare('SELECT COUNT(*) AS n FROM merchant_login_events WHERE merchant_id = ? AND device_id = ? AND rowid != ? AND timestamp <= ?')
+          .get(businessId, recentLogin.device_id, recentLogin.rowid_, recentLogin.timestamp).n === 0);
 
     if (isNewDevice && previousLogin) {
       takeoverRisk = {

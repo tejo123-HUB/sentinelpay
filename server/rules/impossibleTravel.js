@@ -12,7 +12,7 @@ const MIN_ELAPSED_SECONDS = 1; // guard against division by ~0 for back-to-back 
  */
 function impossibleTravel(transaction, userHistory) {
   if (!transaction.location || transaction.location.lat == null || transaction.location.lng == null) {
-    return { flagged: false, reason: null, weight: 0 };
+    return { flagged: false, reason: null, weight: 0, severity: null };
   }
 
   const priorWithLocation = (userHistory.recentTransactions || [])
@@ -21,7 +21,7 @@ function impossibleTravel(transaction, userHistory) {
 
   const lastTransaction = priorWithLocation[0];
   if (!lastTransaction) {
-    return { flagged: false, reason: null, weight: 0 };
+    return { flagged: false, reason: null, weight: 0, severity: null };
   }
 
   const txTime = new Date(transaction.timestamp).getTime();
@@ -42,10 +42,11 @@ function impossibleTravel(transaction, userHistory) {
       flagged: true,
       reason: `${Math.round(distanceKm)} km location jump in ${Math.round(elapsedSeconds)} seconds`,
       weight: IMPOSSIBLE_TRAVEL_WEIGHT,
+      severity: 'High', // Section 15.16, Feature 17: severity backfilled onto the original 5 rule detectors for uniform explainability
     };
   }
 
-  return { flagged: false, reason: null, weight: 0 };
+  return { flagged: false, reason: null, weight: 0, severity: null };
 }
 
 impossibleTravel.IMPOSSIBLE_TRAVEL_SPEED_KMH = IMPOSSIBLE_TRAVEL_SPEED_KMH;

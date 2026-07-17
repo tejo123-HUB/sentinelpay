@@ -22,10 +22,11 @@ function outboundFanOutBurst(transaction, outboundContext) {
       flagged: true,
       reason: `${newBurstReceivers.length} distinct new payout receivers in a short window`,
       weight: OUTBOUND_FAN_OUT_BURST_WEIGHT,
+      severity: 'High', // Section 15.16, Feature 17: severity backfilled for uniform explainability
     };
   }
 
-  return { flagged: false, reason: null, weight: 0 };
+  return { flagged: false, reason: null, weight: 0, severity: null };
 }
 
 outboundFanOutBurst.BURST_NEW_RECEIVER_THRESHOLD = BURST_NEW_RECEIVER_THRESHOLD;

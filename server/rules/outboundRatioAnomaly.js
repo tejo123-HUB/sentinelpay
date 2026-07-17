@@ -21,9 +21,10 @@ function outboundRatioAnomaly(transaction, outboundContext) {
         flagged: true,
         reason: `Outbound total (${outboundTotal.toFixed(2)}) with no recorded inbound revenue in the same window`,
         weight: OUTBOUND_RATIO_WEIGHT,
+        severity: 'Medium', // Section 15.16, Feature 17: severity backfilled for uniform explainability
       };
     }
-    return { flagged: false, reason: null, weight: 0 };
+    return { flagged: false, reason: null, weight: 0, severity: null };
   }
 
   const ratio = outboundTotal / inboundTotal;

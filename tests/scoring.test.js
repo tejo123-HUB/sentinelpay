@@ -4,8 +4,8 @@ const assert = require('node:assert/strict');
 const computeFraudScore = require('../server/scoring');
 const decide = require('../server/decision');
 
-function ruleResult(flagged, weight, reason = 'flagged') {
-  return { flagged, reason: flagged ? reason : null, weight: flagged ? weight : 0 };
+function ruleResult(flagged, weight, reason = 'flagged', severity = null, type = 'test_rule') {
+  return { type, flagged, reason: flagged ? reason : null, weight: flagged ? weight : 0, severity: flagged ? severity : null };
 }
 
 test('scoring+decision: a clean transaction scores low and is allowed', () => {
@@ -67,6 +67,46 @@ test('scoring+decision: an active structuring alert always forces block, regardl
   assert.ok(score > 80, `expected block-tier score from structuring alert alone, got ${score}`);
   assert.equal(decide(score), 'block');
   assert.ok(reasons.some((r) => r.includes('Structuring alert')));
+});
+
+// ---- Section 15.16, Feature 16/17: critical-severity floor + explainability fields ----
+
+test('scoring: a Critical-severity flag forces block regardless of its own weight', () => {
+  // A moderate weight (50) that alone would only reach step-up, but Critical severity forces
+  // the CRITICAL_SEVERITY_FLOOR regardless.
+  const ruleResults = [ruleResult(true, 50, 'Receiver is a Suspected Mule Account', 'Critical', 'mule_receiver_risk')];
+  const { score } = computeFraudScore(ruleResults, { active: false, alert: null }, 0);
+
+  assert.ok(score >= computeFraudScore.CRITICAL_SEVERITY_FLOOR, `expected the critical floor, got ${score}`);
+  assert.equal(decide(score), 'block');
+});
+
+test('scoring: riskBreakdown carries type/reason/weight/severity for every contributing signal', () => {
+  const ruleResults = [ruleResult(true, 35, 'velocity flag', 'Medium', 'velocity')];
+  const structuringLookup = { active: true, alert: { reason: 'known ring' } };
+  const { riskBreakdown } = computeFraudScore(ruleResults, structuringLookup, 0);
+
+  assert.equal(riskBreakdown.length, 2);
+  assert.deepEqual(riskBreakdown[0], { type: 'velocity', reason: 'velocity flag', weight: 35, severity: 'Medium' });
+  assert.equal(riskBreakdown[1].type, 'structuring_alert');
+  assert.equal(riskBreakdown[1].severity, 'Critical');
+});
+
+test('scoring: severity reflects the highest-ranked contributing signal', () => {
+  const ruleResults = [
+    ruleResult(true, 20, 'low signal', 'Low', 'device_mismatch'),
+    ruleResult(true, 45, 'high signal', 'High', 'outbound_fan_out_burst'),
+  ];
+  const { severity } = computeFraudScore(ruleResults, { active: false, alert: null }, 0);
+
+  assert.equal(severity, 'High');
+});
+
+test('scoring: severity is None when nothing is flagged', () => {
+  const { severity, riskBreakdown } = computeFraudScore([ruleResult(false, 0)], { active: false, alert: null }, 0);
+
+  assert.equal(severity, 'None');
+  assert.equal(riskBreakdown.length, 0);
 });
 
 test('decision: threshold boundaries are exact', () => {

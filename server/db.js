@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS flags (
   flag_type TEXT NOT NULL,
   reason TEXT NOT NULL,
   weight REAL NOT NULL,
+  severity TEXT, -- Low/Medium/High/Critical (Section 15.16, Feature 17); nullable since flags predating this column have none recorded
   created_at TEXT NOT NULL,
   FOREIGN KEY (transaction_id) REFERENCES transactions(transaction_id)
 );

@@ -286,6 +286,28 @@ test('getOutboundContext: takeoverRisk is null when the recent login device was 
   assert.equal(context.takeoverRisk, null);
 });
 
+test('getOutboundContext: takeoverRisk still resolves correctly when two logins share the exact same millisecond timestamp (regression)', () => {
+  // Reproduces the exact race found under a loaded full-suite run: two POST /merchant-logins
+  // calls fired fast enough can legitimately land on the same millisecond. A strict
+  // "timestamp < recentLogin.timestamp" comparison for "the previous login" would silently
+  // drop the earlier row entirely in this case, leaving takeoverRisk null even though a
+  // genuinely new device just logged in.
+  const db = buildTestDb();
+  const tiedTimestamp = new Date(NOW_MS - 60 * 1000).toISOString();
+  db.prepare(
+    'INSERT INTO merchant_login_events (login_id, merchant_id, device_id, country, timestamp, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+  ).run('login_known', 'm_biz', 'd_known', 'IN', tiedTimestamp, tiedTimestamp);
+  db.prepare(
+    'INSERT INTO merchant_login_events (login_id, merchant_id, device_id, country, timestamp, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+  ).run('login_attacker', 'm_biz', 'd_attacker', 'RU', tiedTimestamp, tiedTimestamp);
+
+  const context = getOutboundContext(db, { sender_id: 'm_biz', receiver_id: 'u_1', timestamp: new Date(NOW_MS).toISOString() }, NOW_MS);
+
+  assert.ok(context.takeoverRisk, 'expected a takeover risk to still be detected under a same-millisecond tie');
+  assert.equal(context.takeoverRisk.currentDevice, 'd_attacker');
+  assert.equal(context.takeoverRisk.previousDevice, 'd_known');
+});
+
 test('getOutboundContext: takeoverRisk is null with no logins at all', () => {
   const db = buildTestDb();
   const context = getOutboundContext(db, { sender_id: 'm_biz', receiver_id: 'u_1', timestamp: new Date(NOW_MS).toISOString() }, NOW_MS);

@@ -133,14 +133,18 @@ The full spec (verbatim) and design rationale live in Section 15.16; this table 
 | 13 | Mule Account Detection | ✅ built | `server/muleScore.js` + `server/rules/muleReceiverRisk.js` |
 | 14 | Geo Risk Scoring | ✅ built | `server/rules/geoRisk.js` |
 | 15 | Advanced Merchant Risk Dashboard | ⏳ planned | not yet built |
-| 16 | Risk Scoring Engine (weights + critical force-block) | ⏳ planned | not yet built |
-| 17 | Fraud Explainability (severity on every detector) | ⏳ planned | new detectors already carry `severity`; not yet backfilled onto the original 9 or surfaced in the API response |
+| 16 | Risk Scoring Engine (weights + critical force-block) | ✅ built | `server/scoring.js`'s `CRITICAL_SEVERITY_FLOOR` |
+| 17 | Fraud Explainability (severity on every detector) | ✅ built | `severity` backfilled onto all 13 detectors; `POST /transaction` and `GET /transactions` return `severity` + `risk_breakdown` |
 | 18 | Analytics endpoints | ⏳ planned | not yet built |
 | 19 | Configuration (no magic numbers) | ✅ built | `server/config.js` |
 | 20 | Testing (100% detector coverage) | 🔄 ongoing | every feature above ships with unit + integration tests as it lands; a final coverage sweep is still pending |
 | 21 | Documentation | 🔄 ongoing | this section + Section 15.16, updated per phase as each feature lands; a final consistency pass is still pending |
 
-Fourteen detector-level features (1-14) plus the config foundation (19) are complete and merged with passing tests as of this table's last update. The remaining features (15/16/17/18) touch the dashboard and scoring/analytics layer broadly — see Section 15.16's phasing for the build order.
+Sixteen features (1-14, 16, 17, 19) are complete and merged with passing tests as of this table's last update. The remaining features (15, 18) touch the dashboard and analytics layer — see Section 15.16's phasing for the build order.
+
+**Feature 16/17 design note:** `scoring.js` gained `CRITICAL_SEVERITY_FLOOR` (85, above the block threshold) — any flagged rule carrying `severity: 'Critical'` (merchant account takeover, suspected mule receiver) floors the score there, the same explicit-floor pattern as the pre-existing `STRUCTURING_ALERT_FLOOR`, rather than a second implicit mechanism. Circular laundering and known structuring/fraud rings were already covered by `STRUCTURING_ALERT_FLOOR` (any active `structuring_alerts` row, direct or circular) with zero changes needed. `computeFraudScore` now also returns `riskBreakdown` (one `{type, reason, weight, severity}` entry per contributing signal, including the structuring alert and — when it fires — the outbound-amount restrictor) and an overall `severity` (the highest-ranked contributing signal, `'None'` if nothing flagged); both are surfaced in `POST /transaction`'s response and `GET /transactions`'s rows. `flags.severity` (new nullable column) persists each flag's severity so `GET /transactions` can reconstruct it without re-running detectors. All 13 detectors (the original 9 plus the 4 refund-integrity ones from Phase B, which already had severity) now carry a severity, backfilled without changing any existing detector's flagging logic or weight.
+
+**Bug found and fixed while wiring Feature 4/16:** `getOutboundContext`'s new merchant-login-takeover query used a strict `timestamp <` boundary to find "the login before the most recent one" — the same class of same-millisecond race already fixed once in this file (Section 15.13, finding #3) for the refund-context queries, reintroduced here in new code. Two `POST /merchant-logins` calls fired fast enough (a loaded test suite, or a real seed script) can land on the same millisecond; the strict comparison then silently excluded the earlier login entirely, leaving `takeoverRisk` null and the takeover flag never firing. Caught by the full test suite flaking under load, not by the individual test file run in isolation. Fixed by using SQLite's implicit `rowid` (unique even when timestamps tie) as the ordering/exclusion key instead of `timestamp` alone — `ORDER BY timestamp DESC, rowid DESC` and `rowid != ? AND timestamp <= ?` rather than a plain `timestamp <`. Verified with a regression test that inserts two logins at the exact same timestamp and confirms the correct one is still identified as "previous," plus 5 consecutive clean full-suite runs after the fix (previously flaky under load).
 
 **Feature 6 design note:** circular-flow alerts reuse the existing `structuring_alerts` table and the existing fast per-transaction lookup (`alertLookup.js`) with zero changes to either — a cycle is stored with `sender_id` = the origin business account and `receiver_ids` = the intermediate hop accounts, which `alertLookup.js`'s existing sender-match/receiver-membership checks already cover for any future transaction touching any account in the cycle. This is the "reuse existing graph engine" requirement satisfied structurally, not just in spirit: no parallel alert mechanism, no new scoring-floor logic (the existing `STRUCTURING_ALERT_FLOOR` already forces block once any structuring alert — split/fan-out or circular — is active for an account). The detector itself (`server/structuring/circularFlow.js`) is a pure DFS over a 24h-lookback transaction graph, bounded to `CIRCULAR_FLOW.MAX_CYCLE_HOPS` (3) intermediate hops, run from the background job (not per-transaction — too expensive, same reasoning as the existing split/fan-out detectors) against the business's own registered accounts as cycle origins.
 
@@ -266,7 +270,7 @@ CREATE TABLE structuring_alerts (
 
 **Schema change (dashboard ID-column collapse):** added a new table, `business_accounts (account_id TEXT PRIMARY KEY, created_at TEXT NOT NULL)` — the dashboard's editable registry of the business's own account IDs (see Section 7's `/business-accounts` routes), used to resolve which side of a `sender_id`/`receiver_id` pair is the customer. No FK to `users`, deliberately: an ID can be registered before or independent of having any transactions.
 
-**Schema changes (Section 15.16, 21-feature extension):** `transactions` gains four nullable columns — `reference_transaction_id` (links a refund to the purchase it refunds), `employee_id` (which staff member initiated a merchant-side transaction), `country`, `ip_address` (geo-risk scoring). Two new tables: `merchant_login_events` (merchant login metadata for takeover detection, Feature 4) and `disputes` (chargeback/dispute events for friendly-fraud scoring, Feature 8), both indexed on their lookup key. All pure additions — see Section 15.16 for the full rationale and which feature each backs.
+**Schema changes (Section 15.16, 21-feature extension):** `transactions` gains four nullable columns — `reference_transaction_id` (links a refund to the purchase it refunds), `employee_id` (which staff member initiated a merchant-side transaction), `country`, `ip_address` (geo-risk scoring). Two new tables: `merchant_login_events` (merchant login metadata for takeover detection, Feature 4, including a `country` column) and `disputes` (chargeback/dispute events for friendly-fraud scoring, Feature 8), both indexed on their lookup key. `flags` gains a nullable `severity` column (Feature 17). All pure additions — see Section 15.16 for the full rationale and which feature each backs.
 
 **Important:** `sender_id` and `receiver_id` must exist from the very first schema migration — do not add them later; the structuring detector depends on them from day one. They're directional, not role-fixed: on an ordinary payment the customer is `sender_id` and the merchant is `receiver_id`; on a refund/payout the merchant is `sender_id` and the customer is `receiver_id`.
 
@@ -326,12 +330,18 @@ Accepts a single transaction and returns a decision **synchronously** — scorin
   "transaction_id": "t_abc123",
   "fraud_score": 87,
   "decision": "block",
+  "severity": "High",
   "reasons": [
     "3 transactions in 10 seconds",
     "412 km location jump from last transaction"
+  ],
+  "risk_breakdown": [
+    { "type": "velocity", "reason": "3 transactions in 10 seconds", "weight": 35, "severity": "Medium" },
+    { "type": "impossible_travel", "reason": "412 km location jump from last transaction", "weight": 40, "severity": "High" }
   ]
 }
 ```
+**`severity`/`risk_breakdown` (Section 15.16, Feature 17):** `severity` is the highest-ranked severity (`Low`/`Medium`/`High`/`Critical`) among every contributing signal, `None` if nothing was flagged. `risk_breakdown` gives per-signal detail (detector name, reason, weight, severity) beyond the flat `reasons` array, which is kept unchanged for backward compatibility. `GET /transactions` returns the same two fields per row, reconstructed from the `flags` table's new `severity` column.
 
 ### `GET /transactions?limit=50&decision=block,step_up`
 Returns recent transactions with their decisions and flag reasons, for the dashboard's live table and the Task 11 audit trail. `decision` (optional, comma-separated, one or more of `allow`/`step_up`/`block`) filters the results — added when building the audit trail (Section 15.2).

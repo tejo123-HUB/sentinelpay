@@ -12,7 +12,7 @@ function amountAnomaly(transaction, userHistory) {
   const count = userHistory.transactionCount || 0;
 
   if (!avg || avg <= 0 || count < MIN_HISTORY_FOR_ANOMALY) {
-    return { flagged: false, reason: null, weight: 0 };
+    return { flagged: false, reason: null, weight: 0, severity: null };
   }
 
   if (transaction.amount > AMOUNT_ANOMALY_MULTIPLIER * avg) {
@@ -21,6 +21,7 @@ function amountAnomaly(transaction, userHistory) {
       flagged: true,
       reason: `Amount is ${multiple}x the user's average spend (${avg.toFixed(2)})`,
       weight: AMOUNT_ANOMALY_WEIGHT,
+      severity: 'Medium', // Section 15.16, Feature 17: severity backfilled onto the original 5 rule detectors for uniform explainability
     };
   }
 
