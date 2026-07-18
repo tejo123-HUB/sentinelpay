@@ -182,4 +182,48 @@ router.get('/graph/clusters', requireApiKey, (req, res) => {
   });
 });
 
+// GET /graph/blocked-tree?account_id=... -- Returns a tree of blocked payments
+router.get('/graph/blocked-tree', requireApiKey, (req, res) => {
+  const db = req.app.locals.db;
+  const accountId = req.query.account_id;
+
+  if (typeof accountId !== 'string' || accountId.trim() === '' || accountId.length > 50) {
+    return res.status(400).json({ error: 'account_id is required' });
+  }
+
+  const maxDepth = 3;
+  const nodes = new Map(); // id -> level
+  const edges = [];
+  let currentLevelNodes = [accountId];
+  nodes.set(accountId, 0);
+
+  for (let depth = 0; depth < maxDepth; depth++) {
+    const nextLevelNodes = [];
+    for (const node of currentLevelNodes) {
+      const txs = db.prepare("SELECT sender_id, receiver_id, amount FROM transactions WHERE (sender_id = ? OR receiver_id = ?) AND decision = 'block' LIMIT 50")
+        .all(node, node);
+      
+      for (const tx of txs) {
+        const other = tx.sender_id === node ? tx.receiver_id : tx.sender_id;
+        if (!nodes.has(other)) {
+          nodes.set(other, depth + 1);
+          nextLevelNodes.push(other);
+          // Keep edge direction as from sender to receiver
+          edges.push({ source: tx.sender_id, target: tx.receiver_id, amount: tx.amount });
+        }
+      }
+    }
+    if (nextLevelNodes.length === 0) break;
+    currentLevelNodes = nextLevelNodes;
+  }
+
+  const resultNodes = Array.from(nodes.entries()).map(([id, level]) => ({ 
+    id, 
+    type: level === 0 ? 'root' : 'blocked', 
+    level 
+  }));
+
+  res.json({ root: accountId, nodes: resultNodes, edges });
+});
+
 module.exports = router;

@@ -122,6 +122,25 @@ test('answerDeterministically: looks up a specific transaction by id', () => {
   assert.match(reply, /block/);
 });
 
+test('answerDeterministically: a transaction lookup includes its flags\' human-readable reasons and derived severity', () => {
+  const db = buildTestDb();
+  insertTx(db, { id: 't_flagged1', sender: 'a', receiver: 'b', amount: 500, decision: 'block', score: 95, msAgo: 1000 });
+  db.prepare(
+    `INSERT INTO flags (flag_id, transaction_id, flag_type, reason, weight, severity, created_at)
+     VALUES ('fl_1', 't_flagged1', 'velocity', 'Too many transactions in 60s', 40, 'High', ?)`
+  ).run(new Date().toISOString());
+  const reply = answerDeterministically(db, 'tell me about t_flagged1');
+  assert.match(reply, /High severity/);
+  assert.match(reply, /velocity/);
+  assert.match(reply, /Too many transactions in 60s/);
+});
+
+test('answerDeterministically: an unknown transaction id gets a clear "not found" reply, not a crash', () => {
+  const db = buildTestDb();
+  const reply = answerDeterministically(db, 'what happened with t_doesnotexist123?');
+  assert.match(reply, /couldn't find/i);
+});
+
 test('answerDeterministically: gives a summary for a general question', () => {
   const db = buildTestDb();
   insertTx(db, { id: 't1', sender: 'a', receiver: 'b', amount: 100, decision: 'block', score: 90, msAgo: 1000 });
@@ -129,10 +148,98 @@ test('answerDeterministically: gives a summary for a general question', () => {
   assert.match(reply, /1 transaction/);
 });
 
-test('answerDeterministically: falls back to a helpful message for an unrecognized question', () => {
+// Bug fix (post-audit): SQLite's SUM() over zero matching rows returns NULL, not 0 -- a brand-new
+// deployment's very first chat "summary" reply used to literally say "null blocked, null step-up
+// challenged" instead of 0. Regression test for the COALESCE fix.
+test('answerDeterministically: a summary on an empty database reports zeros, never "null"', () => {
+  const db = buildTestDb();
+  const reply = answerDeterministically(db, 'give me a summary');
+  assert.equal(reply, 'So far: 0 transaction(s) processed, 0 blocked, 0 step-up challenged.');
+  assert.doesNotMatch(reply, /null/i);
+});
+
+test('answerDeterministically: greets and lists its own capabilities for a greeting/help message', () => {
+  const db = buildTestDb();
+  for (const message of ['hi', 'hello', 'help', 'what can you do?']) {
+    const reply = answerDeterministically(db, message);
+    assert.match(reply, /SentinelPay AI Assistant/, `expected a greeting for "${message}"`);
+  }
+});
+
+test('answerDeterministically: a question containing "help" as part of a real question is not swallowed by the greeting', () => {
+  const db = buildTestDb();
+  const reply = answerDeterministically(db, 'help me understand how risky is u_risky_test');
+  assert.doesNotMatch(reply, /SentinelPay AI Assistant/);
+  assert.match(reply, /Reputation risk score/);
+});
+
+test('answerDeterministically: explains what each decision tier means, grounded in decision.js\'s real thresholds', () => {
+  const db = buildTestDb();
+  const blockReply = answerDeterministically(db, 'what does block mean');
+  assert.match(blockReply, /above 80/);
+
+  const stepUpReply = answerDeterministically(db, 'what does step_up mean');
+  assert.match(stepUpReply, /between 40 and 80/);
+
+  const allowReply = answerDeterministically(db, 'why do transactions get allowed');
+  assert.match(allowReply, /below 40/);
+});
+
+test('answerDeterministically: explains a named fraud signal using the real fraudSignatures.js catalog', () => {
+  const db = buildTestDb();
+  const reply = answerDeterministically(db, 'what is impossible travel');
+  assert.match(reply, /impossible_travel/);
+  assert.match(reply, /physically impossible travel speed/);
+});
+
+test('answerDeterministically: a fraud-signal explanation reports its live occurrence count, not a fabricated one', () => {
+  const db = buildTestDb();
+  insertTx(db, { id: 't_mule1', sender: 'a', receiver: 'b', amount: 500, decision: 'block', score: 95, msAgo: 1000 });
+  db.prepare(
+    `INSERT INTO flags (flag_id, transaction_id, flag_type, reason, weight, severity, created_at)
+     VALUES ('fl_mule1', 't_mule1', 'mule_receiver_risk', 'receive-then-drain pattern', 60, 'Critical', ?)`
+  ).run(new Date().toISOString());
+  const reply = answerDeterministically(db, 'what is a mule account');
+  assert.match(reply, /fired 1 time\(s\)/);
+});
+
+test('answerDeterministically: explains how fraud scoring works, grounded in the real average score', () => {
+  const db = buildTestDb();
+  insertTx(db, { id: 't1', sender: 'a', receiver: 'b', amount: 100, decision: 'block', score: 80, msAgo: 1000 });
+  const reply = answerDeterministically(db, 'how does fraud scoring work');
+  assert.match(reply, /0-100 fraud score/);
+  assert.match(reply, /80\.0\/100/);
+});
+
+test('answerDeterministically: gives a recent-activity pulse reusing generateFraudInsights', () => {
+  const db = buildTestDb();
+  const reply = answerDeterministically(db, "what's happening today");
+  assert.match(reply, /No significant change|rose|fell/);
+});
+
+test('answerDeterministically: gives dispute/next-step guidance for a "why was I blocked" question', () => {
+  const db = buildTestDb();
+  const reply = answerDeterministically(db, 'why was my transaction blocked, what should I do');
+  assert.match(reply, /investigation case/i);
+});
+
+test('answerDeterministically: looks up an account\'s composite reputation risk score', () => {
+  const db = buildTestDb();
+  const reply = answerDeterministically(db, 'how risky is u_brand_new_account');
+  assert.match(reply, /Reputation risk score for u_brand_new_account/);
+  assert.match(reply, /50\/100/); // neutral prior, no history yet
+});
+
+test('answerDeterministically: asking for a risk score with no account id asks for one instead of guessing', () => {
+  const db = buildTestDb();
+  const reply = answerDeterministically(db, 'how risky is this');
+  assert.match(reply, /mention the account id/i);
+});
+
+test('answerDeterministically: falls back to a categorized help message for an unrecognized question', () => {
   const db = buildTestDb();
   const reply = answerDeterministically(db, 'what is the meaning of life');
-  assert.match(reply, /I can answer/);
+  assert.match(reply, /didn't quite catch that/i);
 });
 
 test('llmConfigured: false with no ANTHROPIC_API_KEY set', () => {

@@ -20,8 +20,10 @@ let graphNodes = [];
 let graphEdges = [];
 let graphAnimationHandle = null;
 let draggingNode = null;
+let isTreeMode = false;
 
 function graphColorForNode(node) {
+  if (node.type === 'blocked') return '#ec4899';
   if (node.type === 'root') return ROOT_COLOR;
   if (node.cluster_id) {
     // Deterministic color from the cluster id's own characters, so the same cluster always
@@ -91,33 +93,62 @@ function drawGraph() {
   const height = graphCanvas.height;
   graphCtx.clearRect(0, 0, width, height);
 
-  graphCtx.strokeStyle = 'rgba(137,135,129,0.35)';
-  graphCtx.lineWidth = 1;
+  if (isTreeMode) {
+    graphCtx.shadowBlur = 10;
+    graphCtx.shadowColor = 'rgba(236,72,153,0.4)';
+    graphCtx.strokeStyle = 'rgba(236,72,153,0.85)';
+    graphCtx.lineWidth = 2.5;
+  } else {
+    graphCtx.shadowBlur = 0;
+    graphCtx.strokeStyle = 'rgba(137,135,129,0.35)';
+    graphCtx.lineWidth = 1;
+  }
+
   for (const edge of graphEdges) {
     if (!edge.sourceNode || !edge.targetNode) continue;
     graphCtx.beginPath();
     graphCtx.moveTo(edge.sourceNode.x, edge.sourceNode.y);
-    graphCtx.lineTo(edge.targetNode.x, edge.targetNode.y);
+    if (isTreeMode) {
+      const cy = (edge.sourceNode.y + edge.targetNode.y) / 2;
+      graphCtx.bezierCurveTo(edge.sourceNode.x, cy, edge.targetNode.x, cy, edge.targetNode.x, edge.targetNode.y);
+    } else {
+      graphCtx.lineTo(edge.targetNode.x, edge.targetNode.y);
+    }
     graphCtx.stroke();
   }
 
+  graphCtx.shadowBlur = isTreeMode ? 12 : 0;
+
   for (const node of graphNodes) {
-    const radius = node.type === 'root' ? 10 : 5 + Math.min(node.degree || 0, 10);
+    const radius = node.type === 'root' ? (isTreeMode ? 14 : 10) : 5 + Math.min(node.degree || (isTreeMode ? 3 : 0), 10);
     graphCtx.beginPath();
     graphCtx.arc(node.x, node.y, radius, 0, Math.PI * 2);
     graphCtx.fillStyle = graphColorForNode(node);
+    
+    if (isTreeMode && node.type === 'blocked') {
+      graphCtx.shadowColor = 'rgba(236,72,153,0.8)';
+    } else {
+      graphCtx.shadowColor = 'transparent';
+    }
+    
     graphCtx.fill();
     graphCtx.strokeStyle = '#ffffff';
-    graphCtx.lineWidth = 1.5;
+    graphCtx.lineWidth = isTreeMode ? 2 : 1.5;
     graphCtx.stroke();
 
+    graphCtx.shadowBlur = 0;
     graphCtx.fillStyle = '#3a3a38';
-    graphCtx.font = '11px "IBM Plex Sans", sans-serif';
-    graphCtx.fillText(node.id.length > 18 ? `${node.id.slice(0, 16)}…` : node.id, node.x + radius + 3, node.y + 4);
+    graphCtx.font = (isTreeMode && node.type === 'root') ? 'bold 12px "IBM Plex Sans", sans-serif' : '11px "IBM Plex Sans", sans-serif';
+    graphCtx.fillText(node.id.length > 18 ? `${node.id.slice(0, 16)}…` : node.id, node.x + radius + 4, node.y + 4);
   }
 }
 
 function runLayoutAnimation() {
+  if (isTreeMode) {
+    if (graphAnimationHandle) cancelAnimationFrame(graphAnimationHandle);
+    drawGraph();
+    return;
+  }
   let iteration = 0;
   function tick() {
     if (iteration >= GRAPH_MAX_ITERATIONS) {
@@ -141,6 +172,80 @@ function seedRandomPositions() {
     node.y = height / 2 + (Math.random() - 0.5) * height * 0.6;
     node.vx = 0;
     node.vy = 0;
+  }
+}
+
+function layoutTreeNodes() {
+  const width = graphCanvas.width || 800;
+  const height = graphCanvas.height || 480;
+  
+  const roots = graphNodes.filter(n => n.level === 0);
+  if (roots.length === 0) return;
+
+  const childrenMap = new Map();
+  let maxLevel = 0;
+  for (const n of graphNodes) {
+    childrenMap.set(n.id, []);
+    if ((n.level || 0) > maxLevel) maxLevel = n.level || 0;
+  }
+  
+  for (const e of graphEdges) {
+    if (!e.sourceNode || !e.targetNode) continue;
+    if (e.targetNode.level === e.sourceNode.level + 1) {
+      childrenMap.get(e.sourceNode.id).push(e.targetNode);
+    } else if (e.sourceNode.level === e.targetNode.level + 1) {
+      childrenMap.get(e.targetNode.id).push(e.sourceNode);
+    }
+  }
+
+  // Calculate leaves per subtree to allocate proportional width
+  const subtreeLeaves = new Map();
+  function countLeaves(node) {
+    const children = childrenMap.get(node.id);
+    if (!children || children.length === 0) {
+      subtreeLeaves.set(node.id, 1);
+      return 1;
+    }
+    let leaves = 0;
+    for (const c of children) {
+      leaves += countLeaves(c);
+    }
+    subtreeLeaves.set(node.id, leaves);
+    return leaves;
+  }
+  
+  roots.forEach(countLeaves);
+  const totalLeaves = roots.reduce((sum, r) => sum + subtreeLeaves.get(r.id), 0);
+  
+  // Dynamically scale spacing so it always fits horizontally and vertically
+  const H_SPACING = (width - 60) / Math.max(1, totalLeaves);
+  const actualHSpacing = Math.min(140, H_SPACING); 
+  
+  const V_SPACING = (height - 100) / Math.max(1, maxLevel);
+  const actualVSpacing = Math.min(110, V_SPACING);
+  
+  function positionNode(node, xStart, y) {
+    const leaves = subtreeLeaves.get(node.id);
+    node.x = xStart + (leaves * actualHSpacing) / 2;
+    node.y = y;
+    node.vx = 0;
+    node.vy = 0;
+    
+    let currentX = xStart;
+    const children = childrenMap.get(node.id);
+    if (children) {
+      for (const c of children) {
+        positionNode(c, currentX, y + actualVSpacing);
+        currentX += subtreeLeaves.get(c.id) * actualHSpacing;
+      }
+    }
+  }
+  
+  const totalUsedWidth = totalLeaves * actualHSpacing;
+  let currentX = (width - totalUsedWidth) / 2; // Center in canvas
+  for (const r of roots) {
+    positionNode(r, currentX, 50);
+    currentX += subtreeLeaves.get(r.id) * actualHSpacing;
   }
 }
 
@@ -171,6 +276,7 @@ async function loadGraphForAccount(accountId) {
     }));
 
     seedRandomPositions();
+    isTreeMode = false;
     runLayoutAnimation();
 
     if (status) {
@@ -179,6 +285,44 @@ async function loadGraphForAccount(accountId) {
   } catch (err) {
     console.error('Failed to load graph relationships:', err);
     if (status) status.textContent = 'Failed to load graph.';
+  }
+}
+
+async function loadBlockedTreeForAccount(accountId) {
+  const status = document.getElementById('graph-status');
+  if (!accountId) return;
+  if (status) status.textContent = `Loading blocked payments tree for ${accountId}…`;
+
+  try {
+    const res = await authFetch(`/graph/blocked-tree?account_id=${encodeURIComponent(accountId)}`);
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      if (status) status.textContent = (body && body.error) || 'Failed to load blocked tree.';
+      return;
+    }
+    const data = await res.json();
+    const nodeById = new Map();
+    graphNodes = (data.nodes || []).map((n) => {
+      const node = { ...n, x: 0, y: 0, vx: 0, vy: 0 };
+      nodeById.set(n.id, node);
+      return node;
+    });
+    graphEdges = (data.edges || []).map((e) => ({
+      ...e,
+      sourceNode: nodeById.get(e.source),
+      targetNode: nodeById.get(e.target),
+    }));
+
+    isTreeMode = true;
+    layoutTreeNodes();
+    drawGraph();
+
+    if (status) {
+      status.textContent = `${graphNodes.length} node(s), ${graphEdges.length} blocked payment(s) found.`;
+    }
+  } catch (err) {
+    console.error('Failed to load blocked tree:', err);
+    if (status) status.textContent = 'Failed to load blocked tree.';
   }
 }
 
@@ -269,6 +413,13 @@ function initGraph() {
     form.addEventListener('submit', (event) => {
       event.preventDefault();
       loadGraphForAccount(input.value.trim());
+    });
+  }
+  
+  const blockedTreeBtn = document.getElementById('graph-blocked-tree-btn');
+  if (blockedTreeBtn && input) {
+    blockedTreeBtn.addEventListener('click', () => {
+      loadBlockedTreeForAccount(input.value.trim());
     });
   }
   const depthSelect = document.getElementById('graph-depth-select');

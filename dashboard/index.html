@@ -30,20 +30,10 @@
     src files it references, same as leaflet.css above — an accepted, existing limit of CSS SRI
     in this project, not a lesser standard applied only here.)
   -->
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-sans@5.2.8/400.css"
-    integrity="sha384-by8hCwJDxTOUHMGBI4elNkybAoX7Gs45s1pbgL9fdUTDy+tXTA+tZmiU+0LkwckA" crossorigin="anonymous" />
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-sans@5.2.8/500.css"
-    integrity="sha384-2TCRc0WTBOLzME2XrGv+j2jHDAvpfo6jNj9NfT75iyaGpL8kJUYF1q8ae+3teExy" crossorigin="anonymous" />
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-sans@5.2.8/600.css"
-    integrity="sha384-1dcQop1Fsaw4/4DmZbwqeTSgod1K+Zkz3QWtbAUGxmw7ECfIGKOHUIRKcGtpdNHx" crossorigin="anonymous" />
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-sans@5.2.8/700.css"
-    integrity="sha384-qPJdsfDFSUEm7zpIrLO34iZfoIUmSMPLEClNtQBTc49fnzIaDEqKu2ROCMfm32uY" crossorigin="anonymous" />
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-mono@5.2.7/400.css"
-    integrity="sha384-skmNCjNGr3vAP9enjEtv/Ifs9QVeKfEF6q4rnDaS7YqtsgrCVRjcB7LPcLnQyL9p" crossorigin="anonymous" />
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-mono@5.2.7/500.css"
-    integrity="sha384-Kc76rmz8/sN1crakstIAL9hO3G6GlkS7LXZxYz6aM3HgNHNuukjqpQ0xmqtD2X1B" crossorigin="anonymous" />
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-mono@5.2.7/600.css"
-    integrity="sha384-SIw131utm+gqysd9KvooKPhG3B7zIh37znv502JB25XRD2RkN1ePnr2F0BQopSMW" crossorigin="anonymous" />
+  <!-- Gen Z Modern Typography -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
   <!--
     style.css loads after leaflet.css and the font stylesheets (not before, as previously with
     leaflet) so its Leaflet chrome overrides (.leaflet-control-zoom, .leaflet-popup-content-
@@ -164,6 +154,7 @@
               <th>Score</th>
               <th>Decision</th>
               <th>Reasons</th>
+              <th>AI</th>
             </tr>
           </thead>
           <tbody id="tx-table-body"></tbody>
@@ -230,6 +221,7 @@
               <th>Score</th>
               <th>Decision</th>
               <th>Reasons</th>
+              <th>AI</th>
             </tr>
           </thead>
           <tbody id="audit-table-body"></tbody>
@@ -341,17 +333,11 @@
       <ul class="ai-insights-list" id="ai-insights-list">
         <li class="empty-state">Loading…</li>
       </ul>
-    </section>
-
-    <section class="panel panel-ai-chat">
-      <div class="panel-header"><h2>AI Assistant</h2></div>
-      <div class="ai-chat-log" id="ai-chat-log">
-        <p class="empty-state">Ask about a transaction (mention its ID), a summary, or the riskiest accounts.</p>
-      </div>
-      <form class="ai-chat-form" id="ai-chat-form">
-        <input type="text" id="ai-chat-input" placeholder="e.g. give me a summary" maxlength="500" />
-        <button type="submit">Ask</button>
-      </form>
+      <p class="ai-insights-cta">
+        Have a question about this data? Ask the
+        <button type="button" class="ai-insights-open-assistant" id="ai-insights-open-assistant">AI Assistant</button>
+        — it's available from every tab (bottom-right).
+      </p>
     </section>
   </main>
 
@@ -366,6 +352,7 @@
             <option value="2">Depth 2</option>
           </select>
           <button type="submit">Explore</button>
+          <button type="button" id="graph-blocked-tree-btn" class="btn-block-tree">Show Blocked Tree</button>
         </form>
       </div>
       <p class="graph-hint">Double-click a node to re-center the graph on it. Drag nodes to rearrange. Colors mark discovered risky clusters.</p>
@@ -387,7 +374,68 @@
   </main>
 
   <!--
-    defer (not a plain script tag) on all three: deferred scripts execute in strict document
+    Global AI Assistant widget: deliberately OUTSIDE every .view <main> above (siblings, not
+    nested inside any of them) so it persists across tab switches instead of being torn down and
+    re-initialized every time the user changes view — previously this whole feature lived buried
+    inside the Analytics tab's panel grid, invisible from every other tab. Fixed-position, so its
+    place in the DOM doesn't affect layout of the view underneath it.
+  -->
+  <div class="ai-widget" id="ai-widget">
+    <button class="ai-widget-fab" id="ai-widget-fab" type="button" aria-expanded="false" aria-controls="ai-widget-panel" title="Ask the SentinelPay AI Assistant">
+      <span class="ai-widget-fab-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M12 3c-4.97 0-9 3.58-9 8 0 2.39 1.15 4.53 3 6.02V21l3.2-1.83c.9.21 1.84.33 2.8.33 4.97 0 9-3.58 9-8s-4.03-8-9-8Z" fill="currentColor" opacity="0.16" />
+          <path d="M12 3c-4.97 0-9 3.58-9 8 0 2.39 1.15 4.53 3 6.02V21l3.2-1.83c.9.21 1.84.33 2.8.33 4.97 0 9-3.58 9-8s-4.03-8-9-8Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" />
+          <circle cx="8.5" cy="11" r="1.15" fill="currentColor" />
+          <circle cx="12" cy="11" r="1.15" fill="currentColor" />
+          <circle cx="15.5" cy="11" r="1.15" fill="currentColor" />
+        </svg>
+      </span>
+      <span class="ai-widget-fab-badge hidden" id="ai-widget-fab-badge">1</span>
+    </button>
+
+    <section class="ai-widget-panel hidden" id="ai-widget-panel" aria-label="AI Assistant">
+      <header class="ai-widget-header">
+        <div class="ai-widget-header-title-area">
+          <div class="ai-status-orb" id="ai-widget-status" title="AI Status: Idle"></div>
+          <div class="ai-widget-header-text">
+            <h2>SentinelPay AI Assistant</h2>
+            <p>Ask about transactions, risk, or how scoring works</p>
+          </div>
+        </div>
+        <div class="ai-widget-header-actions">
+          <button class="ai-header-btn" id="ai-widget-sound" type="button" title="Mute/Unmute sound effects">🔊</button>
+          <button class="ai-header-btn" id="ai-widget-clear" type="button" title="Clear chat history">🗑️</button>
+          <button class="ai-header-btn ai-widget-close" id="ai-widget-close" type="button" aria-label="Close AI Assistant">✕</button>
+        </div>
+      </header>
+
+      <div class="ai-widget-log" id="ai-widget-log">
+        <div class="ai-msg ai-msg-assistant">
+          <span class="ai-avatar" aria-hidden="true">✦</span>
+          <div class="ai-bubble">
+            Hi, I'm your fraud-ops assistant. Ask me about a transaction, an account's risk score, what a
+            decision means, or how scoring works — try one of these:
+          </div>
+        </div>
+      </div>
+
+      <div class="ai-widget-suggestions" id="ai-widget-suggestions">
+        <button type="button" class="ai-suggestion-chip">Give me a summary</button>
+        <button type="button" class="ai-suggestion-chip">What's happening today?</button>
+        <button type="button" class="ai-suggestion-chip">What does step_up mean?</button>
+        <button type="button" class="ai-suggestion-chip">Who are the riskiest accounts?</button>
+      </div>
+
+      <form class="ai-widget-form" id="ai-widget-form">
+        <input type="text" id="ai-widget-input" placeholder="Ask a question…" maxlength="1000" autocomplete="off" />
+        <button type="submit" id="ai-widget-send" aria-label="Send">➤</button>
+      </form>
+    </section>
+  </div>
+
+  <!--
+    defer (not a plain script tag) on all: deferred scripts execute in strict document
     order after parsing finishes, so this guarantees chart.js/leaflet.js (declared earlier, in
     <head>, also deferred) have already run and defined window.Chart/window.L by the time
     app.js/map.js check for them. A plain (non-deferred) script here would execute immediately
@@ -400,5 +448,6 @@
   <script src="audit.js" defer></script>
   <script src="analytics.js" defer></script>
   <script src="graph.js" defer></script>
+  <script src="aiAssistant.js" defer></script>
 </body>
 </html>
