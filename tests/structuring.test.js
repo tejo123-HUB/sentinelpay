@@ -513,3 +513,38 @@ test('backgroundJob.runScanCycle: a circular-flow alert does NOT auto-blacklist 
   );
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM fraud_lists WHERE account_id = 'm_circular_no_blacklist'").get().n, 0);
 });
+
+test('alertLookup.findActiveAlert: an ordinary customer paying a business with an active circular-flow alert is NOT treated as an active-alert hit (regression)', () => {
+  // Found live via demo seed data: circular-flow alerts record the business's own account as
+  // sender_id (the detection origin -- see backgroundJob.js), but findActiveAlert previously
+  // treated "receiver_id matches some alert's stored sender_id" as proof of an active bad actor
+  // regardless of alert type. Once a business had ever been the origin of a circular-flow alert,
+  // every ordinary customer paying that business for the next 24h hit this same false match and
+  // force-blocked at STRUCTURING_ALERT_FLOOR -- reproduced against real seeded data where every
+  // demo store ended up with its own circular-flow alert and every subsequent purchase blocked.
+  const db = buildTestDb();
+  const nowMs = BASE_TIME;
+  db.prepare('INSERT INTO business_accounts (account_id, created_at) VALUES (?, ?)').run('m_circular_alertlookup', iso(-3600000));
+
+  for (const userId of ['m_circular_alertlookup', 'circ_p', 'circ_q']) insertUser(db, userId, iso(-3600000));
+  insertTransaction(db, { sender_id: 'm_circular_alertlookup', receiver_id: 'circ_p', amount: 5000, timestamp: iso(-3000), transaction_type: 'transfer' });
+  insertTransaction(db, { sender_id: 'circ_p', receiver_id: 'circ_q', amount: 4800, timestamp: iso(-2000), transaction_type: 'transfer' });
+  insertTransaction(db, { sender_id: 'circ_q', receiver_id: 'm_circular_alertlookup', amount: 4600, timestamp: iso(-1000), transaction_type: 'transfer' });
+
+  const created = runScanCycle(db, nowMs);
+  assert.ok(created.some((a) => a.reason.startsWith('Circular transaction pattern detected.')), 'expected a circular-flow alert to be created');
+
+  // A brand-new customer who has never touched this alert, paying the business.
+  const ordinaryPurchase = findActiveAlert(db, 'u_brand_new_customer', 'm_circular_alertlookup', nowMs);
+  assert.equal(ordinaryPurchase.active, false, 'an ordinary customer paying a business must not be blocked just because that business was once a circular-flow origin');
+
+  // The business making another ordinary outbound payment (e.g. a refund) must also not be
+  // treated as "the sender of an active alert" just because it's the circular-flow origin.
+  const ordinaryOutbound = findActiveAlert(db, 'm_circular_alertlookup', 'u_another_customer', nowMs);
+  assert.equal(ordinaryOutbound.active, false);
+
+  // The actual suspicious intermediate accounts (the cycle's real participants, in receiver_ids)
+  // must still be caught -- this fix must not blind the lookup to genuine circular-flow suspects.
+  const realSuspect = findActiveAlert(db, 'circ_p', 'someone_else', nowMs);
+  assert.equal(realSuspect.active, true);
+});

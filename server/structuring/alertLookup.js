@@ -10,15 +10,32 @@ const ALERT_ACTIVE_WINDOW_MS = 24 * 60 * 60 * 1000; // how long an alert stays "
  * @param {number} nowMs
  * @returns {{ active: boolean, alert: object|null }}
  */
+// Circular-flow alerts (Feature 6) record the business's own account as sender_id -- that's the
+// detection *origin*, not a suspected bad actor (see backgroundJob.js's circular-flow comment:
+// "Origins are the business's own registered accounts"). Treating that ID as "an active alert
+// participant" the same way a genuine structuring perpetrator's sender_id is treated would
+// force-block every ordinary transaction touching the business's own account for the next 24h,
+// the instant its own money legitimately cycles through a vendor/refund relationship -- found live
+// via demo seed data, where every seeded store ended up with an active circular-flow alert naming
+// itself as sender_id, and every subsequent customer purchase to any of them force-blocked at the
+// STRUCTURING_ALERT_FLOOR. The intermediate accounts in receiver_ids are the actual suspects for a
+// circular-flow alert; that check below still applies to these alerts unchanged.
+function isCircularFlowAlert(alert) {
+  return alert.reason.startsWith('Circular transaction pattern detected.');
+}
+
 function findActiveAlert(db, senderId, receiverId, nowMs) {
   const activeSinceIso = new Date(nowMs - ALERT_ACTIVE_WINDOW_MS).toISOString();
 
-  // Indexed lookup: does this account appear as the sender of an active alert?
-  const bySender = db
+  // Indexed lookup: does this account appear as the sender of an active (non-circular-flow)
+  // alert? Fetches a small bounded set, not just the single most recent row, so a circular-flow
+  // alert sharing this sender_id doesn't hide a genuine, older structuring alert for the same ID.
+  const bySenderCandidates = db
     .prepare(
-      'SELECT * FROM structuring_alerts WHERE sender_id = ? AND created_at >= ? ORDER BY created_at DESC LIMIT 1'
+      'SELECT * FROM structuring_alerts WHERE sender_id = ? AND created_at >= ? ORDER BY created_at DESC LIMIT 5'
     )
-    .get(senderId, activeSinceIso);
+    .all(senderId, activeSinceIso);
+  const bySender = bySenderCandidates.find((alert) => !isCircularFlowAlert(alert));
   if (bySender) {
     return { active: true, alert: bySender };
   }
@@ -31,7 +48,7 @@ function findActiveAlert(db, senderId, receiverId, nowMs) {
     .all(activeSinceIso);
 
   for (const alert of recentAlerts) {
-    if (alert.sender_id === receiverId) {
+    if (!isCircularFlowAlert(alert) && alert.sender_id === receiverId) {
       return { active: true, alert };
     }
     let receiverIds = [];
