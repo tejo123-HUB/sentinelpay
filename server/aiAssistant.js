@@ -288,6 +288,11 @@ function answerDeterministically(db, message) {
     return `So far: ${summary.total} transaction(s) processed, ${summary.blocked} blocked, ${summary.step_up} step-up challenged.`;
   }
 
+  // Code-review follow-up: deliberately a single fixed dimension (sender_id), not the
+  // dimension-aware logic GET /analytics/top-risky uses (customers/merchants/vendors/devices/etc.,
+  // keyed by sender_id OR receiver_id depending on dimension) -- a quick, good-enough answer for a
+  // chat question, not meant to be equivalent to that endpoint. A caller who needs a specific
+  // dimension should use GET /analytics/top-risky directly.
   if (/\btop risk|riskiest|most risky\b/.test(text)) {
     const rows = db
       .prepare(
@@ -295,7 +300,7 @@ function answerDeterministically(db, message) {
       )
       .all();
     if (rows.length === 0) return 'No flagged activity on record yet.';
-    return `Top flagged accounts: ${rows.map((r) => `${r.id} (${r.n} flag(s))`).join(', ')}.`;
+    return `Top flagged accounts (by sender): ${rows.map((r) => `${r.id} (${r.n} flag(s))`).join(', ')}. For a specific dimension (merchants/vendors/devices/etc.), use the Analytics tab's Top Risky panel.`;
   }
 
   return "I can answer questions about a specific transaction (mention its transaction_id), give an overall summary, or list the riskiest accounts. Try: \"give me a summary\" or \"what are the top risky accounts\".";

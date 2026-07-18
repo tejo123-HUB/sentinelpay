@@ -8,10 +8,16 @@ process.env.DB_PATH = ':memory:';
 process.env.PORT = '0';
 process.env.API_KEY = 'test-key-for-automated-tests';
 
+// Clears the whole server/ subtree, not just index.js/rateLimit.js -- tests below set
+// API_KEY_VIEWER, and every route file captures requireApiKey/requireRole from
+// middleware/apiKeyAuth.js at its own module-load time (see tests/caseEvidence.test.js /
+// tests/rbac.test.js for the same reasoning), so a narrower cache clear would leave routes
+// enforcing a stale role set.
 function freshServer() {
-  delete require.cache[require.resolve('../server/index')];
-  delete require.cache[require.resolve('../server/middleware/rateLimit')];
-  delete require.cache[require.resolve('../server/websocket')];
+  const serverDir = require('node:path').join(__dirname, '..', 'server');
+  for (const resolvedPath of Object.keys(require.cache)) {
+    if (resolvedPath.startsWith(serverDir)) delete require.cache[resolvedPath];
+  }
   const { app, server } = require('../server/index');
   return new Promise((resolve) => {
     if (server.listening) return resolve({ app, server });
@@ -19,11 +25,11 @@ function freshServer() {
   });
 }
 
-function request(server, method, path, body) {
+function request(server, method, path, body, headerOverrides = {}) {
   return new Promise((resolve, reject) => {
     const port = server.address().port;
     const data = body ? JSON.stringify(body) : null;
-    const headers = { 'Content-Type': 'application/json', 'X-API-Key': process.env.API_KEY };
+    const headers = { 'Content-Type': 'application/json', 'X-API-Key': process.env.API_KEY, ...headerOverrides };
     // Node's http.request doesn't always auto-set Content-Length for DELETE bodies the way it
     // does for POST/PATCH -- explicit here so body-parser's typeis.hasBody check (which requires
     // either transfer-encoding or a non-zero content-length) sees the body on every method.
@@ -107,6 +113,78 @@ test('POST /notifications/push-subscriptions: rejects a missing keys object', as
   try {
     const res = await request(server, 'POST', '/notifications/push-subscriptions', { endpoint: 'https://push.example.com/x' });
     assert.equal(res.status, 400);
+  } finally {
+    server.close();
+  }
+});
+
+// Code-review follow-up: a viewer-role key (explicitly scoped elsewhere in this app to "watch the
+// dashboard but not inject transactions") must not be able to register a subscription -- a
+// registered endpoint causes this server to make a real outbound authenticated request to it on
+// every future Critical alert, a privilege-boundary violation a read-only key shouldn't get.
+test('POST /notifications/push-subscriptions: requires the analyst role, not just any valid key', async () => {
+  process.env.API_KEY_VIEWER = 'test-viewer-key-push';
+  const { server } = await freshServer();
+  try {
+    const res = await request(
+      server,
+      'POST',
+      '/notifications/push-subscriptions',
+      { endpoint: 'https://push.example.com/viewer-attempt', keys: { p256dh: 'x', auth: 'y' } },
+      { 'X-API-Key': 'test-viewer-key-push' }
+    );
+    assert.equal(res.status, 403);
+  } finally {
+    delete process.env.API_KEY_VIEWER;
+    server.close();
+  }
+});
+
+test('DELETE /notifications/push-subscriptions: also requires the analyst role', async () => {
+  process.env.API_KEY_VIEWER = 'test-viewer-key-push-del';
+  const { server } = await freshServer();
+  try {
+    const res = await request(
+      server,
+      'DELETE',
+      '/notifications/push-subscriptions',
+      { endpoint: 'https://push.example.com/whatever' },
+      { 'X-API-Key': 'test-viewer-key-push-del' }
+    );
+    assert.equal(res.status, 403);
+  } finally {
+    delete process.env.API_KEY_VIEWER;
+    server.close();
+  }
+});
+
+// Code-review follow-up: bounds how many endpoints an authorized caller can register, so one
+// Critical alert can never fan out into an unbounded number of outbound requests.
+test('POST /notifications/push-subscriptions: rejects a new subscription once MAX_SUBSCRIPTIONS is reached, but still allows updating an existing one', async () => {
+  const { PUSH_SUBSCRIPTIONS } = require('../server/config');
+  const { server } = await freshServer();
+  try {
+    for (let i = 0; i < PUSH_SUBSCRIPTIONS.MAX_SUBSCRIPTIONS; i++) {
+      const res = await request(server, 'POST', '/notifications/push-subscriptions', {
+        endpoint: `https://push.example.com/cap-test/${i}`,
+        keys: { p256dh: 'x', auth: 'y' },
+      });
+      assert.equal(res.status, 201, `subscription ${i} should have been accepted`);
+    }
+
+    const overCap = await request(server, 'POST', '/notifications/push-subscriptions', {
+      endpoint: 'https://push.example.com/cap-test/over-limit',
+      keys: { p256dh: 'x', auth: 'y' },
+    });
+    assert.equal(overCap.status, 429);
+
+    // Updating an already-registered endpoint's keys must still work at the cap -- the cap
+    // bounds distinct endpoints, not re-subscriptions of an existing one.
+    const updateExisting = await request(server, 'POST', '/notifications/push-subscriptions', {
+      endpoint: 'https://push.example.com/cap-test/0',
+      keys: { p256dh: 'new-key', auth: 'new-auth' },
+    });
+    assert.equal(updateExisting.status, 201);
   } finally {
     server.close();
   }

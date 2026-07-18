@@ -59,7 +59,12 @@ app.use(securityHeaders);
 // completely unthrottled, undercutting the point of adding rate limiting at all. /health is
 // exempt internally (see rateLimit.js) so liveness checks stay cheap and unaffected.
 app.use(rateLimit);
-app.use(express.json());
+// Code-review follow-up (Partial-Feature Completion Pass): raised from Express's 100kb default so
+// server/routes/caseEvidence.js's base64-in-JSON evidence uploads (server/config.js's
+// CASE_EVIDENCE.MAX_SIZE_BYTES) actually fit -- 400,000 bytes of real content is ~533KB once
+// base64-encoded, which the 100kb default would reject outright. 1mb stays a modest, bounded
+// limit for every other route too (none of which accept anything close to that much body).
+app.use(express.json({ limit: '1mb' }));
 
 app.locals.db = db;
 

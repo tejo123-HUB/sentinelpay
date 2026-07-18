@@ -36,6 +36,16 @@ function applyRuleWeightMultipliers(db, ruleResults) {
  * drift up toward MAX_MULTIPLIER, consistently-wrong ones drift down toward MIN_MULTIPLIER), moved
  * toward gradually (LEARNING_RATE), not snapped, so one noisy scan can't swing a rule's effective
  * weight wildly.
+ *
+ * Known limitation (code-review follow-up): a feedback_labels row is a verdict on one
+ * *transaction*, not on one *flag* -- a transaction with several co-firing flag_types credits
+ * every one of them equally for that verdict, even if only one was the actual signal. A weak
+ * detector that frequently co-fires alongside a strong one can therefore have its precision (and
+ * so its multiplier) pulled up by flags it didn't itself earn. MIN_SAMPLE_SIZE, the
+ * [MIN_MULTIPLIER, MAX_MULTIPLIER] clamp, and LEARNING_RATE's damping all bound how far this can
+ * drift a single detector's effective weight -- an accepted trade-off for a real, working
+ * per-flag_type learning signal without needing per-flag (not per-transaction) analyst labels,
+ * which this app has no mechanism to collect.
  * @param {import('node:sqlite').DatabaseSync} db
  * @param {string} nowIso
  * @returns {Array<{flag_type: string, multiplier: number, sample_count: number}>} updated rows

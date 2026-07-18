@@ -3,6 +3,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
 const path = require('node:path');
+const { CASE_EVIDENCE } = require('../server/config');
 
 process.env.DB_PATH = ':memory:';
 process.env.PORT = '0';
@@ -93,12 +94,46 @@ test('POST /cases/:caseId/evidence: rejects content over the size limit', async 
   const { server } = await freshServer();
   try {
     const caseId = await createCase(server);
-    const bigContent = Buffer.alloc(60_000, 'a');
+    const bigContent = Buffer.alloc(CASE_EVIDENCE.MAX_SIZE_BYTES + 1, 'a');
     const res = await request(server, 'POST', `/cases/${caseId}/evidence`, {
       filename: 'too-big.bin',
       content_base64: bigContent.toString('base64'),
     });
     assert.equal(res.status, 413);
+  } finally {
+    server.close();
+  }
+});
+
+// Code-review follow-up: the on-disk path is always server-generated (server/caseEvidence.js's
+// evidenceFilePath uses evidence_id, never the caller-supplied filename) -- this test pins that
+// invariant down explicitly, the same "test the exact shape of a known-dangerous input" pattern
+// tests/api.test.js already applies to SQL/XSS-shaped input, so a future refactor that
+// accidentally reintroduced the raw filename into the disk path would fail loudly here rather
+// than silently opening a path-traversal hole.
+test('POST /cases/:caseId/evidence: a path-traversal-shaped filename never influences the on-disk path (regression)', async () => {
+  const { server } = await freshServer();
+  try {
+    const caseId = await createCase(server);
+    const content = Buffer.from('traversal probe content');
+    const uploadRes = await request(server, 'POST', `/cases/${caseId}/evidence`, {
+      filename: '../../../../etc/passwd',
+      content_base64: content.toString('base64'),
+    });
+    assert.equal(uploadRes.status, 201);
+    // The stored filename is preserved verbatim as display metadata (that's fine -- it's never
+    // used to build a filesystem path)...
+    assert.equal(uploadRes.body.filename, '../../../../etc/passwd');
+
+    // ...and the content is still readable back only via the server-generated evidence_id, proving
+    // the malicious filename was never used as (part of) the actual on-disk path.
+    const downloadRes = await request(server, 'GET', `/cases/${caseId}/evidence/${uploadRes.body.evidence_id}/content`);
+    assert.equal(downloadRes.status, 200);
+    assert.equal(downloadRes.raw.toString('utf-8'), content.toString('utf-8'));
+
+    const evidenceDir = path.join(__dirname, '..', 'data', 'evidence');
+    const onDiskPath = path.join(evidenceDir, uploadRes.body.evidence_id);
+    assert.ok(onDiskPath.startsWith(evidenceDir + path.sep), 'evidence file must stay inside the evidence directory');
   } finally {
     server.close();
   }

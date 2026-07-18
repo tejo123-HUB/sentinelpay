@@ -304,12 +304,22 @@ const ADAPTIVE_RULE_WEIGHTS = {
 
 // Partial-Feature Completion Pass: Fraud Investigation Module's evidence-attachment gap. Content
 // arrives base64-encoded inside a JSON body (no multipart-form dependency, consistent with this
-// project's dependency-light convention) -- bounded well under Express's default 100kb JSON body
-// limit (server/index.js's `express.json()` has no override) once base64's ~33% size overhead and
-// the surrounding JSON are accounted for.
+// project's dependency-light convention) -- bounded well under server/index.js's `express.json()`
+// limit (raised from Express's 100kb default to 1mb specifically to fit real evidence files here;
+// see that file's comment) once base64's ~33% size overhead and the surrounding JSON are
+// accounted for: 400,000 bytes * 4/3 ~= 533KB, comfortably under the 1mb body cap.
 const CASE_EVIDENCE = {
-  MAX_SIZE_BYTES: 50_000,
+  MAX_SIZE_BYTES: 400_000,
   MAX_FILENAME_LENGTH: 256,
+};
+
+// Code-review follow-up (Partial-Feature Completion Pass): bounds the number of stored Web Push
+// subscriptions, so a caller (even an authorized analyst+ one -- see the requireRole bump on
+// POST /notifications/push-subscriptions) can't register unbounded endpoints and turn every
+// future Critical alert into an unbounded outbound-request fan-out. High enough to cover a real
+// team's worth of subscribed browsers/devices, nowhere near what abuse would need.
+const PUSH_SUBSCRIPTIONS = {
+  MAX_SUBSCRIPTIONS: 200,
 };
 
 module.exports = {
@@ -336,4 +346,5 @@ module.exports = {
   AUTO_WHITELIST,
   ADAPTIVE_RULE_WEIGHTS,
   CASE_EVIDENCE,
+  PUSH_SUBSCRIPTIONS,
 };

@@ -28,6 +28,7 @@ router.post('/notifications/test', requireApiKey, requireRole('admin'), async (r
 
 const { vapidKeysConfigured } = require('../webPush');
 const { MAX_ID_LENGTH } = require('../validate');
+const { PUSH_SUBSCRIPTIONS } = require('../config');
 
 // GET /notifications/vapid-public-key -- the dashboard's subscribe flow (dashboard/app.js's
 // initPushNotifications) needs this to call pushManager.subscribe({applicationServerKey}). Public
@@ -45,7 +46,16 @@ router.get('/notifications/vapid-public-key', requireApiKey, (req, res) => {
 // browser's PushSubscription (from pushManager.subscribe()'s own toJSON() shape). Upsert on
 // endpoint (a browser re-subscribing after clearing storage gets the same endpoint back from most
 // push services, and should just replace the old keys rather than erroring).
-router.post('/notifications/push-subscriptions', requireApiKey, (req, res) => {
+//
+// Code-review follow-up (Partial-Feature Completion Pass): analyst-or-above, not just any valid
+// key. A registered subscription causes this server to make a real, VAPID-authenticated outbound
+// HTTPS request to whatever endpoint the caller supplies (only the https:// scheme is validated,
+// there's no allowlist of known push-service hosts) every time a Critical alert fires -- letting
+// the lowest-privilege `viewer` role (elsewhere in this app explicitly scoped to "watch the
+// dashboard but not inject transactions") trigger that is a real privilege-boundary violation, not
+// just a theoretical one. MAX_SUBSCRIPTIONS below bounds the other half of the same risk: even an
+// authorized caller can't turn one Critical alert into an unbounded outbound-request fan-out.
+router.post('/notifications/push-subscriptions', requireApiKey, requireRole('analyst'), (req, res) => {
   const db = req.app.locals.db;
   const { endpoint, keys } = req.body || {};
   if (typeof endpoint !== 'string' || endpoint.trim() === '' || endpoint.length > 1024) {
@@ -64,6 +74,14 @@ router.post('/notifications/push-subscriptions', requireApiKey, (req, res) => {
     return res.status(400).json({ error: 'keys.p256dh and keys.auth are required strings' });
   }
 
+  const existing = db.prepare('SELECT 1 FROM push_subscriptions WHERE endpoint = ?').get(endpoint);
+  if (!existing) {
+    const { n: currentCount } = db.prepare('SELECT COUNT(*) AS n FROM push_subscriptions').get();
+    if (currentCount >= PUSH_SUBSCRIPTIONS.MAX_SUBSCRIPTIONS) {
+      return res.status(429).json({ error: `This server already has the maximum of ${PUSH_SUBSCRIPTIONS.MAX_SUBSCRIPTIONS} push subscriptions registered` });
+    }
+  }
+
   db.prepare(
     `INSERT INTO push_subscriptions (endpoint, p256dh, auth, created_at) VALUES (?, ?, ?, ?)
      ON CONFLICT(endpoint) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth`
@@ -73,8 +91,11 @@ router.post('/notifications/push-subscriptions', requireApiKey, (req, res) => {
 });
 
 // DELETE /notifications/push-subscriptions { endpoint } -- unsubscribe, idempotent like every
-// other DELETE route in this app (business_accounts, fraud_lists).
-router.delete('/notifications/push-subscriptions', requireApiKey, (req, res) => {
+// other DELETE route in this app (business_accounts, fraud_lists). Same analyst-or-above floor as
+// the POST above -- symmetric privilege, not just symmetric shape: a lower-privilege key
+// unsubscribing *other* callers' endpoints would be its own denial-of-service on the notification
+// feature.
+router.delete('/notifications/push-subscriptions', requireApiKey, requireRole('analyst'), (req, res) => {
   const db = req.app.locals.db;
   const { endpoint } = req.body || {};
   if (typeof endpoint !== 'string' || endpoint.trim() === '') {
