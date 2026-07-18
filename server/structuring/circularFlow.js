@@ -18,7 +18,19 @@ function buildAdjacency(transactions) {
 // `origin` within maxHops intermediate accounts. The closing edge back to origin doesn't count
 // against maxHops -- so maxHops=3 permits up to "Merchant -> A -> B -> C -> Merchant" (3
 // intermediates, 4 edges total), matching the spec's three examples exactly.
-function findCycleFromOrigin(adjacency, origin, maxHops) {
+//
+// otherOriginIds excludes every OTHER business account from being used as an intermediate hop
+// (found live, seeding a multi-store demo): this system's "origins" are the operator's own
+// registered storefronts, which legitimately move money between each other and share a customer
+// base constantly -- a path that merely passes through another of the business's own stores
+// (Store A -> customer -> Store B -> customer -> Store A) is ordinary multi-store commerce, not
+// the layering-through-unrelated-accounts pattern this detector exists to catch. Real laundering
+// layering routes through accounts *outside* the business's own network. Without this exclusion,
+// any two stores sharing enough customers over a long enough window will eventually produce a
+// coincidental "cycle" purely by chance, and once found, both stores' entire future transaction
+// stream gets treated as involving an active alert (the receiver_ids-membership check in
+// alertLookup.js correctly still flags genuine non-business intermediate suspects).
+function findCycleFromOrigin(adjacency, origin, maxHops, otherOriginIds) {
   function dfs(current, path, visited, totalAmount, timestamps, hopCount) {
     const edges = adjacency.get(current) || [];
     for (const edge of edges) {
@@ -29,6 +41,7 @@ function findCycleFromOrigin(adjacency, origin, maxHops) {
           timestamps: [...timestamps, edge.timestamp],
         };
       }
+      if (otherOriginIds.has(edge.receiverId)) continue;
       const nextHopCount = hopCount + 1;
       if (nextHopCount <= maxHops && !visited.has(edge.receiverId)) {
         visited.add(edge.receiverId);
@@ -60,9 +73,15 @@ function findCycleFromOrigin(adjacency, origin, maxHops) {
 function detectCircularFlow(transactions, originIds) {
   const adjacency = buildAdjacency(transactions);
   const cycles = [];
+  const originIdSet = new Set(originIds);
 
   for (const originId of originIds) {
-    const cycle = findCycleFromOrigin(adjacency, originId, CIRCULAR_FLOW.MAX_CYCLE_HOPS);
+    // Every OTHER origin is excluded as an intermediate hop for this search, but the origin
+    // being searched from must stay reachable as the closing node -- that's what path.length >= 2
+    // in findCycleFromOrigin's `edge.receiverId === origin` check already guards, independent of
+    // this exclusion set.
+    const otherOriginIds = new Set([...originIdSet].filter((id) => id !== originId));
+    const cycle = findCycleFromOrigin(adjacency, originId, CIRCULAR_FLOW.MAX_CYCLE_HOPS, otherOriginIds);
     if (!cycle) continue;
 
     const timestampsMs = cycle.timestamps.map((t) => new Date(t).getTime());

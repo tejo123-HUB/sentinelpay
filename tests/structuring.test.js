@@ -466,6 +466,43 @@ test('detectCircularFlow: does not flag a cycle exceeding the configured max hop
   assert.equal(cycles.length, 0);
 });
 
+test('detectCircularFlow: does not flag a path that merely passes through another of the business\'s own registered accounts (regression)', () => {
+  // Found live seeding a multi-store demo: Store1 -> customer -> Store2 -> customer -> Store1 is
+  // two stores sharing a customer base -- ordinary multi-store commerce, not the
+  // layering-through-unrelated-accounts pattern this detector exists to catch. Without excluding
+  // other origins as intermediate hops, this was detected as a genuine circular-flow cycle, and
+  // both stores' entire future transaction stream got treated as involving an active alert.
+  const transactions = [
+    { sender_id: 'Store1', receiver_id: 'u_shared_customer_a', amount: 500, timestamp: iso(-5000) },
+    { sender_id: 'u_shared_customer_a', receiver_id: 'Store2', amount: 480, timestamp: iso(-3000) },
+    { sender_id: 'Store2', receiver_id: 'u_shared_customer_b', amount: 460, timestamp: iso(-2000) },
+    { sender_id: 'u_shared_customer_b', receiver_id: 'Store1', amount: 440, timestamp: iso(-1000) },
+  ];
+
+  const cycles = detectCircularFlow(transactions, ['Store1', 'Store2']);
+
+  assert.equal(cycles.length, 0);
+});
+
+test('detectCircularFlow: a genuine cycle through non-business accounts is still detected even when another business account is also active nearby', () => {
+  // The exclusion above must not blind the detector to real circular flow -- only OTHER origins
+  // are excluded as intermediate hops; ordinary non-business accounts (the real suspects) are
+  // still fully tracked.
+  const transactions = [
+    { sender_id: 'Store1', receiver_id: 'A', amount: 500, timestamp: iso(-5000) },
+    { sender_id: 'A', receiver_id: 'B', amount: 480, timestamp: iso(-3000) },
+    { sender_id: 'B', receiver_id: 'Store1', amount: 460, timestamp: iso(-1000) },
+    // Unrelated ordinary traffic to Store2 in the same window -- must not interfere.
+    { sender_id: 'u_other_customer', receiver_id: 'Store2', amount: 50, timestamp: iso(-2000) },
+  ];
+
+  const cycles = detectCircularFlow(transactions, ['Store1', 'Store2']);
+
+  assert.equal(cycles.length, 1);
+  assert.equal(cycles[0].originId, 'Store1');
+  assert.deepEqual(cycles[0].path, ['Store1', 'A', 'B', 'Store1']);
+});
+
 test('backgroundJob.runScanCycle: a circular-flow cycle is persisted as a structuring_alerts row and picked up by the fast lookup', () => {
   const db = buildTestDb();
   const nowMs = BASE_TIME;
