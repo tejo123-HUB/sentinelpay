@@ -405,11 +405,18 @@
 
     <section class="ai-widget-panel hidden" id="ai-widget-panel" aria-label="AI Assistant">
       <header class="ai-widget-header">
-        <div class="ai-widget-header-text">
-          <h2>SentinelPay AI Assistant</h2>
-          <p>Ask about transactions, risk, or how scoring works</p>
+        <div class="ai-widget-header-title-area">
+          <div class="ai-status-orb" id="ai-widget-status" title="AI Status: Idle"></div>
+          <div class="ai-widget-header-text">
+            <h2>SentinelPay AI Assistant</h2>
+            <p>Ask about transactions, risk, or how scoring works</p>
+          </div>
         </div>
-        <button class="ai-widget-close" id="ai-widget-close" type="button" aria-label="Close AI Assistant">✕</button>
+        <div class="ai-widget-header-actions">
+          <button class="ai-header-btn" id="ai-widget-sound" type="button" title="Mute/Unmute sound effects">🔊</button>
+          <button class="ai-header-btn" id="ai-widget-clear" type="button" title="Clear chat history">🗑️</button>
+          <button class="ai-header-btn ai-widget-close" id="ai-widget-close" type="button" aria-label="Close AI Assistant">✕</button>
+        </div>
       </header>
 
       <div class="ai-widget-log" id="ai-widget-log">
