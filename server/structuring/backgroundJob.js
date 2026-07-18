@@ -125,9 +125,18 @@ function runScanCycle(db, nowMs = Date.now()) {
         alert.reason,
         alert.created_at
       );
-      // FA198: a confirmed structuring/circular-flow pattern auto-blacklists its origin -- see
-      // autoFraudListing.js for why this is the real "Auto Blacklisting" trigger, not just the
-      // operator-driven POST /fraud-lists.
+    }
+
+    // FA198: a confirmed structuring pattern auto-blacklists its origin -- see autoFraudListing.js
+    // for why this is the real "Auto Blacklisting" trigger, not just the operator-driven
+    // POST /fraud-lists. Deliberately scoped to `newAlerts` only, NOT `circularFlowAlerts`: a
+    // circular-flow alert's sender_id is always one of the business's own registered accounts
+    // (detectCircularFlow's originIds come straight from business_accounts -- circular flow only
+    // matters relative to money that started at the business), never an attacker. Auto-blacklisting
+    // it would force-block every future transaction touching that merchant's own account (a
+    // blacklist hit floors the score regardless of direction), effectively bricking the business's
+    // own payment processing on a detection that was never about the business being the bad actor.
+    for (const alert of newAlerts) {
       autoBlacklistStructuringOrigin(db, alert);
     }
   }

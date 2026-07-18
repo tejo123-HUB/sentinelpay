@@ -48,6 +48,11 @@ CREATE TABLE IF NOT EXISTS transactions (
 
 CREATE INDEX IF NOT EXISTS idx_transactions_sender ON transactions(sender_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_transactions_receiver ON transactions(receiver_id, timestamp);
+-- Section 17 (Category 10, Device Reputation Engine): outboundContext.js's devicePriorFlagCount
+-- query filters on device_id on every outbound transaction (the synchronous scoring hot path) --
+-- same "new hot-path query needs a supporting index" reasoning as idx_transactions_sender/receiver
+-- above, and idx_flags_transaction/idx_structuring_alerts_created_at before that.
+CREATE INDEX IF NOT EXISTS idx_transactions_device ON transactions(device_id, timestamp);
 
 CREATE TABLE IF NOT EXISTS flags (
   flag_id TEXT PRIMARY KEY,

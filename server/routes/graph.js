@@ -18,19 +18,24 @@ const VALID_DEPTHS = [1, 2];
 // per-request cost without limit for a genuinely high-degree hub account.
 const GRAPH_MAX_NODES = 50;
 
+// Every query here carries an explicit LIMIT GRAPH_MAX_NODES: GRAPH_MAX_NODES exists precisely to
+// bound worst-case cost for a high-degree hub account or a widely-shared device/IP, and a query
+// with no LIMIT would materialize every matching row before the JS-side truncation below ever got
+// a chance to apply -- the exact "unbounded regardless of how connected an account's network is"
+// scenario this file's own header comment says it avoids.
 function fetchTransactionCounterparties(db, accountId) {
   const outgoing = db
     .prepare(
-      'SELECT receiver_id AS counterparty, COUNT(*) AS n, COALESCE(SUM(amount), 0) AS total FROM transactions WHERE sender_id = ? GROUP BY receiver_id'
+      'SELECT receiver_id AS counterparty, COUNT(*) AS n, COALESCE(SUM(amount), 0) AS total FROM transactions WHERE sender_id = ? GROUP BY receiver_id LIMIT ?'
     )
-    .all(accountId)
+    .all(accountId, GRAPH_MAX_NODES)
     .map((r) => ({ source: accountId, target: r.counterparty, count: r.n, total_amount: r.total }));
 
   const incoming = db
     .prepare(
-      'SELECT sender_id AS counterparty, COUNT(*) AS n, COALESCE(SUM(amount), 0) AS total FROM transactions WHERE receiver_id = ? GROUP BY sender_id'
+      'SELECT sender_id AS counterparty, COUNT(*) AS n, COALESCE(SUM(amount), 0) AS total FROM transactions WHERE receiver_id = ? GROUP BY sender_id LIMIT ?'
     )
-    .all(accountId)
+    .all(accountId, GRAPH_MAX_NODES)
     .map((r) => ({ source: r.counterparty, target: accountId, count: r.n, total_amount: r.total }));
 
   return [...outgoing, ...incoming];
@@ -53,8 +58,8 @@ function fetchSharedIdentifierLinks(db, accountId) {
   function findLinked(column, values, edgeType) {
     for (const value of values) {
       const rows = db
-        .prepare(`SELECT DISTINCT sender_id FROM transactions WHERE ${column} = ? AND sender_id != ?`)
-        .all(value, accountId);
+        .prepare(`SELECT DISTINCT sender_id FROM transactions WHERE ${column} = ? AND sender_id != ? LIMIT ?`)
+        .all(value, accountId, GRAPH_MAX_NODES);
       for (const r of rows) {
         links.push({ source: accountId, target: r.sender_id, type: edgeType, detail: value });
       }
@@ -93,13 +98,16 @@ router.get('/graph/relationships', requireApiKey, (req, res) => {
 
   // depth=2: one more transaction-only hop from each depth-1 node -- shared-identifier expansion
   // is deliberately not repeated at depth 2 (that would combinatorially chain unrelated accounts
-  // through a single popular device/IP), bounded by GRAPH_MAX_NODES regardless.
+  // through a single popular device/IP). Bounded two ways: the outer loop stops issuing new
+  // queries once the cap is already reached, and fetchTransactionCounterparties itself now caps
+  // each node's own contribution via SQL LIMIT -- an in-loop node/edge check here would be
+  // ineffective anyway, since one edge endpoint is always `node` itself, already a member of
+  // nodeIds, so a "neither endpoint already known" condition can never fire.
   if (depth === 2) {
     const depth1Nodes = [...nodeIds].filter((id) => id !== accountId);
     for (const node of depth1Nodes) {
       if (nodeIds.size >= GRAPH_MAX_NODES) break;
       for (const e of fetchTransactionCounterparties(db, node)) {
-        if (nodeIds.size >= GRAPH_MAX_NODES && !nodeIds.has(e.source) && !nodeIds.has(e.target)) continue;
         edges.push(e);
         nodeIds.add(e.source);
         nodeIds.add(e.target);
