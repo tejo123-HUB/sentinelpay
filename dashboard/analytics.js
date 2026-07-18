@@ -12,7 +12,7 @@ const ANALYTICS_CHART_COLORS = { allow: '#0ca30c', stepup: '#e0940a', block: '#d
 const ANALYTICS_HEATMAP_DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const ANALYTICS_HEATMAP_EXPORT_LIMIT = 2000; // bounds the client-side heatmap computation
 
-function analyticsLineDataset(label, color) {
+function analyticsLineDataset(label, color, extra = {}) {
   return {
     label,
     data: [],
@@ -26,6 +26,7 @@ function analyticsLineDataset(label, color) {
     pointHoverBorderColor: '#fcfcfb',
     pointHoverBorderWidth: 2,
     pointHitRadius: 10,
+    ...extra,
   };
 }
 
@@ -41,6 +42,10 @@ function initAnalyticsTrendChart() {
         analyticsLineDataset('Allow', ANALYTICS_CHART_COLORS.allow),
         analyticsLineDataset('Step-Up', ANALYTICS_CHART_COLORS.stepup),
         analyticsLineDataset('Block', ANALYTICS_CHART_COLORS.block),
+        // Predictive Fraud Forecasting (Partial-Feature Completion Pass): a dashed continuation
+        // of the flagged-transaction trend, from GET /analytics/forecast's linear projection --
+        // visually distinct (dashed, no fill) from the three solid historical series above.
+        analyticsLineDataset('Forecast (flagged)', '#7a6fd1', { borderDash: [6, 4], backgroundColor: 'transparent' }),
       ],
     },
     options: {
@@ -89,9 +94,51 @@ async function refreshAnalyticsTrend() {
     analyticsTrendChart.data.datasets[0].data = data.buckets.map((b) => b.allow);
     analyticsTrendChart.data.datasets[1].data = data.buckets.map((b) => b.step_up);
     analyticsTrendChart.data.datasets[2].data = data.buckets.map((b) => b.block);
+    analyticsTrendChart.data.datasets[3].data = data.buckets.map(() => null); // forecast placeholder, filled in by refreshAnalyticsForecast below
     analyticsTrendChart.update();
+
+    await refreshAnalyticsForecast(bucket, data.buckets.length, formatLabel);
   } catch (err) {
     console.error('Failed to load analytics trend:', err);
+  }
+}
+
+// Predictive Fraud Forecasting (Partial-Feature Completion Pass): appends GET /analytics/
+// forecast's projected buckets onto the trend chart's 4th ("Forecast") dataset and x-axis labels,
+// as a visually-distinct dashed continuation of the historical flagged-transaction line.
+async function refreshAnalyticsForecast(bucket, historyPointCount, formatLabel) {
+  if (!analyticsTrendChart) return;
+  try {
+    const res = await window.sentinelpayAuthFetch(`/analytics/forecast?bucket=${encodeURIComponent(bucket)}`);
+    const data = await res.json();
+    const forecastValues = (data.flagged_transactions && data.flagged_transactions.forecast) || [];
+    if (forecastValues.length === 0) return;
+
+    const bucketMsByType = { hour: 3600000, day: 86400000, week: 604800000, month: 2592000000 };
+    const bucketMs = bucketMsByType[bucket] || bucketMsByType.day;
+    const lastLabelIndex = analyticsTrendChart.data.labels.length - 1;
+    const nowMs = Date.now();
+    const nowBucketStartMs = Math.floor(nowMs / bucketMs) * bucketMs;
+
+    // Extends the x-axis with one label per forecasted bucket, and pads every historical dataset
+    // with null for those new points (Chart.js draws a gap, not a misleading zero) so only the
+    // dashed Forecast line actually appears there.
+    forecastValues.forEach((value, i) => {
+      analyticsTrendChart.data.labels.push(formatLabel(new Date(nowBucketStartMs + (i + 1) * bucketMs).toISOString()));
+      for (let d = 0; d < 3; d++) analyticsTrendChart.data.datasets[d].data.push(null);
+      analyticsTrendChart.data.datasets[3].data.push(value);
+    });
+    // The forecast line should visually connect to the last real historical point, not start
+    // from a gap -- backfill index lastLabelIndex (the last historical bucket) with its own
+    // already-known flagged count so Chart.js draws an unbroken dashed line from there onward.
+    if (lastLabelIndex >= 0 && historyPointCount > 0) {
+      const lastHistoricalFlagged = (analyticsTrendChart.data.datasets[1].data[lastLabelIndex] || 0) + (analyticsTrendChart.data.datasets[2].data[lastLabelIndex] || 0);
+      analyticsTrendChart.data.datasets[3].data[lastLabelIndex] = lastHistoricalFlagged;
+    }
+
+    analyticsTrendChart.update();
+  } catch (err) {
+    console.error('Failed to load analytics forecast:', err);
   }
 }
 
@@ -260,6 +307,64 @@ function refreshAllAnalytics() {
   refreshAnalyticsTopFrauds();
   refreshAnalyticsMules();
   refreshAnalyticsGateways();
+  refreshAiInsights();
+}
+
+// ---- AI Fraud Insights / AI Assistant (Partial-Feature Completion Pass, Section 26) ----
+
+async function refreshAiInsights() {
+  const list = document.getElementById('ai-insights-list');
+  if (!list) return;
+  try {
+    const res = await window.sentinelpayAuthFetch('/ai/insights');
+    const data = await res.json();
+    list.innerHTML = (data.insights || []).map((insight) => `<li>${escapeHtml(insight)}</li>`).join('') || '<li class="empty-state">No insights yet.</li>';
+  } catch (err) {
+    console.error('Failed to load AI insights:', err);
+    list.innerHTML = '<li class="empty-state">Failed to load insights.</li>';
+  }
+}
+
+function appendChatMessage(role, text) {
+  const log = document.getElementById('ai-chat-log');
+  if (!log) return;
+  const emptyState = log.querySelector('.empty-state');
+  if (emptyState) emptyState.remove();
+  const entry = document.createElement('p');
+  entry.className = `ai-chat-entry ai-chat-${role}`;
+  entry.innerHTML = `<strong>${role === 'user' ? 'You' : 'Assistant'}:</strong> ${escapeHtml(text)}`;
+  log.appendChild(entry);
+  log.scrollTop = log.scrollHeight;
+}
+
+function initAiChat() {
+  const form = document.getElementById('ai-chat-form');
+  const input = document.getElementById('ai-chat-input');
+  if (!form || !input) return;
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const message = input.value.trim();
+    if (!message) return;
+    appendChatMessage('user', message);
+    input.value = '';
+
+    try {
+      const res = await window.sentinelpayAuthFetch('/ai/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message }),
+      });
+      const data = await res.json();
+      appendChatMessage('assistant', res.ok ? data.reply : data.error || 'Something went wrong.');
+    } catch (err) {
+      console.error('AI chat request failed:', err);
+      appendChatMessage('assistant', 'Failed to reach the assistant.');
+    }
+  });
+
+  const refreshBtn = document.getElementById('ai-insights-refresh');
+  if (refreshBtn) refreshBtn.addEventListener('click', refreshAiInsights);
 }
 
 async function downloadCsvExport() {
@@ -307,6 +412,8 @@ function initAnalyticsView() {
 
   const pdfBtn = document.getElementById('analytics-export-pdf');
   if (pdfBtn) pdfBtn.addEventListener('click', triggerPdfExport);
+
+  initAiChat();
 }
 
 document.addEventListener('sentinelpay:view-shown', (event) => {

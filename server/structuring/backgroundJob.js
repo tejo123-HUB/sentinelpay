@@ -10,6 +10,7 @@ const detectCircularFlow = require('./circularFlow');
 const { CIRCULAR_FLOW } = require('../config');
 const { autoBlacklistStructuringOrigin } = require('../autoFraudListing');
 const { discoverClusters, persistDiscoveredClusters } = require('../graphIntelligence');
+const { recomputeRuleWeightMultipliers } = require('../adaptiveRuleWeights');
 
 const DEFAULT_INTERVAL_MS = Number(process.env.STRUCTURING_JOB_INTERVAL_MS) || 7000;
 // Only need to look as far back as the longest window any detector cares about, plus a buffer.
@@ -195,6 +196,11 @@ function startStructuringJob(db, broadcast, intervalMs = DEFAULT_INTERVAL_MS) {
           broadcast('graph_cluster', cluster);
         }
       }
+
+      // Automation (Adaptive Rule Learning): same "too expensive/unnecessary for the synchronous
+      // per-request path, cheap enough for a periodic scan" reasoning as the graph cluster pass
+      // just above -- reused timer, not a new one.
+      recomputeRuleWeightMultipliers(db, new Date().toISOString());
     } catch (err) {
       console.error('Structuring background job failed:', err);
     }

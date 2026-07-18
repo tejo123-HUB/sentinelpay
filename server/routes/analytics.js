@@ -12,6 +12,7 @@ const { buildXlsxWorkbook } = require('../xlsxWriter');
 const { FRAUD_SIGNATURES } = require('../fraudSignatures');
 const { computeReputationScore } = require('../reputation');
 const { deviceEntityId, ipEntityId } = require('../featureStore');
+const { predictSeries } = require('../forecasting');
 
 const DEFAULT_TOP_LIMIT = 10;
 const MAX_TOP_LIMIT = 100;
@@ -388,6 +389,60 @@ router.get('/analytics/trend', requireApiKey, (req, res) => {
     }));
 
   res.json({ bucket, buckets: sortedBuckets });
+});
+
+const DEFAULT_FORECAST_HORIZON = 6;
+const MAX_FORECAST_HORIZON = 24;
+
+// GET /analytics/forecast?bucket=hour|day|week|month&horizon=6 -- Predictive Fraud Forecasting:
+// projects the next `horizon` buckets of flagged-transaction volume and blocked amount forward
+// from the same bucketed trend GET /analytics/trend already computes (server/forecasting.js's
+// linear-regression projection, reused rather than a second bucketing implementation).
+router.get('/analytics/forecast', requireApiKey, (req, res) => {
+  const db = req.app.locals.db;
+  const bucket = VALID_TREND_BUCKETS.includes(req.query.bucket) ? req.query.bucket : 'day';
+  const bucketMs = TREND_BUCKET_MS[bucket];
+  const horizon = Math.min(Math.max(parseInt(req.query.horizon, 10) || DEFAULT_FORECAST_HORIZON, 1), MAX_FORECAST_HORIZON);
+  const lookbackMs = Math.min(bucketMs * 30, MAX_TREND_LOOKBACK_MS); // up to 30 buckets of history to fit the trend against
+  const sinceIso = new Date(Date.now() - lookbackMs).toISOString();
+
+  const rows = db
+    .prepare(`SELECT timestamp, decision, amount FROM transactions WHERE timestamp >= ? ORDER BY timestamp ASC`)
+    .all(sinceIso);
+
+  const buckets = new Map();
+  const nowBucketStart = Math.floor(Date.now() / bucketMs) * bucketMs;
+  for (const row of rows) {
+    const tMs = new Date(row.timestamp).getTime();
+    const bucketStartMs = Math.floor(tMs / bucketMs) * bucketMs;
+    if (!buckets.has(bucketStartMs)) buckets.set(bucketStartMs, { flagged: 0, blockedAmount: 0 });
+    const b = buckets.get(bucketStartMs);
+    if (row.decision === 'step_up' || row.decision === 'block') b.flagged += 1;
+    if (row.decision === 'block') b.blockedAmount += row.amount || 0;
+  }
+
+  // Dense series (a gap bucket with zero activity is a real zero, not a missing point) from the
+  // earliest observed bucket through the current one -- predictSeries assumes evenly-spaced input.
+  const bucketStarts = [...buckets.keys()];
+  const earliestBucketStart = bucketStarts.length > 0 ? Math.min(...bucketStarts) : nowBucketStart;
+  const flaggedSeries = [];
+  const blockedAmountSeries = [];
+  for (let t = earliestBucketStart; t <= nowBucketStart; t += bucketMs) {
+    const b = buckets.get(t) || { flagged: 0, blockedAmount: 0 };
+    flaggedSeries.push(b.flagged);
+    blockedAmountSeries.push(Number(b.blockedAmount.toFixed(2)));
+  }
+
+  const flaggedForecast = predictSeries(flaggedSeries, horizon);
+  const blockedAmountForecast = predictSeries(blockedAmountSeries, horizon);
+
+  res.json({
+    bucket,
+    horizon,
+    history_points: flaggedSeries.length,
+    flagged_transactions: { history: flaggedSeries, forecast: flaggedForecast.forecast, trend: flaggedForecast.trend },
+    blocked_amount: { history: blockedAmountSeries, forecast: blockedAmountForecast.forecast, trend: blockedAmountForecast.trend },
+  });
 });
 
 const VALID_EXPORT_FORMATS = ['csv', 'json', 'excel'];

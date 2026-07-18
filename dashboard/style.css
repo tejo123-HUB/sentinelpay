@@ -972,6 +972,30 @@ tr.decision-step_up {
   transform: rotate(12deg);
 }
 
+/* Partial-Feature Completion Pass: Web Push subscribe button. */
+.push-toggle {
+  border: 1px solid var(--border);
+  background: var(--surface-strong);
+  color: var(--text-dim);
+  border-radius: var(--radius-sm);
+  padding: 0.4rem 0.8rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: var(--shadow-xs);
+}
+.push-toggle:hover:not(:disabled) {
+  background: var(--accent-wash);
+  color: var(--accent-strong);
+}
+.push-toggle:disabled {
+  cursor: default;
+  opacity: 0.75;
+}
+.push-toggle.hidden {
+  display: none;
+}
+
 /* ---- Analytics tab ---- */
 
 .analytics-counters {
@@ -1088,4 +1112,119 @@ tr.decision-step_up {
     box-shadow: none;
     border: 1px solid #ccc;
   }
+}
+
+/* ---- Graph view (Partial-Feature Completion Pass: Interactive Graph Visualization) ---- */
+
+.graph-search-form {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.graph-search-form input[type='text'] {
+  min-width: 16rem;
+}
+
+.graph-hint {
+  color: var(--text-faint);
+  font-size: 0.85rem;
+  margin: 0 0 0.5rem;
+}
+
+.graph-canvas-wrap {
+  position: relative;
+  width: 100%;
+  height: 480px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  overflow: hidden;
+}
+
+.graph-canvas-wrap canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: grab;
+}
+
+.graph-canvas-wrap .empty-state {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  margin: 0;
+}
+
+.graph-status {
+  color: var(--text-faint);
+  font-size: 0.85rem;
+  margin: 0.5rem 0 0;
+}
+
+.graph-clusters-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.graph-cluster-chip {
+  background: var(--surface-strong);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.35rem 0.7rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.graph-cluster-chip:hover {
+  background: var(--surface-sunken);
+  color: var(--accent);
+}
+
+/* ---- AI panels (Partial-Feature Completion Pass, Section 26) ---- */
+
+.ai-insights-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.ai-insights-list li {
+  background: var(--surface-sunken);
+  border-radius: var(--radius-sm);
+  padding: 0.6rem 0.8rem;
+  font-size: 0.88rem;
+  color: var(--text);
+}
+
+.ai-chat-log {
+  max-height: 260px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+.ai-chat-entry {
+  margin: 0;
+  padding: 0.5rem 0.7rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.88rem;
+  background: var(--surface-sunken);
+}
+.ai-chat-entry.ai-chat-user {
+  background: var(--accent-wash);
+}
+
+.ai-chat-form {
+  display: flex;
+  gap: 0.5rem;
+}
+.ai-chat-form input {
+  flex: 1;
 }

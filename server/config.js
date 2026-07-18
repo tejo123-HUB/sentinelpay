@@ -243,6 +243,85 @@ const GRAPH_INTELLIGENCE = {
   CLUSTER_RISK_THRESHOLD: 60,
 };
 
+// Partial-Feature Completion Pass: Device Intelligence's emulator/rooted-device gap. device_id
+// and user_agent are self-reported (same trust level as ip_address/country elsewhere in this
+// project), so this cannot do real device attestation -- but a genuine emulator/rooted-device
+// build commonly leaks itself through well-known self-reported strings (Android's generic/
+// goldfish/ranchu emulator build fingerprints, "test-keys" on a non-production-signed rooted
+// build, jailbreak tooling like Cydia/Magisk/Frida). Heuristic and spoofable, so scored as a
+// contributing signal, not a hard block -- same caution level as SUSPICIOUS_UA_PATTERN above.
+const DEVICE_INTEGRITY = {
+  EMULATOR_PATTERN: /emulator|generic_x86|sdk_gphone|genymotion|vbox86|goldfish|ranchu|bluestacks|nox_?player|ldplayer|simulator/i,
+  ROOTED_PATTERN: /test-keys|magisk|supersu|cydia|jailbro(ken|ke)|frida|xposed/i,
+  DEVICE_INTEGRITY_WEIGHT: 40,
+};
+
+// Partial-Feature Completion Pass: Identity Intelligence's synthetic-identity gap. A single
+// device_id backing many *distinct*, individually brand-new (phone, email, identity_hash)
+// identity combinations in a short window is the actual observable signature of a synthetic-
+// identity mill -- one real device onboarding a batch of fabricated identities -- distinct from
+// sharedIdentifierRisk.js's "this identifier is shared with another account" (that's about reuse
+// of one identifier; this is about volume of *distinct new* identities from one origin).
+const SYNTHETIC_IDENTITY = {
+  WINDOW_MS: 24 * 60 * 60 * 1000,
+  MIN_DISTINCT_IDENTITIES_PER_DEVICE: 3,
+  SYNTHETIC_IDENTITY_WEIGHT: 50,
+};
+
+// Partial-Feature Completion Pass: Vendor Intelligence's dedicated trust-score gap (previously
+// only the generic top-risky/risk-profile dimensions covered vendors, same as any other receiver
+// dimension). Trust score is intentionally the mirror image of health_score's existing formula
+// (100 - avg_fraud_score), plus a small tenure bonus -- a vendor paid cleanly for a long time is
+// more trustworthy than one with an identical flag rate but only two data points.
+const VENDOR_TRUST = {
+  MIN_PAYMENTS_FOR_ESTABLISHED: 5,
+  TENURE_BONUS_DAYS: 90, // full tenure bonus once the vendor relationship is at least this old
+  MAX_TENURE_BONUS: 10,
+};
+
+// Partial-Feature Completion Pass: Automation's real "Auto Whitelisting" gap -- FA199 was
+// previously mislabeled (autoFraudListing.js's only "auto-whitelist"-adjacent function actually
+// auto-*watchlists* confirmed mules, not whitelists anything). A genuine auto-whitelist trigger:
+// an account with enough clean transaction volume and zero flags over a long enough window is
+// promoted automatically, same idempotent/audit-logged pattern as autoBlacklistStructuringOrigin.
+const AUTO_WHITELIST = {
+  MIN_TXN_COUNT: 20,
+  MAX_REPUTATION_SCORE: 15, // entity_reputation.score (0=clean) must be at or below this
+};
+
+// Partial-Feature Completion Pass: Automation's "Adaptive Rule Learning" gap -- a learned
+// per-flag_type weight multiplier, recomputed periodically from feedback_labels (real analyst
+// verdicts), not just the fixed per-detector weight every flag_type has carried since Feature 16.
+const ADAPTIVE_RULE_WEIGHTS = {
+  MIN_SAMPLE_SIZE: 8, // a flag_type needs at least this many labeled outcomes before its multiplier moves off the neutral default
+  MIN_MULTIPLIER: 0.5,
+  MAX_MULTIPLIER: 1.5,
+  // How strongly a scan's freshly-computed precision pulls the stored multiplier toward it --
+  // damped (not a direct overwrite) so one noisy scan can't swing a rule's effective weight
+  // wildly; same "incremental, not a full recompute" spirit as Welford's online update above.
+  LEARNING_RATE: 0.3,
+};
+
+// Partial-Feature Completion Pass: Fraud Investigation Module's evidence-attachment gap. Content
+// arrives base64-encoded inside a JSON body (no multipart-form dependency, consistent with this
+// project's dependency-light convention) -- bounded well under server/index.js's `express.json()`
+// limit (raised from Express's 100kb default to 1mb specifically to fit real evidence files here;
+// see that file's comment) once base64's ~33% size overhead and the surrounding JSON are
+// accounted for: 400,000 bytes * 4/3 ~= 533KB, comfortably under the 1mb body cap.
+const CASE_EVIDENCE = {
+  MAX_SIZE_BYTES: 400_000,
+  MAX_FILENAME_LENGTH: 256,
+};
+
+// Code-review follow-up (Partial-Feature Completion Pass): bounds the number of stored Web Push
+// subscriptions, so a caller (even an authorized analyst+ one -- see the requireRole bump on
+// POST /notifications/push-subscriptions) can't register unbounded endpoints and turn every
+// future Critical alert into an unbounded outbound-request fan-out. High enough to cover a real
+// team's worth of subscribed browsers/devices, nowhere near what abuse would need.
+const PUSH_SUBSCRIPTIONS = {
+  MAX_SUBSCRIPTIONS: 200,
+};
+
 module.exports = {
   REFUND_INTEGRITY,
   VENDOR_RISK,
@@ -261,4 +340,11 @@ module.exports = {
   ADAPTIVE_BASELINE,
   REPUTATION,
   GRAPH_INTELLIGENCE,
+  DEVICE_INTEGRITY,
+  SYNTHETIC_IDENTITY,
+  VENDOR_TRUST,
+  AUTO_WHITELIST,
+  ADAPTIVE_RULE_WEIGHTS,
+  CASE_EVIDENCE,
+  PUSH_SUBSCRIPTIONS,
 };

@@ -40,6 +40,7 @@ function validateTransactionInput(body) {
     user_agent,
     state,
     city,
+    bank_account_hash,
   } = body;
 
   if (typeof sender_id !== 'string' || sender_id.trim() === '' || sender_id.length > MAX_ID_LENGTH) {
@@ -129,6 +130,11 @@ function validateTransactionInput(body) {
   if (typeof city === 'string' && city.length > MAX_LOCATION_NAME_LENGTH) {
     return { valid: false, error: `city must be at most ${MAX_LOCATION_NAME_LENGTH} characters` };
   }
+  // bank_account_hash: same never-see-the-raw-value convention as identity_hash above -- the
+  // caller hashes the real account number themselves.
+  if (typeof bank_account_hash === 'string' && bank_account_hash.length > MAX_ID_LENGTH) {
+    return { valid: false, error: `bank_account_hash must be at most ${MAX_ID_LENGTH} characters` };
+  }
 
   return {
     valid: true,
@@ -152,6 +158,7 @@ function validateTransactionInput(body) {
       user_agent: typeof user_agent === 'string' ? user_agent : null,
       state: typeof state === 'string' ? state : null,
       city: typeof city === 'string' ? city : null,
+      bank_account_hash: typeof bank_account_hash === 'string' ? bank_account_hash : null,
     },
   };
 }

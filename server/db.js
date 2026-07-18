@@ -42,6 +42,11 @@ CREATE TABLE IF NOT EXISTS transactions (
   user_agent TEXT, -- optional, self-reported HTTP client identifier, for device-reputation scoring (Section 16, Category 10); not PII, just a client string
   state TEXT, -- optional, self-reported region/state, for High-Risk State Detection (Section 16, Category 12)
   city TEXT, -- optional, self-reported city, for High-Risk City Detection (Section 16, Category 12)
+  -- Partial-Feature Completion Pass: caller-computed hash of a bank account number, same
+  -- never-store-the-raw-value convention as identity_hash -- lets sharedIdentifierRisk.js and
+  -- graphIntelligence.js cover "Shared Bank Account Graph"/"Shared Bank Account Detection"
+  -- without this system ever holding the real account number.
+  bank_account_hash TEXT,
   FOREIGN KEY (sender_id) REFERENCES users(user_id),
   FOREIGN KEY (receiver_id) REFERENCES users(user_id)
 );
@@ -342,6 +347,51 @@ CREATE TABLE IF NOT EXISTS graph_clusters (
   member_ids_json TEXT NOT NULL,
   risk_score REAL NOT NULL,
   discovered_at TEXT NOT NULL
+);
+
+-- Partial-Feature Completion Pass: real evidence attachments on a case (Fraud Investigation
+-- Module gap -- previously only free-text investigation_notes existed). Binary content is
+-- written to disk (data/evidence/<evidence_id>), not this table -- SQLite can hold blobs, but
+-- keeping large binary content out of the primary WAL-mode DB file avoids bloating every future
+-- backup/vacuum of the transactional data with attachment bytes. This row is the metadata + the
+-- disk pointer, same "DB row + on-disk artifact" split this project already has nowhere else
+-- because nothing else stores binary content -- this is the first feature that does.
+CREATE TABLE IF NOT EXISTS case_evidence (
+  evidence_id TEXT PRIMARY KEY,
+  case_id TEXT NOT NULL,
+  filename TEXT NOT NULL,
+  mime_type TEXT,
+  size_bytes INTEGER NOT NULL,
+  uploaded_by TEXT,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (case_id) REFERENCES cases(case_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_case_evidence_case ON case_evidence(case_id);
+
+-- Partial-Feature Completion Pass: Web Push subscriptions (Notification Engine's one previously
+-- undone item -- architecture.md/server/notifications.js documented this as needing "a real
+-- subscribed browser and a dashboard-side push subscription UI," which dashboard/app.js's new
+-- initPushNotifications now provides). One row per browser subscription; endpoint is the
+-- subscription's own unique push-service URL, so it doubles as a natural dedupe key.
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  endpoint TEXT PRIMARY KEY,
+  p256dh TEXT NOT NULL,
+  auth TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+-- Partial-Feature Completion Pass: Automation's "Adaptive Rule Learning" -- a learned per-
+-- flag_type weight multiplier, recomputed periodically (server/adaptiveRuleWeights.js, run
+-- inside the existing structuring background job cycle) from how often a flag_type's flagged
+-- transactions actually got a real analyst verdict via feedback_labels. Bounded to
+-- [MIN_MULTIPLIER, MAX_MULTIPLIER] (see config.js) so a rule can drift toward more/less weight
+-- but never be zeroed out or runaway-amplified by a small or skewed sample.
+CREATE TABLE IF NOT EXISTS rule_weight_adjustments (
+  flag_type TEXT PRIMARY KEY,
+  multiplier REAL NOT NULL DEFAULT 1,
+  sample_count INTEGER NOT NULL DEFAULT 0,
+  last_updated_at TEXT
 );
 `;
 

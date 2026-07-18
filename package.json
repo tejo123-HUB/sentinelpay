@@ -11,7 +11,8 @@
     "benchmark": "node simulator/benchmark.js",
     "loadtest": "node simulator/loadTest.js",
     "seed": "node scripts/generate_demo_data.js",
-    "demo": "node scripts/demo.js"
+    "demo": "node scripts/demo.js",
+    "generate-vapid-keys": "node scripts/generate_vapid_keys.js"
   },
   "license": "MIT",
   "private": true,

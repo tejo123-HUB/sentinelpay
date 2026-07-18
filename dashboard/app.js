@@ -384,6 +384,10 @@ function connect() {
     } else if (message.type === 'structuring_alert') {
       addAlertCard(message.data);
       document.dispatchEvent(new CustomEvent('sentinelpay:structuring_alert', { detail: message.data }));
+    } else if (message.type === 'graph_cluster') {
+      // graph.js (Graph tab) refreshes its cluster chip list on this event, same "hook into the
+      // existing WS feed rather than opening a second connection" pattern as map.js/audit.js.
+      document.dispatchEvent(new CustomEvent('sentinelpay:graph-cluster', { detail: message.data }));
     }
   });
 }
@@ -436,8 +440,80 @@ function initThemeToggle() {
   }
 }
 
+// ---- Web Push (Partial-Feature Completion Pass) ----
+// Only shown/wired up when the browser supports it AND the server has VAPID keys configured
+// (GET /notifications/vapid-public-key 404s otherwise) -- both real gates, not just a UI nicety,
+// since pushManager.subscribe() would otherwise fail with a confusing browser-level error.
+function urlBase64ToUint8Array(base64Url) {
+  const padding = '='.repeat((4 - (base64Url.length % 4)) % 4);
+  const base64 = (base64Url + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64);
+  return Uint8Array.from([...raw].map((c) => c.charCodeAt(0)));
+}
+
+async function subscribeToPush(vapidPublicKey) {
+  const registration = await navigator.serviceWorker.ready;
+  const subscription = await registration.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: urlBase64ToUint8Array(vapidPublicKey),
+  });
+  const json = subscription.toJSON();
+  await authFetch('/notifications/push-subscriptions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ endpoint: json.endpoint, keys: json.keys }),
+  });
+}
+
+async function initPushNotifications() {
+  const btn = document.getElementById('push-toggle');
+  if (!btn || !('serviceWorker' in navigator) || !('PushManager' in window)) return;
+
+  let vapidPublicKey = null;
+  try {
+    const res = await authFetch('/notifications/vapid-public-key');
+    if (!res.ok) return; // Web Push not configured server-side -- keep the button hidden
+    vapidPublicKey = (await res.json()).public_key;
+  } catch {
+    return;
+  }
+
+  try {
+    await navigator.serviceWorker.register('sw.js');
+  } catch (err) {
+    console.error('Failed to register service worker:', err);
+    return;
+  }
+
+  btn.classList.remove('hidden');
+
+  const registration = await navigator.serviceWorker.ready;
+  const existing = await registration.pushManager.getSubscription();
+  if (existing) {
+    btn.textContent = 'Push Alerts Enabled';
+    btn.disabled = true;
+  }
+
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    try {
+      const permission = await Notification.requestPermission();
+      if (permission !== 'granted') {
+        btn.disabled = false;
+        return;
+      }
+      await subscribeToPush(vapidPublicKey);
+      btn.textContent = 'Push Alerts Enabled';
+    } catch (err) {
+      console.error('Failed to subscribe to push notifications:', err);
+      btn.disabled = false;
+    }
+  });
+}
+
 initTabs();
 initChart();
 initBusinessAccountsControl();
 initThemeToggle();
+initPushNotifications();
 loadBusinessAccounts().then(loadInitialData).then(connect);

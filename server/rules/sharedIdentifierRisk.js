@@ -10,6 +10,10 @@ const SHARED_IDENTIFIER_WEIGHT = 35; // contribution to the 0-100 fraud score wh
 // the underlying real-world documents rarely legitimately belong to multiple unrelated accounts
 // the way a shared home WiFi IP or a family-shared device plausibly might.
 const SHARED_IDENTITY_HASH_WEIGHT = 55;
+// Partial-Feature Completion Pass (Graph Intelligence, Shared Bank Account Graph): same reasoning
+// as SHARED_IDENTITY_HASH_WEIGHT -- a bank account number legitimately belonging to two unrelated
+// SentinelPay-side accounts is rare, so it's scored at the same strong-signal tier.
+const SHARED_BANK_ACCOUNT_WEIGHT = 55;
 
 const CHECKS = [
   { field: 'sharedDeviceAccountIds', label: 'Device' },
@@ -33,6 +37,16 @@ function sharedIdentifierRisk(transaction, outboundContext) {
     };
   }
 
+  const sharedBankAccount = (outboundContext && outboundContext.sharedBankAccountAccountIds) || [];
+  if (sharedBankAccount.length > 0) {
+    return {
+      flagged: true,
+      reason: `Bank account shared with ${sharedBankAccount.length} other account(s) in the last 30 days`,
+      weight: SHARED_BANK_ACCOUNT_WEIGHT,
+      severity: 'High',
+    };
+  }
+
   for (const { field, label } of CHECKS) {
     const sharedWith = (outboundContext && outboundContext[field]) || [];
     if (sharedWith.length > 0) {
@@ -50,5 +64,6 @@ function sharedIdentifierRisk(transaction, outboundContext) {
 
 sharedIdentifierRisk.SHARED_IDENTIFIER_WEIGHT = SHARED_IDENTIFIER_WEIGHT;
 sharedIdentifierRisk.SHARED_IDENTITY_HASH_WEIGHT = SHARED_IDENTITY_HASH_WEIGHT;
+sharedIdentifierRisk.SHARED_BANK_ACCOUNT_WEIGHT = SHARED_BANK_ACCOUNT_WEIGHT;
 
 module.exports = sharedIdentifierRisk;

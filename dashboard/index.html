@@ -77,6 +77,9 @@
       </div>
     </div>
     <div class="topbar-actions">
+      <button class="push-toggle hidden" id="push-toggle" type="button" title="Enable browser push notifications for critical alerts">
+        Enable Push Alerts
+      </button>
       <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Toggle dark mode" title="Toggle dark mode">
         <span class="theme-toggle-icon" aria-hidden="true">◐</span>
       </button>
@@ -127,6 +130,7 @@
     <button class="tab-btn" data-view="map">Map</button>
     <button class="tab-btn" data-view="audit">Audit Trail</button>
     <button class="tab-btn" data-view="analytics">Analytics</button>
+    <button class="tab-btn" data-view="graph">Graph</button>
   </nav>
 
   <main class="layout view" id="view-live">
@@ -328,6 +332,58 @@
         </table>
       </div>
     </section>
+
+    <section class="panel panel-ai-insights">
+      <div class="panel-header">
+        <h2>AI Fraud Insights</h2>
+        <button id="ai-insights-refresh" type="button">Refresh</button>
+      </div>
+      <ul class="ai-insights-list" id="ai-insights-list">
+        <li class="empty-state">Loading…</li>
+      </ul>
+    </section>
+
+    <section class="panel panel-ai-chat">
+      <div class="panel-header"><h2>AI Assistant</h2></div>
+      <div class="ai-chat-log" id="ai-chat-log">
+        <p class="empty-state">Ask about a transaction (mention its ID), a summary, or the riskiest accounts.</p>
+      </div>
+      <form class="ai-chat-form" id="ai-chat-form">
+        <input type="text" id="ai-chat-input" placeholder="e.g. give me a summary" maxlength="500" />
+        <button type="submit">Ask</button>
+      </form>
+    </section>
+  </main>
+
+  <main class="layout-single view hidden" id="view-graph">
+    <section class="panel panel-graph">
+      <div class="panel-header">
+        <h2>Relationship Graph</h2>
+        <form id="graph-search-form" class="graph-search-form">
+          <input type="text" id="graph-account-input" placeholder="Account ID (e.g. m_store_electronics)" />
+          <select id="graph-depth-select">
+            <option value="1" selected>Depth 1</option>
+            <option value="2">Depth 2</option>
+          </select>
+          <button type="submit">Explore</button>
+        </form>
+      </div>
+      <p class="graph-hint">Double-click a node to re-center the graph on it. Drag nodes to rearrange. Colors mark discovered risky clusters.</p>
+      <div class="graph-canvas-wrap" id="graph-canvas-wrap">
+        <canvas id="graph-canvas"></canvas>
+        <p class="empty-state">Search an account ID above to explore its relationship graph.</p>
+      </div>
+      <p class="graph-status" id="graph-status"></p>
+    </section>
+
+    <section class="panel panel-graph-clusters">
+      <div class="panel-header">
+        <h2>Discovered Risky Clusters</h2>
+      </div>
+      <div class="graph-clusters-list" id="graph-clusters-list">
+        <span class="empty-state">Loading…</span>
+      </div>
+    </section>
   </main>
 
   <!--
@@ -343,5 +399,6 @@
   <script src="map.js" defer></script>
   <script src="audit.js" defer></script>
   <script src="analytics.js" defer></script>
+  <script src="graph.js" defer></script>
 </body>
 </html>

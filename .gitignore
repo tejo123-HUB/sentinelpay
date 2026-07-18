@@ -18,3 +18,6 @@ __pycache__/
 .DS_Store
 npm-debug.log*
 .claude/
+# Partial-Feature Completion Pass: uploaded case-evidence binary content (server/caseEvidence.js)
+# -- runtime data, same reasoning as *.db above, not source.
+data/evidence/
