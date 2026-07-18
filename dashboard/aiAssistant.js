@@ -81,6 +81,15 @@ function setAiStatus(status) {
 function aiFormatMessageText(text) {
   let escaped = escapeHtml(text);
 
+  // Format code blocks: `code` -> <code>code</code>
+  escaped = escaped.replace(/`(.*?)`/g, '<code>$1</code>');
+
+  // Format bold text: **text** -> <strong>text</strong>
+  escaped = escaped.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+
+  // Format lists: bullet lists with \n• or \n- or \n*
+  escaped = escaped.replace(/\n[•\-*]\s*(.*?)/g, '<li>$1</li>');
+
   // Convert newlines to breaks
   escaped = escaped.replace(/\n/g, '<br>');
 
@@ -159,7 +168,10 @@ async function aiSendMessage(rawMessage) {
     const res = await window.sentinelpayAuthFetch('/ai/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: message.slice(0, AI_MAX_MESSAGE_LENGTH) }),
+      body: JSON.stringify({ 
+        message: message.slice(0, AI_MAX_MESSAGE_LENGTH),
+        history: chatHistory.slice(-10) // last 10 messages for context
+      }),
     });
     const data = await res.json().catch(() => ({}));
     const replyText = res.ok ? data.reply : data.error || `Something went wrong (HTTP ${res.status}).`;

@@ -374,9 +374,70 @@ function formatTransactionSummary(db, row) {
  * @param {import('node:sqlite').DatabaseSync} db
  * @param {string} message
  */
-function answerDeterministically(db, message) {
+/**
+ * Deterministic intent router over the question shapes a merchant/analyst actually asks in
+ * practice -- transaction/account lookups, what a decision or a specific fraud signal means, how
+ * scoring works, a quick activity pulse, dispute guidance, an overall summary, and the riskiest
+ * accounts. Falls back to a categorized "here's what I can answer" message for anything else,
+ * rather than pretending to understand. Supports contextual follow-ups using chat history.
+ * @param {import('node:sqlite').DatabaseSync} db
+ * @param {string} message
+ * @param {Array} history
+ */
+function answerDeterministically(db, message, history = []) {
   const text = (message || '').toLowerCase();
 
+  // Scan chat history for contextual entities (last mentioned transaction or account)
+  let contextTxId = null;
+  let contextAccountId = null;
+
+  if (Array.isArray(history)) {
+    for (let i = history.length - 1; i >= 0; i--) {
+      const entry = history[i];
+      if (!entry || typeof entry.text !== 'string') continue;
+      
+      if (!contextTxId) {
+        const txMatch = entry.text.match(/\bt_[a-z0-9-]{6,}\b/i);
+        if (txMatch) contextTxId = txMatch[0];
+      }
+      
+      if (!contextAccountId) {
+        // Exclude transaction IDs from matching as account IDs
+        const accMatch = entry.text.match(/\b(?!t_)[a-z]{1,8}_[a-z0-9][a-z0-9_-]{1,}\b/i);
+        if (accMatch) contextAccountId = accMatch[0];
+      }
+    }
+  }
+
+  // Handle follow-up questions
+  const isFollowUpWhy = /\b(why|explain|reason|how come|what driven|what drove|violat)\b/i.test(text);
+  const isFollowUpSafe = /\b(safe|trust|risk|check|reputation|score|profile)\b/i.test(text);
+  const isFollowUpUnblock = /\b(unblock|dispute|appeal|release|what should i do|action)\b/i.test(text);
+
+  if (isFollowUpWhy && contextTxId) {
+    const row = db.prepare('SELECT * FROM transactions WHERE transaction_id = ?').get(contextTxId);
+    if (row) {
+      const flags = db.prepare('SELECT flag_type, reason, severity FROM flags WHERE transaction_id = ?').all(contextTxId);
+      if (flags.length === 0) {
+        return `Transaction **${contextTxId}** was allowed with a low score of **${row.fraud_score}/100**. It triggered no automated rules.`;
+      }
+      const reasons = flags.map(f => `• **${f.flag_type}** (${f.severity} severity): ${f.reason}`).join('\n');
+      return `Transaction **${contextTxId}** was flagged and **${row.decision}ed** (Score: **${row.fraud_score}/100**):\n${reasons}\n\nWould you like me to evaluate if the sender **${row.sender_id}** is safe?`;
+    }
+  }
+
+  if (isFollowUpSafe && contextAccountId) {
+    const { score, reasonBreakdown } = computeReputationScore(db, contextAccountId, 'user');
+    const status = score > 75 ? 'High Risk' : score > 40 ? 'Moderate Risk' : 'Low Risk';
+    const breakdowns = reasonBreakdown.map(r => `• ${r}`).join('\n');
+    return `Reputation risk score for ${contextAccountId}: ${Math.round(score)}/100 (${status}).\n\n**Analysis Breakdown**:\n${breakdowns || '• Clean history with no flagged items.'}`;
+  }
+
+  if (isFollowUpUnblock && contextTxId) {
+    return `To dispute or unblock transaction **${contextTxId}**, go to the **Audit Trail** tab, select the transaction, and open an investigation case. Inside the case record, you can upload analyst evidence and set the resolution status.`;
+  }
+
+  // Normal intent routing
   const txIdMatch = message.match(/\bt_[a-z0-9-]{6,}\b/i);
   if (txIdMatch) {
     const row = db.prepare('SELECT * FROM transactions WHERE transaction_id = ?').get(txIdMatch[0]);
@@ -386,14 +447,13 @@ function answerDeterministically(db, message) {
 
   if (GREETING_PATTERN.test(text)) {
     return (
-      "Hi, I'm the SentinelPay AI Assistant. I can help with:\n" +
-      '• Transaction lookups — mention a transaction ID (e.g. t_abc123) for its score, decision, and exact flag reasons.\n' +
-      '• Decisions — ask "what does step_up mean" or "why do transactions get blocked".\n' +
-      '• Fraud signals — ask "what is impossible travel" or "what is a mule account".\n' +
-      '• Account risk — ask "how risky is u_12345" for a composite reputation score.\n' +
-      '• Live stats — ask "give me a summary" or "what\'s happening today".\n' +
-      '• Top risk — ask "who are the riskiest accounts".\n' +
-      'What would you like to know?'
+      "Hi, I'm the SentinelPay AI Assistant! I can help you with:\n" +
+      '• **Transaction lookups** — mention a transaction ID (e.g. `t_abc123`) to view its score and flags.\n' +
+      '• **Decisions & Rules** — ask "what does step_up mean" or "explain impossible travel".\n' +
+      '• **Account risk** — ask "how risky is u_customer" to check reputation score.\n' +
+      '• **Live stats** — ask "give me a summary" or "what\'s happening today".\n' +
+      '• **Riskiest entities** — ask "who are the riskiest accounts".\n' +
+      'What would you like to investigate?'
     );
   }
 
@@ -424,8 +484,10 @@ function answerDeterministically(db, message) {
   if (ACCOUNT_RISK_PATTERN.test(text)) {
     const idMatch = message.match(ACCOUNT_ID_PATTERN);
     if (idMatch) {
-      const { score, reasonBreakdown } = computeReputationScore(db, idMatch[0], 'user');
-      return `Reputation risk score for ${idMatch[0]}: ${Math.round(score)}/100 (0 = clean, 100 = maximally risky). ${reasonBreakdown.join(' ')}`;
+      const accountId = idMatch[0];
+      const { score, reasonBreakdown } = computeReputationScore(db, accountId, 'user');
+      const status = score > 75 ? 'High Risk' : score > 40 ? 'Moderate Risk' : 'Low Risk';
+      return `Reputation risk score for ${accountId}: ${Math.round(score)}/100 (${status}). ${reasonBreakdown.join(' ')}`;
     }
     return 'Mention the account ID you want a risk score for (e.g. "how risky is u_12345").';
   }
@@ -468,11 +530,6 @@ function answerDeterministically(db, message) {
     return `So far: ${summary.total} transaction(s) processed, ${summary.blocked} blocked, ${summary.step_up} step-up challenged.`;
   }
 
-  // Code-review follow-up: deliberately a single fixed dimension (sender_id), not the
-  // dimension-aware logic GET /analytics/top-risky uses (customers/merchants/vendors/devices/etc.,
-  // keyed by sender_id OR receiver_id depending on dimension) -- a quick, good-enough answer for a
-  // chat question, not meant to be equivalent to that endpoint. A caller who needs a specific
-  // dimension should use GET /analytics/top-risky directly.
   if (/\btop risk|riskiest|most risky\b/.test(text)) {
     const rows = db
       .prepare(
@@ -500,10 +557,11 @@ function answerDeterministically(db, message) {
  * @param {string} message
  * @param {string|null} caseContext - a plain-text summary of a case's timeline, if this chat is
  *   scoped to one ("AI Fraud Investigation Assistant" use of the same endpoint)
+ * @param {Array} history - the chat history array for context tracking
  * @returns {Promise<{ reply: string, source: 'llm'|'rule_based' }>}
  */
-async function answerChatMessage(db, message, caseContext) {
-  const deterministicReply = answerDeterministically(db, message);
+async function answerChatMessage(db, message, caseContext, history = []) {
+  const deterministicReply = answerDeterministically(db, message, history);
 
   if (llmConfigured()) {
     const systemPrompt =

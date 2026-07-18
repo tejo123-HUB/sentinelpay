@@ -46,7 +46,7 @@ router.post('/ai/search', requireApiKey, (req, res) => {
 // it's regex-only, no external call, no cost.
 router.post('/ai/chat', requireApiKey, requireRole('analyst'), async (req, res) => {
   const db = req.app.locals.db;
-  const { message, case_id } = req.body || {};
+  const { message, case_id, history } = req.body || {};
   if (typeof message !== 'string' || message.trim() === '' || message.length > MAX_MESSAGE_LENGTH) {
     return res.status(400).json({ error: `message is required and must be at most ${MAX_MESSAGE_LENGTH} characters` });
   }
@@ -70,7 +70,7 @@ router.post('/ai/chat', requireApiKey, requireRole('analyst'), async (req, res) 
       (noteRows.length > 0 ? ` Recent analyst notes: ${noteRows.map((n) => `"${n.note}" (${n.author || 'unknown'})`).join('; ')}.` : '');
   }
 
-  const { reply, source } = await answerChatMessage(db, message, caseContext);
+  const { reply, source } = await answerChatMessage(db, message, caseContext, history);
   res.json({ reply, source });
 });
 
