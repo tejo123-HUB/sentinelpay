@@ -30,6 +30,10 @@ const { dispatchCriticalAlert } = require('../notifications');
 const { evaluateCustomRules } = require('../customRules');
 const { recordConfirmedMule } = require('../muleScore');
 const { autoWatchlistConfirmedMule } = require('../autoFraudListing');
+const { updateBaseline } = require('../adaptiveBaseline');
+const { computeFeatureVector, updateEntityBaselinesAfterTransaction } = require('../featureStore');
+const { computeReputationScore, updateReputationAfterTransaction } = require('../reputation');
+const { upsertEdge } = require('../graphIntelligence');
 
 const velocity = require('../rules/velocity');
 const impossibleTravel = require('../rules/impossibleTravel');
@@ -55,6 +59,7 @@ const crossGatewayStructuring = require('../rules/crossGatewayStructuring');
 const duplicateTransaction = require('../rules/duplicateTransaction');
 const sharedIdentifierRisk = require('../rules/sharedIdentifierRisk');
 const deviceFingerprintRisk = require('../rules/deviceFingerprintRisk');
+const entityReputationRisk = require('../rules/entityReputationRisk');
 
 const RULE_DETECTORS = [
   { type: 'velocity', check: velocity },
@@ -87,6 +92,7 @@ const OUTBOUND_RULE_DETECTORS = [
   { type: 'duplicate_transaction', check: duplicateTransaction },
   { type: 'shared_identifier_risk', check: sharedIdentifierRisk },
   { type: 'device_fingerprint_risk', check: deviceFingerprintRisk },
+  { type: 'entity_reputation_risk', check: entityReputationRisk },
 ];
 
 const DEFAULT_LIST_LIMIT = 50;
@@ -161,9 +167,17 @@ router.post('/transaction', requireApiKey, requireRole('analyst'), async (req, r
 
     let ruleResults = [];
     let mlProbability = 0;
+    let outboundContextForGraph = null; // Continuous Learning Extension: reused after this block to seed graph_edges from already-computed shared-identifier lists
     if (outbound) {
       const userHistory = getUserHistory(db, input.sender_id, nowMs);
       const outboundContext = getOutboundContext(db, input, nowMs);
+      outboundContextForGraph = outboundContext;
+      // Continuous Learning Extension: the receiver's composite reputation score
+      // (server/reputation.js), folded into outboundContext the same way every other
+      // DB-derived field here is -- rather than importing reputation.js into outboundContext.js
+      // itself, which would create a circular require (reputation.js -> featureStore.js ->
+      // outboundContext.js -> reputation.js).
+      outboundContext.receiverReputation = computeReputationScore(db, input.receiver_id, 'user');
 
       // FA217/FA199: the moment this transaction's receiver is confirmed a mule (real-time, not
       // a batch job), persist it to the standing mule_accounts record and auto-watchlist it --
@@ -171,6 +185,27 @@ router.post('/transaction', requireApiKey, requireRole('analyst'), async (req, r
       if (outboundContext.receiverMuleScore && outboundContext.receiverMuleScore.isMule) {
         recordConfirmedMule(db, input.receiver_id, outboundContext.receiverMuleScore.qualifyingCycles, nowMs);
         autoWatchlistConfirmedMule(db, input.receiver_id, outboundContext.receiverMuleScore.qualifyingCycles);
+      }
+
+      // Dynamic Risk Engine: if this is a refund, feed the interval since this (business,
+      // customer) pair's own last refund into their refund-pacing baseline -- the same composite
+      // key outboundContext.js's read side already looked the baseline up under, so
+      // multipleRefundDetection.js's *next* refund for this pair compares against a baseline that
+      // includes this one. Uses outboundContext.lastRefundToCustomerAt (read before this
+      // transaction was inserted), not a fresh query -- there is no "prior refund" yet on this
+      // pair's first-ever refund, which is correctly a no-op here (nothing to measure an interval
+      // against), not an error.
+      if ((input.purpose || '').toLowerCase().includes('refund') && outboundContext.lastRefundToCustomerAt) {
+        const refundIntervalMs = nowMs - new Date(outboundContext.lastRefundToCustomerAt).getTime();
+        if (refundIntervalMs >= 0) {
+          updateBaseline(
+            db,
+            getOutboundContext.refundBaselineEntityId(input.sender_id, input.receiver_id),
+            'refund_interval',
+            refundIntervalMs,
+            input.timestamp
+          );
+        }
       }
 
       // Section 16, Category 19: custom rules are DB rows, not files, so they're fetched fresh
@@ -184,7 +219,7 @@ router.post('/transaction', requireApiKey, requireRole('analyst'), async (req, r
         ...OUTBOUND_RULE_DETECTORS.map(({ type, check }) => ({ type, ...check(input, outboundContext) })),
         ...evaluateCustomRules(input, enabledCustomRules),
       ];
-      mlProbability = await getFraudProbability(input, userHistory);
+      mlProbability = await getFraudProbability(input, userHistory, db);
     }
 
     let { score, reasons, riskBreakdown, severity, confidence } = computeFraudScore(ruleResults, structuringLookup, mlProbability, fraudListCheck);
@@ -247,7 +282,48 @@ router.post('/transaction', requireApiKey, requireRole('analyst'), async (req, r
       }
     }
 
+    // Continuous Learning Extension: snapshot this transaction's feature vector *before* any of
+    // this request's own baseline updates run below -- the exact same point-in-time state
+    // userHistory/outboundContext/ruleResults/mlProbability above were themselves computed from.
+    // label stays NULL until a feedback_labels row exists for this transaction (server/feedbackLabels.js).
+    // Growing training_examples live means retraining doesn't depend on re-running the offline
+    // replayFeatureHistory backfill after every request -- that backfill exists for historical
+    // transactions that predate this table, not as an ongoing per-request step.
+    const trainingVector = computeFeatureVector(db, { ...input, transaction_id: transactionId });
+    db.prepare(
+      `INSERT INTO training_examples (transaction_id, feature_json, label, computed_at)
+       VALUES (?, ?, NULL, ?)
+       ON CONFLICT(transaction_id) DO UPDATE SET feature_json = excluded.feature_json, computed_at = excluded.computed_at`
+    ).run(transactionId, JSON.stringify(trainingVector), input.timestamp);
+
     updateUserAfterTransaction(db, input.sender_id, input);
+
+    // Continuous Learning Extension: device/merchant/ip/pair-level baselines (server/featureStore.js),
+    // extending the Dynamic Risk Engine's per-sender baselines above to every entity type a
+    // transaction touches. Runs for every transaction (not just outbound), same scoping as
+    // updateUserAfterTransaction just above -- device/IP velocity fraud isn't outbound-only.
+    const insertedRow = db.prepare('SELECT rowid AS rowid_ FROM transactions WHERE transaction_id = ?').get(transactionId);
+    updateEntityBaselinesAfterTransaction(db, { ...input, transaction_id: transactionId }, insertedRow.rowid_);
+
+    // Continuous Learning Extension: bump every touched entity's composite reputation
+    // (server/reputation.js) with this transaction's own outcome -- cheap O(1) counter updates,
+    // same synchronous-scoring-path cost class as the baseline update just above. ruleResults is
+    // [] for a non-outbound transaction (no rule detectors run), which correctly counts as "not
+    // flagged" for reputation purposes rather than an error.
+    updateReputationAfterTransaction(db, { ...input, transaction_id: transactionId }, ruleResults);
+
+    // Continuous Learning Extension: the persisted graph store (server/graphIntelligence.js),
+    // replacing GET /graph/relationships' live self-joins for the edges a transaction actually
+    // produces. The transaction edge runs for every transaction; the shared-identifier edges only
+    // for outbound ones, reusing outboundContext's already-computed sharedDeviceAccountIds/
+    // sharedIpAccountIds/sharedIdentityHashAccountIds rather than re-querying.
+    upsertEdge(db, input.sender_id, input.receiver_id, 'transaction', input.amount, input.timestamp);
+    if (outbound) {
+      const oc = outboundContextForGraph;
+      for (const otherId of oc.sharedDeviceAccountIds) upsertEdge(db, input.sender_id, otherId, 'shared_device', 0, input.timestamp);
+      for (const otherId of oc.sharedIpAccountIds) upsertEdge(db, input.sender_id, otherId, 'shared_ip', 0, input.timestamp);
+      for (const otherId of oc.sharedIdentityHashAccountIds) upsertEdge(db, input.sender_id, otherId, 'shared_identity_hash', 0, input.timestamp);
+    }
 
     // Section 15.16, Feature 17: every response includes fraud_score, decision, severity,
     // detector names + human-readable reasons (risk_breakdown), and the plain reasons array

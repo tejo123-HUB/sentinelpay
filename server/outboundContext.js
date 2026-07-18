@@ -29,6 +29,14 @@ const OUTBOUND_MIN_PURCHASE_AGE_MS = 5 * 60 * 1000;
 const { REFUND_INTEGRITY, MERCHANT_TAKEOVER, FRIENDLY_FRAUD, EMPLOYEE_FRAUD, CROSS_GATEWAY, DUPLICATE_DETECTION, SHARED_IDENTIFIER_RISK, DEVICE_FINGERPRINT_RISK } = require('./config');
 const { computeMuleScore } = require('./muleScore');
 const { isBusinessAccount } = require('./businessAccounts');
+const { getBaseline } = require('./adaptiveBaseline');
+
+// Dynamic Risk Engine: the entity_baselines key for a (business, customer) pair's own
+// refund-pacing baseline -- exported so routes/transactions.js can update the same key after a
+// refund is scored, using the identical composite id this read side looks it up under.
+function refundBaselineEntityId(businessId, counterpartyId) {
+  return `${businessId}:${counterpartyId}`;
+}
 
 /**
  * @param {import('node:sqlite').DatabaseSync} db
@@ -111,6 +119,20 @@ function getOutboundContext(db, transaction, nowMs) {
       "SELECT COUNT(*) AS n FROM transactions WHERE sender_id = ? AND LOWER(purpose) LIKE '%refund%' AND timestamp >= ? AND timestamp <= ?"
     )
     .get(businessId, refundVelocitySince, transaction.timestamp);
+
+  // Dynamic Risk Engine (Merchant Risk Intelligence pass): this specific (business, customer)
+  // pair's own refund-pacing baseline -- multipleRefundDetection.js compares the interval since
+  // their last refund against it, instead of a fixed "more than N refunds" count. Unbounded
+  // lookback (not multiRefundSince-scoped): "when was their genuinely most recent refund" is a
+  // different question than "how many refunds in the last 24h", the same reasoning
+  // priorPurchaseTotal above already applies for purchase history.
+  const lastRefundToCustomerRow = db
+    .prepare(
+      "SELECT MAX(timestamp) AS t FROM transactions WHERE sender_id = ? AND receiver_id = ? AND LOWER(purpose) LIKE '%refund%' AND timestamp <= ?"
+    )
+    .get(businessId, counterpartyId, transaction.timestamp);
+  const lastRefundToCustomerAt = lastRefundToCustomerRow.t || null;
+  const refundIntervalBaseline = getBaseline(db, refundBaselineEntityId(businessId, counterpartyId), 'refund_interval');
 
   // Feature 1 (account mismatch) / Feature 3 (purchase validation) / Feature 7 (split refund):
   // when this transaction explicitly references the purchase it refunds, look that purchase up
@@ -339,11 +361,14 @@ function getOutboundContext(db, transaction, nowMs) {
     sharedIdentityHashAccountIds,
     devicePriorFlagCount,
     suspiciousUserAgent,
+    lastRefundToCustomerAt,
+    refundIntervalBaseline,
   };
 }
 
 getOutboundContext.OUTBOUND_LONG_LOOKBACK_MS = OUTBOUND_LONG_LOOKBACK_MS;
 getOutboundContext.OUTBOUND_BURST_WINDOW_MS = OUTBOUND_BURST_WINDOW_MS;
 getOutboundContext.OUTBOUND_MIN_PURCHASE_AGE_MS = OUTBOUND_MIN_PURCHASE_AGE_MS;
+getOutboundContext.refundBaselineEntityId = refundBaselineEntityId;
 
 module.exports = getOutboundContext;

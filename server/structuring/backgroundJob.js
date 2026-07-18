@@ -9,6 +9,7 @@ const correlateWithdrawal = require('./withdrawalCorrelation');
 const detectCircularFlow = require('./circularFlow');
 const { CIRCULAR_FLOW } = require('../config');
 const { autoBlacklistStructuringOrigin } = require('../autoFraudListing');
+const { discoverClusters, persistDiscoveredClusters } = require('../graphIntelligence');
 
 const DEFAULT_INTERVAL_MS = Number(process.env.STRUCTURING_JOB_INTERVAL_MS) || 7000;
 // Only need to look as far back as the longest window any detector cares about, plus a buffer.
@@ -144,6 +145,22 @@ function runScanCycle(db, nowMs = Date.now()) {
   return allNewAlerts;
 }
 
+// Continuous Learning Extension, Phase C: the periodic union-find cluster-discovery pass
+// (server/graphIntelligence.js), run inside this same job cycle rather than a new timer -- same
+// "too expensive for the synchronous per-request path, cheap enough for a periodic scan" reasoning
+// runScanCycle's structuring/circular-flow scans already rest on. Kept as its own function (not
+// folded into runScanCycle) so it doesn't change that function's existing return shape, which
+// several tests already depend on as a plain alerts array.
+/**
+ * @param {import('node:sqlite').DatabaseSync} db
+ * @param {number} nowMs
+ * @returns {Array<{ cluster_id: string, members: string[], risk_score: number }>} newly persisted clusters
+ */
+function runGraphClusterScan(db, nowMs = Date.now()) {
+  const clusters = discoverClusters(db, nowMs);
+  return persistDiscoveredClusters(db, clusters, new Date(nowMs).toISOString());
+}
+
 /**
  * Starts the periodic background scan. Returns a handle with .stop() so callers (and tests)
  * can shut it down cleanly.
@@ -171,6 +188,13 @@ function startStructuringJob(db, broadcast, intervalMs = DEFAULT_INTERVAL_MS) {
           });
         }
       }
+
+      const newClusters = runGraphClusterScan(db, Date.now());
+      if (broadcast) {
+        for (const cluster of newClusters) {
+          broadcast('graph_cluster', cluster);
+        }
+      }
     } catch (err) {
       console.error('Structuring background job failed:', err);
     }
@@ -185,4 +209,4 @@ function startStructuringJob(db, broadcast, intervalMs = DEFAULT_INTERVAL_MS) {
   };
 }
 
-module.exports = { startStructuringJob, runScanCycle, LOOKBACK_MS };
+module.exports = { startStructuringJob, runScanCycle, runGraphClusterScan, LOOKBACK_MS };

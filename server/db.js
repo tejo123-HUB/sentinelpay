@@ -179,11 +179,19 @@ CREATE INDEX IF NOT EXISTS idx_admin_audit_log_created_at ON admin_audit_log(cre
 -- tracking. "Investigation Timeline"/"Fraud Replay" are served by GET /cases/:caseId/timeline,
 -- which merges linked transactions, their structuring alerts, and investigation_notes in
 -- chronological order -- a real feature, not a video-style replay mechanism.
+-- outcome (Continuous Learning Extension, Phase F): nullable, same "added later, absent on rows
+-- predating this column" convention flags.severity already established -- set when a case is
+-- resolved with a definite verdict, feeding server/feedbackLabels.js's real "retrains from
+-- analyst decisions" labels for every transaction linked to the case. NULL covers both "not yet
+-- resolved" and "resolved without a definite verdict" (status alone can be 'resolved' with no
+-- outcome, e.g. a case closed as inconclusive) -- outcome is a separate, optional judgment on top
+-- of status, not implied by it.
 CREATE TABLE IF NOT EXISTS cases (
   case_id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('open', 'investigating', 'resolved', 'escalated')),
   assigned_to TEXT,
+  outcome TEXT CHECK (outcome IN ('confirmed_fraud', 'false_positive')),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -244,6 +252,96 @@ CREATE TABLE IF NOT EXISTS mule_accounts (
   qualifying_cycles INTEGER NOT NULL,
   first_confirmed_at TEXT NOT NULL,
   last_seen_at TEXT NOT NULL
+);
+
+-- Dynamic Risk Engine (Merchant Risk Intelligence pass): a generic, reusable per-entity/per-metric
+-- rolling statistical baseline (mean + Welford's variance accumulator m2), incrementally updated
+-- on every observation -- see server/adaptiveBaseline.js. entity_id is deliberately free-form
+-- (a user_id, or a composite "businessId:customerId" pair for refund pacing, etc.) and metric is
+-- a short label ('interval', 'amount', 'refund_interval', ...) rather than one column per use
+-- case, so any detector can register a new adaptive baseline without a schema change -- the
+-- actual mechanism CLAUDE.md's "no magic numbers" convention and this pass's "learn historical
+-- behaviour, don't hardcode thresholds" goal both call for.
+CREATE TABLE IF NOT EXISTS entity_baselines (
+  entity_id TEXT NOT NULL,
+  metric TEXT NOT NULL,
+  count INTEGER NOT NULL DEFAULT 0,
+  mean REAL NOT NULL DEFAULT 0,
+  m2 REAL NOT NULL DEFAULT 0,
+  last_observed_at TEXT,
+  PRIMARY KEY (entity_id, metric)
+);
+
+-- Continuous Learning Extension: the feature store's point-in-time snapshots (server/featureStore.js).
+-- One row per transaction, written by replayFeatureHistory's offline backfill -- feature_json is
+-- the exact vector that transaction's own scoring saw at the time (or would have, for historical
+-- rows backfilled after the fact), never a value computed with knowledge of what happened after
+-- it. label starts NULL and is filled in once a feedback_labels row exists for this transaction --
+-- kept as a denormalized copy here (rather than always joining) so ml/load_datasets.py can read
+-- a single table for a ready-to-train (features, label) pair.
+CREATE TABLE IF NOT EXISTS training_examples (
+  transaction_id TEXT PRIMARY KEY,
+  feature_json TEXT NOT NULL,
+  label INTEGER,
+  computed_at TEXT NOT NULL,
+  FOREIGN KEY (transaction_id) REFERENCES transactions(transaction_id)
+);
+
+-- Continuous Learning Extension: the actual "retrains from analyst decisions" ground truth.
+-- Populated automatically (server/feedbackLabels.js) when an analyst blacklists/whitelists an
+-- account (existing POST /fraud-lists) or resolves a case (existing cases.outcome) -- these are
+-- real human decisions that already happen in this app, turned into training labels, not a new
+-- UI. source records which analyst action produced the label, for audit/debugging a model that
+-- later looks wrong.
+CREATE TABLE IF NOT EXISTS feedback_labels (
+  transaction_id TEXT PRIMARY KEY,
+  label INTEGER NOT NULL CHECK (label IN (0, 1)),
+  source TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (transaction_id) REFERENCES transactions(transaction_id)
+);
+
+-- Continuous Learning Extension: self-updating composite reputation per entity (server/reputation.js).
+-- Distinct from mule_accounts (a specific confirmed pattern) -- this is the general "how has this
+-- entity's own history looked so far" score, incrementally updated on every transaction it's a
+-- party to. entity_type keeps the same free-form entity_id space usable across user/device/
+-- merchant/ip/pair without collisions (mirrors entity_baselines' own entity_id conventions).
+CREATE TABLE IF NOT EXISTS entity_reputation (
+  entity_id TEXT NOT NULL,
+  entity_type TEXT NOT NULL,
+  score REAL NOT NULL DEFAULT 50,
+  flag_count INTEGER NOT NULL DEFAULT 0,
+  txn_count INTEGER NOT NULL DEFAULT 0,
+  last_updated_at TEXT,
+  PRIMARY KEY (entity_id, entity_type)
+);
+
+-- Continuous Learning Extension: a persisted graph store (server/graphIntelligence.js), replacing
+-- GET /graph/relationships' live SQL self-joins for the edges a transaction actually produces.
+-- Incrementally upserted after each transaction (mirrors entity_baselines' upsert pattern) rather
+-- than recomputed on read, so the periodic cluster-discovery pass (below) has a stable graph to
+-- run union-find over without re-deriving it from raw transactions every scan cycle.
+CREATE TABLE IF NOT EXISTS graph_edges (
+  source TEXT NOT NULL,
+  target TEXT NOT NULL,
+  edge_type TEXT NOT NULL,
+  weight REAL NOT NULL DEFAULT 0,
+  txn_count INTEGER NOT NULL DEFAULT 0,
+  total_amount REAL NOT NULL DEFAULT 0,
+  last_seen_at TEXT NOT NULL,
+  PRIMARY KEY (source, target, edge_type)
+);
+
+-- Continuous Learning Extension: mule-ring / community clusters discovered by
+-- graphIntelligence.js's periodic union-find pass over graph_edges (run inside the existing
+-- structuring background job cycle, not a new timer). Persisted (not just live-computed) so a
+-- once-discovered ring stays a matter of record, same reasoning mule_accounts already applies to
+-- individually confirmed mules.
+CREATE TABLE IF NOT EXISTS graph_clusters (
+  cluster_id TEXT PRIMARY KEY,
+  member_ids_json TEXT NOT NULL,
+  risk_score REAL NOT NULL,
+  discovered_at TEXT NOT NULL
 );
 `;
 

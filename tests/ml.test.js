@@ -1,10 +1,26 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const net = require('node:net');
+const { DatabaseSync } = require('node:sqlite');
 
 const { getFraudProbability, scoreLocal } = require('../server/ml/mlClient');
+const { SCHEMA } = require('../server/db');
+const { updateBaseline } = require('../server/adaptiveBaseline');
+
+// Continuous Learning Extension: scoreLocal/getFraudProbability now take an optional db, used
+// only when the currently-loaded local model happens to be an XGBoost export (server/ml/mlClient.js's
+// model_type dispatch) -- passed here so these tests pass regardless of which model is active on
+// this machine (the legacy logistic model by default, or a freshly GPU-trained one after
+// ml/train_model_gpu.py has been run), rather than assuming one specific model is always loaded.
+function buildTestDb() {
+  const db = new DatabaseSync(':memory:');
+  db.exec(SCHEMA);
+  return db;
+}
 
 const cleanTransaction = {
+  sender_id: 'u_ml_test_sender',
+  receiver_id: 'u_ml_test_receiver',
   amount: 150,
   timestamp: '2026-07-18T13:00:00Z',
   device_id: 'd_known',
@@ -16,6 +32,8 @@ const cleanHistory = {
 };
 
 const suspiciousTransaction = {
+  sender_id: 'u_ml_test_sender',
+  receiver_id: 'u_ml_test_receiver_2',
   amount: 9000,
   timestamp: '2026-07-18T03:00:00Z',
   device_id: 'd_unknown',
@@ -35,27 +53,41 @@ const suspiciousHistory = {
 };
 
 test('scoreLocal: returns a probability in [0, 1] for a clean transaction', () => {
-  const p = scoreLocal(cleanTransaction, cleanHistory);
+  const db = buildTestDb();
+  const p = scoreLocal(cleanTransaction, cleanHistory, db);
   assert.ok(p >= 0 && p <= 1, `expected [0,1], got ${p}`);
 });
 
 test('scoreLocal: a suspicious multi-signal transaction scores higher than a clean one', () => {
-  const clean = scoreLocal(cleanTransaction, cleanHistory);
-  const suspicious = scoreLocal(suspiciousTransaction, suspiciousHistory);
+  const db = buildTestDb();
+  // Continuous Learning Extension: scoreLocal now dispatches to whichever model is currently
+  // loaded (legacy logistic, via extractFeatures' userHistory-based heuristics, or an XGBoost
+  // export, via computeFeatureVector's DB-derived entity_baselines z-scores) -- seeding a real
+  // baseline history here (mirroring tests/adaptiveRiskEngine.test.js's seeding pattern) is what
+  // makes "suspicious" actually read as anomalous under *either* feature space, rather than this
+  // test only holding for whichever model happened to be active.
+  for (let i = 0; i < 10; i++) {
+    updateBaseline(db, cleanTransaction.sender_id, 'amount', 150 + i, '2026-07-18T09:00:00.000Z');
+  }
+
+  const clean = scoreLocal(cleanTransaction, cleanHistory, db);
+  const suspicious = scoreLocal(suspiciousTransaction, suspiciousHistory, db);
   assert.ok(suspicious > clean, `expected suspicious (${suspicious}) > clean (${clean})`);
 });
 
 test('getFraudProbability: resolves to a number in [0, 1] under the default local mode', async () => {
-  const p = await getFraudProbability(cleanTransaction, cleanHistory);
+  const db = buildTestDb();
+  const p = await getFraudProbability(cleanTransaction, cleanHistory, db);
   assert.equal(typeof p, 'number');
   assert.ok(p >= 0 && p <= 1);
 });
 
 test('getFraudProbability: fails open to 0 when ML_SERVING_MODE is an unimplemented backend', async () => {
+  const db = buildTestDb();
   const original = process.env.ML_SERVING_MODE;
   process.env.ML_SERVING_MODE = 'vertex';
   try {
-    const p = await getFraudProbability(cleanTransaction, cleanHistory);
+    const p = await getFraudProbability(cleanTransaction, cleanHistory, db);
     assert.equal(p, 0);
   } finally {
     if (original === undefined) delete process.env.ML_SERVING_MODE;

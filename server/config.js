@@ -9,9 +9,11 @@
 // this project's existing conventions (e.g. mlClient.js's cachedModel).
 
 const REFUND_INTEGRITY = {
-  // Feature 2: a customer with this many refund transactions against one business account in
-  // MULTIPLE_REFUND_WINDOW_MS is flagged, independent of whether any single refund looks fine.
-  MAX_REFUNDS_PER_CUSTOMER: 3,
+  // Feature 2: the fixed-count threshold this window originally paired with (MAX_REFUNDS_PER_
+  // CUSTOMER) was replaced by an adaptive per-(business,customer) refund-pacing baseline --
+  // see ADAPTIVE_BASELINE.REFUND_* below and server/rules/multipleRefundDetection.js. The window
+  // itself is kept: it still scopes refundCountToCustomer/refundTotalToCustomer, general-purpose
+  // outbound-context fields other callers (dashboard, analytics) may reasonably want.
   MULTIPLE_REFUND_WINDOW_MS: 24 * 60 * 60 * 1000, // 24h
   // Feature 9: refund velocity -- N refunds from one business account within WINDOW_MS.
   REFUND_VELOCITY_COUNT: 20,
@@ -146,6 +148,101 @@ const CIRCULAR_FLOW = {
   CIRCULAR_FLOW_LOOKBACK_MS: 24 * 60 * 60 * 1000,
 };
 
+// Dynamic Risk Engine (Merchant Risk Intelligence pass): thresholds for the adaptive-baseline
+// detectors (server/adaptiveBaseline.js). These are deliberately *statistical* configuration --
+// "how many standard deviations counts as unusual" -- not a business-specific magic number like
+// "amount > 10000". The same Z_THRESHOLD applies uniformly to every entity; what actually varies
+// per entity is each one's own learned mean/stddev, not this constant.
+const ADAPTIVE_BASELINE = {
+  // Below this many prior observations, an entity's own baseline isn't trustworthy yet (too few
+  // points to estimate a meaningful mean/stddev from) -- same "insufficient history" gate this
+  // project already uses elsewhere (amountAnomaly.js's pre-existing MIN_HISTORY_FOR_ANOMALY,
+  // payoutToNewReceiver.js's MIN_OUTBOUND_HISTORY_FOR_CHECK).
+  MIN_HISTORY_FOR_BASELINE: 5,
+  // Interval baseline (velocity.js): time between a sender's consecutive transactions, in ms.
+  // A burst is flagged when its average spacing is this many standard deviations *faster*
+  // (shorter interval) than the sender's own historical pace.
+  VELOCITY_Z_THRESHOLD: 2.5,
+  // A recent-window burst of fewer than this many transactions is never flagged on velocity
+  // grounds alone, regardless of z-score -- a single transaction can't establish "a burst".
+  VELOCITY_MIN_BURST_COUNT: 3,
+  // Floor for interval stddev (ms) -- prevents a division blowup for an entity whose few known
+  // intervals happen to be identical so far.
+  VELOCITY_STDDEV_FLOOR_MS: 1000,
+  // Assumed typical pace (ms between transactions) for a brand-new sender with no interval
+  // baseline yet -- not "no fraud possible", just "no personal history to compare against yet",
+  // same reasoning as amountAnomaly.js skipping brand-new accounts rather than guessing.
+  VELOCITY_DEFAULT_INTERVAL_MS: 5 * 60 * 1000,
+  // Assumed variability around that default pace -- deliberately tighter than a real learned
+  // stddev would usually be, since a brand-new account has offered no evidence yet that a wide
+  // spread of intervals is normal *for them*; a real deviation should still read as clearly
+  // unusual against this conservative assumption, not get diluted into insignificance.
+  VELOCITY_DEFAULT_STDDEV_MS: 60 * 1000,
+
+  // Amount baseline (amountAnomaly.js): flags a transaction whose amount is this many standard
+  // deviations above the sender's own historical average spend -- replaces the old fixed
+  // "3x the average" multiplier, which treated a low-variance and a high-variance spender
+  // identically.
+  AMOUNT_Z_THRESHOLD: 3,
+  // Floor for amount stddev, in the transaction's own currency units -- prevents a division
+  // blowup for a sender whose few known amounts happen to be identical so far. An absolute floor
+  // alone would be wrong at different scales (₹10 is a meaningful floor for a ₹50-average
+  // account, meaningless noise for a ₹50,000-average one), so the real floor used is
+  // max(AMOUNT_STDDEV_FLOOR, avg * AMOUNT_MIN_RELATIVE_STDDEV) -- whichever is larger.
+  AMOUNT_STDDEV_FLOOR: 10,
+  AMOUNT_MIN_RELATIVE_STDDEV: 0.1, // at least 10% of the sender's own average, regardless of scale
+
+  // Refund-interval baseline (multipleRefundDetection.js): time between a (business, customer)
+  // pair's consecutive refunds, in ms. Replaces the old fixed "more than 3 refunds" count.
+  REFUND_Z_THRESHOLD: 2,
+  REFUND_STDDEV_FLOOR_MS: 60 * 1000,
+  // Assumed typical pace for a (business, customer) pair with no refund-interval baseline yet
+  // (i.e. this is at most their second-ever refund from this business) -- generous, since one or
+  // two refunds establish no real pattern either way.
+  REFUND_DEFAULT_INTERVAL_MS: 7 * 24 * 60 * 60 * 1000, // 7 days
+};
+
+// Continuous Learning Extension: self-updating composite reputation per entity (server/reputation.js).
+// The core rate (flag_count / txn_count) is Laplace-smoothed with a weak neutral prior rather than
+// used raw -- a brand-new entity's first-ever transaction being flagged would otherwise swing its
+// score straight to 100 (1/1), and a real "risky" entity would look identical to one with a single
+// unlucky flag. PRIOR_FLAGGED/PRIOR_TOTAL fixes both: a brand-new entity (txn_count=0) reads as
+// exactly PRIOR_FLAGGED/PRIOR_TOTAL = 50 (neutral, matching entity_reputation's own DEFAULT 50),
+// and the prior's weight shrinks automatically as real history accumulates.
+const REPUTATION = {
+  PRIOR_FLAGGED: 4,
+  PRIOR_TOTAL: 8,
+  // Overlay floors, same "hard floor regardless of the computed rate" pattern scoring.js already
+  // uses for BLACKLIST_FLOOR/STRUCTURING_ALERT_FLOOR -- a confirmed-bad account's reputation score
+  // shouldn't be votable back down by a long tail of unrelated clean transactions.
+  BLACKLIST_SCORE_FLOOR: 90,
+  MULE_SCORE_FLOOR: 75,
+  // A receiver's reputation score at or above this is worth surfacing as its own detector finding
+  // (server/rules/entityReputationRisk.js), independent of whatever specific pattern (mule,
+  // blacklist, plain flag history) is driving it.
+  RISK_FLAG_THRESHOLD: 70,
+};
+
+// Continuous Learning Extension, Phase C: graph-relationship discovery (server/graphIntelligence.js).
+// Reopens Section 16 Category 4 (Community Detection/Graph Clustering), previously out of scope
+// for the same "needs infrastructure this project doesn't have" reason as the ML items above --
+// see architecture.md Section 16/17 for the reconciled status.
+const GRAPH_INTELLIGENCE = {
+  // A "cluster" of 2 is just an edge -- not a ring. 3+ distinct accounts connected (directly or
+  // via a shared device/IP/identity link) is the smallest shape actually worth surfacing as a
+  // discovered network.
+  MIN_CLUSTER_SIZE: 3,
+  // Only edges seen within this window count toward a cluster -- same reasoning
+  // CIRCULAR_FLOW.CIRCULAR_FLOW_LOOKBACK_MS already applies: a long-dormant, no-longer-relevant
+  // connection shouldn't permanently glue two account clusters together in every future scan.
+  CLUSTER_LOOKBACK_MS: 24 * 60 * 60 * 1000,
+  // A cluster is only worth persisting/alerting on once its members' average reputation risk
+  // (server/reputation.js) crosses this bar -- most ordinary multi-hop transaction chains
+  // (a supplier paying several vendors who pay each other) are not fraud rings, so clustering
+  // alone isn't the signal; clustering *combined with* elevated reputation is.
+  CLUSTER_RISK_THRESHOLD: 60,
+};
+
 module.exports = {
   REFUND_INTEGRITY,
   VENDOR_RISK,
@@ -161,4 +258,7 @@ module.exports = {
   SHARED_IDENTIFIER_RISK,
   DEVICE_FINGERPRINT_RISK,
   FRAUD_LISTS,
+  ADAPTIVE_BASELINE,
+  REPUTATION,
+  GRAPH_INTELLIGENCE,
 };

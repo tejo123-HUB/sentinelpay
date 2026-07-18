@@ -10,11 +10,25 @@ const { requireApiKey } = require('../middleware/apiKeyAuth');
 const { computeMuleScore } = require('../muleScore');
 const { buildXlsxWorkbook } = require('../xlsxWriter');
 const { FRAUD_SIGNATURES } = require('../fraudSignatures');
+const { computeReputationScore } = require('../reputation');
+const { deviceEntityId, ipEntityId } = require('../featureStore');
 
 const DEFAULT_TOP_LIMIT = 10;
 const MAX_TOP_LIMIT = 100;
 const MULE_CANDIDATE_SCAN_LIMIT = 200; // bounds the per-receiver mule-score scan, same reasoning as MULE_SCORE_MAX_RECEIPTS_SCANNED
 const VALID_DIMENSIONS = ['customers', 'merchants', 'employees', 'vendors', 'devices', 'ips', 'countries'];
+// Continuous Learning Extension: which server/reputation.js entity type (and id transform, for
+// the entity types featureStore.js prefixes) each risk-profile dimension maps to -- 'employees'
+// and 'countries' have no reputation coverage (fraud_lists/mule_accounts and entity_baselines'
+// device/merchant/ip/pair metrics were never keyed by employee_id or country), so those dimensions
+// simply get no reputation field rather than a fabricated one.
+const REPUTATION_DIMENSION = {
+  customers: { entityType: 'user', toEntityId: (id) => id },
+  merchants: { entityType: 'user', toEntityId: (id) => id },
+  vendors: { entityType: 'user', toEntityId: (id) => id },
+  devices: { entityType: 'device', toEntityId: deviceEntityId },
+  ips: { entityType: 'ip', toEntityId: ipEntityId },
+};
 const DIMENSION_COLUMN = {
   customers: 'receiver_id',
   merchants: 'sender_id',
@@ -216,6 +230,17 @@ router.get('/analytics/risk-profile', requireApiKey, (req, res) => {
     else if (flaggedRatio >= 0.2 || healthScore < 70) riskTier = 'Medium';
   }
 
+  // Continuous Learning Extension: the self-updating composite reputation score for this same
+  // entity (server/reputation.js) -- an additional field alongside health_score, not a
+  // replacement for it. health_score above is a point-in-time average over this entity's
+  // transaction history as currently stored; reputation.score is the incrementally-maintained
+  // running score (Laplace-smoothed flag rate + blacklist/mule floors), the same number
+  // entityReputationRisk.js's live scoring decision actually reads.
+  const reputationDimension = REPUTATION_DIMENSION[dimension];
+  const reputation = reputationDimension
+    ? computeReputationScore(db, reputationDimension.toEntityId(id), reputationDimension.entityType)
+    : null;
+
   res.json({
     dimension,
     id,
@@ -231,6 +256,7 @@ router.get('/analytics/risk-profile', requireApiKey, (req, res) => {
     last_activity: totals.last_activity || null,
     top_flag_types: topFlagTypes.map((r) => ({ flag_type: r.flag_type, count: r.count })),
     recent_transactions: recentTransactions,
+    reputation: reputation ? { score: Math.round(reputation.score), reason_breakdown: reputation.reasonBreakdown } : null,
   });
 });
 

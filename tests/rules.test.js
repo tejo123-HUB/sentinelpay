@@ -56,6 +56,61 @@ test('velocity: does not flag normal transaction frequency', () => {
   assert.equal(result.weight, 0);
 });
 
+test('velocity (Dynamic Risk Engine): the exact same burst is NOT flagged for an account whose own learned baseline is already this fast (adaptive, not a fixed count)', () => {
+  // Same 6-transactions-in-25s burst as the "flags a sender" test above, but this account's own
+  // interval baseline says ~5s apart is completely normal for them (a high-throughput storefront,
+  // say) -- the whole point of an adaptive baseline over a fixed "5 in 60s" rule.
+  const recentTransactions = Array.from({ length: 5 }, (_, i) => ({
+    timestamp: isoAt(-(i + 1) * 5000),
+  }));
+  const transaction = { timestamp: isoAt(0) };
+  const intervalBaseline = { count: 500, mean: 5000, m2: 500 * (1000 * 1000) }; // ~5s mean, ~1s stddev, well-established
+
+  const result = velocity(transaction, { recentTransactions, intervalBaseline });
+
+  assert.equal(result.flagged, false);
+});
+
+test('velocity (Dynamic Risk Engine): a burst well within this account\'s own normal variance is not flagged, even if it would look fast in isolation', () => {
+  const recentTransactions = Array.from({ length: 5 }, (_, i) => ({
+    timestamp: isoAt(-(i + 1) * 10000), // 5 in 50s
+  }));
+  const transaction = { timestamp: isoAt(0) };
+  // This account's own history: averages one every ~11s with a wide spread (high variance) --
+  // a ~10s burst is unremarkable for them specifically.
+  const intervalBaseline = { count: 200, mean: 11000, m2: 200 * (4000 * 4000) };
+
+  const result = velocity(transaction, { recentTransactions, intervalBaseline });
+
+  assert.equal(result.flagged, false);
+});
+
+test('velocity (Dynamic Risk Engine): a burst far faster than this account\'s own established baseline is flagged, even at a low absolute count', () => {
+  // Only 3 total transactions in the burst (below the old fixed "5" threshold entirely) -- but
+  // this account's own baseline says one every ~10 minutes, tightly, so three in under a minute
+  // is a real behavioral deviation for *them* specifically.
+  const recentTransactions = [{ timestamp: isoAt(-20000) }, { timestamp: isoAt(-40000) }];
+  const transaction = { timestamp: isoAt(0) };
+  const intervalBaseline = { count: 100, mean: 10 * 60 * 1000, m2: 100 * (30 * 1000) ** 2 };
+
+  const result = velocity(transaction, { recentTransactions, intervalBaseline });
+
+  assert.equal(result.flagged, true);
+  assert.match(result.reason, /σ faster than this account's own typical pace/);
+});
+
+test('velocity (Dynamic Risk Engine): a burst below the minimum count is never flagged regardless of z-score', () => {
+  const recentTransactions = [{ timestamp: isoAt(-5000) }];
+  const transaction = { timestamp: isoAt(0) };
+  // An extremely tight, fast baseline that would otherwise make even this pair look "slow" --
+  // irrelevant, since a single prior transaction can't establish a burst at all.
+  const intervalBaseline = { count: 100, mean: 3 * 60 * 60 * 1000, m2: 100 * (1000) ** 2 };
+
+  const result = velocity(transaction, { recentTransactions, intervalBaseline });
+
+  assert.equal(result.flagged, false);
+});
+
 // ---- impossibleTravel ----
 
 test('impossibleTravel: flags a location jump implying implausible speed', () => {
@@ -91,20 +146,23 @@ test('impossibleTravel: does not flag a small, plausible location change', () =>
   assert.equal(result.flagged, false);
 });
 
-// ---- amountAnomaly ----
+// ---- amountAnomaly (Dynamic Risk Engine: z-score against the sender's own amount baseline) ----
 
 test('amountAnomaly: flags an amount far above the user average', () => {
-  const userHistory = { user: { avg_transaction_amount: 200 }, transactionCount: 10 };
+  // count=10, mean=200, modest spread (stddev=50) -- 4000 is a real, extreme outlier for this
+  // specific account's own history, not just a fixed "3x the average" rule.
+  const userHistory = { user: { avg_transaction_amount: 200 }, amountBaseline: { count: 10, mean: 200, m2: 10 * 50 * 50 } };
   const transaction = { amount: 4000 };
 
   const result = amountAnomaly(transaction, userHistory);
 
   assert.equal(result.flagged, true);
   assert.match(result.reason, /average spend/);
+  assert.match(result.reason, /σ above/);
 });
 
 test('amountAnomaly: does not flag an amount close to the user average', () => {
-  const userHistory = { user: { avg_transaction_amount: 200 }, transactionCount: 10 };
+  const userHistory = { user: { avg_transaction_amount: 200 }, amountBaseline: { count: 10, mean: 200, m2: 10 * 50 * 50 } };
   const transaction = { amount: 250 };
 
   const result = amountAnomaly(transaction, userHistory);
@@ -113,8 +171,40 @@ test('amountAnomaly: does not flag an amount close to the user average', () => {
 });
 
 test('amountAnomaly: skips users without meaningful history', () => {
-  const userHistory = { user: { avg_transaction_amount: 50 }, transactionCount: 1 };
+  const userHistory = { user: { avg_transaction_amount: 50 }, amountBaseline: { count: 1, mean: 50, m2: 0 } };
   const transaction = { amount: 5000 };
+
+  const result = amountAnomaly(transaction, userHistory);
+
+  assert.equal(result.flagged, false);
+});
+
+test('amountAnomaly (Dynamic Risk Engine): the same amount is flagged for a low-variance spender but not for a high-variance one (adaptive, not a fixed multiplier)', () => {
+  // Both accounts average ₹500 and this transaction is ₹1800 (3.6x average) -- the exact kind of
+  // amount the old fixed "3x the average" rule would have flagged for *both* accounts identically.
+  const transaction = { amount: 1800 };
+
+  const tightSpender = {
+    user: { avg_transaction_amount: 500 },
+    amountBaseline: { count: 20, mean: 500, m2: 20 * 100 * 100 }, // stddev=100 -- consistently spends close to ₹500
+  };
+  const wideSpender = {
+    user: { avg_transaction_amount: 500 },
+    amountBaseline: { count: 20, mean: 500, m2: 20 * 600 * 600 }, // stddev=600 -- routinely spends anywhere from ₹0 to ₹2000+
+  };
+
+  assert.equal(amountAnomaly(transaction, tightSpender).flagged, true);
+  assert.equal(amountAnomaly(transaction, wideSpender).flagged, false);
+});
+
+test('amountAnomaly: the stddev floor scales with the account\'s own average, not a flat currency amount', () => {
+  // A high-average business account (₹50,000 typical) whose amounts happen to be nearly
+  // identical so far (m2≈0, a tiny real stddev) must not become absurdly sensitive to any
+  // deviation -- the floor scales to 10% of its own average, not a flat ₹10.
+  const userHistory = { user: { avg_transaction_amount: 50000 }, amountBaseline: { count: 5, mean: 50000, m2: 5 * 1 * 1 } };
+  // 15% above average -- unremarkable for a business this size, must not flag against a flat
+  // near-zero floor the way it would have without the relative floor.
+  const transaction = { amount: 57500 };
 
   const result = amountAnomaly(transaction, userHistory);
 
@@ -335,19 +425,27 @@ test('refundAccountMismatch: ignores non-refund transactions', () => {
   assert.equal(result.flagged, false);
 });
 
-// ---- multipleRefundDetection (Section 15.16, Feature 2) ----
+// ---- multipleRefundDetection (Dynamic Risk Engine: adaptive refund-pacing baseline) ----
 
-test('multipleRefundDetection: flags multiple refund attempts to the same customer', () => {
-  const transaction = { amount: 100, purpose: 'Refund' };
-  const result = multipleRefundDetection(transaction, { refundCountToCustomer: 3 });
+test('multipleRefundDetection: flags a refund arriving much faster than this pair\'s own established refund pacing', () => {
+  const transaction = { amount: 100, purpose: 'Refund', timestamp: isoAt(0) };
+  const context = {
+    lastRefundToCustomerAt: isoAt(-3600 * 1000), // 1 hour ago
+    // This customer/business pair's own history: refunds roughly every 30 days, tightly (~2 day stddev).
+    refundIntervalBaseline: { count: 10, mean: 30 * 24 * 60 * 60 * 1000, m2: 10 * (2 * 24 * 60 * 60 * 1000) ** 2 },
+  };
+  const result = multipleRefundDetection(transaction, context);
 
   assert.equal(result.flagged, true);
-  assert.equal(result.reason, 'Multiple refund attempts detected.');
+  assert.match(result.reason, /Multiple refund attempts detected/);
+  assert.match(result.reason, /faster than this customer's usual refund pacing/);
 });
 
 test('multipleRefundDetection: flags cumulative refunds exceeding the original purchase', () => {
-  const transaction = { amount: 300, purpose: 'Refund' };
-  const context = { refundCountToCustomer: 0, referencedPurchase: { amount: 500 }, referencedPurchaseRefundedTotal: 300 };
+  const transaction = { amount: 300, purpose: 'Refund', timestamp: isoAt(0) };
+  // No lastRefundToCustomerAt -- this is their first-ever refund from this business, so the
+  // pacing check has nothing to compare against and correctly falls through to the purchase check.
+  const context = { referencedPurchase: { amount: 500 }, referencedPurchaseRefundedTotal: 300 };
   const result = multipleRefundDetection(transaction, context);
 
   assert.equal(result.flagged, true);
@@ -355,8 +453,33 @@ test('multipleRefundDetection: flags cumulative refunds exceeding the original p
 });
 
 test('multipleRefundDetection: does not flag a single ordinary refund', () => {
-  const transaction = { amount: 100, purpose: 'Refund' };
-  const context = { refundCountToCustomer: 0, referencedPurchase: { amount: 500 }, referencedPurchaseRefundedTotal: 0 };
+  const transaction = { amount: 100, purpose: 'Refund', timestamp: isoAt(0) };
+  const context = { referencedPurchase: { amount: 500 }, referencedPurchaseRefundedTotal: 0 };
+  const result = multipleRefundDetection(transaction, context);
+
+  assert.equal(result.flagged, false);
+});
+
+test('multipleRefundDetection (Dynamic Risk Engine): the same 1-hour refund gap is NOT flagged for a pair whose own baseline says frequent refunds are routine', () => {
+  // Same interval as the "flags" test above, but this business/customer pair's own established
+  // pattern already involves refunds roughly every few hours -- routine for *them*, not the same
+  // fixed count/window that would apply identically to every pair.
+  const transaction = { amount: 100, purpose: 'Refund', timestamp: isoAt(0) };
+  const context = {
+    lastRefundToCustomerAt: isoAt(-3600 * 1000),
+    refundIntervalBaseline: { count: 20, mean: 2 * 3600 * 1000, m2: 20 * (3600 * 1000) ** 2 }, // ~2h mean, ~1h stddev
+  };
+  const result = multipleRefundDetection(transaction, context);
+
+  assert.equal(result.flagged, false);
+});
+
+test('multipleRefundDetection: a pair with no established baseline yet falls back to a conservative default pace, not a hair-trigger', () => {
+  const transaction = { amount: 100, purpose: 'Refund', timestamp: isoAt(0) };
+  // Their second-ever refund, six days after the first -- close to the conservative default
+  // (7 days) assumed for a pair with no real pacing history yet, so it reads as unremarkable
+  // rather than getting compared against an overly tight assumption.
+  const context = { lastRefundToCustomerAt: isoAt(-6 * 24 * 3600 * 1000), refundIntervalBaseline: { count: 1, mean: 6 * 24 * 3600 * 1000, m2: 0 } };
   const result = multipleRefundDetection(transaction, context);
 
   assert.equal(result.flagged, false);

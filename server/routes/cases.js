@@ -9,8 +9,10 @@ const router = express.Router();
 
 const { requireApiKey, requireRole } = require('../middleware/apiKeyAuth');
 const { MAX_ID_LENGTH } = require('../validate');
+const { labelCaseTransactions } = require('../feedbackLabels');
 
 const VALID_STATUSES = ['open', 'investigating', 'resolved', 'escalated'];
+const VALID_OUTCOMES = ['confirmed_fraud', 'false_positive'];
 const MAX_TITLE_LENGTH = 256;
 const MAX_ASSIGNED_TO_LENGTH = 128;
 const DEFAULT_LIMIT = 50;
@@ -22,6 +24,7 @@ function serializeCase(row) {
     title: row.title,
     status: row.status,
     assigned_to: row.assigned_to,
+    outcome: row.outcome || null,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
@@ -117,7 +120,7 @@ router.patch('/cases/:caseId', requireApiKey, requireRole('analyst'), (req, res)
     return res.status(404).json({ error: `No case found with case_id ${req.params.caseId}` });
   }
 
-  const { status, assigned_to, title } = req.body || {};
+  const { status, assigned_to, title, outcome } = req.body || {};
   if (status !== undefined && !VALID_STATUSES.includes(status)) {
     return res.status(400).json({ error: `status must be one of: ${VALID_STATUSES.join(', ')}` });
   }
@@ -127,21 +130,35 @@ router.patch('/cases/:caseId', requireApiKey, requireRole('analyst'), (req, res)
   if (assigned_to !== undefined && assigned_to !== null && (typeof assigned_to !== 'string' || assigned_to.length > MAX_ASSIGNED_TO_LENGTH)) {
     return res.status(400).json({ error: `assigned_to must be at most ${MAX_ASSIGNED_TO_LENGTH} characters` });
   }
+  // Continuous Learning Extension, Phase F: outcome is a real analyst verdict (see cases.outcome's
+  // schema comment) -- validated the same way status/title already are, not just accepted as-is.
+  if (outcome !== undefined && outcome !== null && !VALID_OUTCOMES.includes(outcome)) {
+    return res.status(400).json({ error: `outcome must be one of: ${VALID_OUTCOMES.join(', ')}` });
+  }
 
   const nextStatus = status !== undefined ? status : existing.status;
   const nextAssignedTo = assigned_to !== undefined ? assigned_to : existing.assigned_to;
   const nextTitle = title !== undefined ? title : existing.title;
+  const nextOutcome = outcome !== undefined ? outcome : existing.outcome;
   const nowIso = new Date().toISOString();
 
-  db.prepare('UPDATE cases SET status = ?, assigned_to = ?, title = ?, updated_at = ? WHERE case_id = ?').run(
+  db.prepare('UPDATE cases SET status = ?, assigned_to = ?, title = ?, outcome = ?, updated_at = ? WHERE case_id = ?').run(
     nextStatus,
     nextAssignedTo,
     nextTitle,
+    nextOutcome,
     nowIso,
     req.params.caseId
   );
 
-  res.json({ case_id: req.params.caseId, title: nextTitle, status: nextStatus, assigned_to: nextAssignedTo, updated_at: nowIso });
+  // Only fires the moment outcome actually *changes* to a definite verdict -- re-saving a case
+  // that already had this outcome (e.g. an unrelated title edit) shouldn't repeatedly relabel and
+  // re-timestamp the same transactions.
+  if (outcome !== undefined && outcome !== existing.outcome && (outcome === 'confirmed_fraud' || outcome === 'false_positive')) {
+    labelCaseTransactions(db, req.params.caseId, outcome === 'confirmed_fraud' ? 1 : 0, Date.now());
+  }
+
+  res.json({ case_id: req.params.caseId, title: nextTitle, status: nextStatus, assigned_to: nextAssignedTo, outcome: nextOutcome, updated_at: nowIso });
 });
 
 // POST /cases/:caseId/transactions { transaction_id } — link an additional transaction.

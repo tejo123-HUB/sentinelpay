@@ -8,6 +8,7 @@ const router = express.Router();
 const { requireApiKey, requireRole } = require('../middleware/apiKeyAuth');
 const { MAX_ID_LENGTH } = require('../validate');
 const { recordAdminAction } = require('../adminAuditLog');
+const { labelRecentTransactionsForAccount } = require('../feedbackLabels');
 
 const VALID_LIST_TYPES = ['blacklist', 'whitelist', 'watchlist'];
 const MAX_REASON_LENGTH = 256;
@@ -60,6 +61,16 @@ router.post('/fraud-lists', requireApiKey, requireRole('admin'), (req, res) => {
     nowIso
   );
   recordAdminAction(db, { action: 'create', targetType: `fraud_list:${list_type}`, targetId: account_id, detail: reason, actorIp: req.ip });
+
+  // Continuous Learning Extension, Phase F: a blacklist/whitelist decision is a real analyst
+  // verdict on this account -- feed it into feedback_labels as ground truth for
+  // ml/retrain.py. watchlist is deliberately excluded: "watch this" isn't a confirmed verdict
+  // either way, and labeling it as either class would be a fabricated, noisy label.
+  if (list_type === 'blacklist') {
+    labelRecentTransactionsForAccount(db, account_id, 1, 'blacklist', Date.now());
+  } else if (list_type === 'whitelist') {
+    labelRecentTransactionsForAccount(db, account_id, 0, 'whitelist', Date.now());
+  }
 
   res.status(201).json({ entry_id: entryId, list_type, account_id, reason: typeof reason === 'string' ? reason : null, created_at: nowIso });
 });

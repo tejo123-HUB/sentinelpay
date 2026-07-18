@@ -12,6 +12,9 @@ const router = express.Router();
 const { requireApiKey } = require('../middleware/apiKeyAuth');
 const { MAX_ID_LENGTH } = require('../validate');
 
+const DEFAULT_CLUSTER_LIMIT = 20;
+const MAX_CLUSTER_LIMIT = 100;
+
 const VALID_DEPTHS = [1, 2];
 // Bounds worst-case query cost regardless of how connected an account's network is -- same
 // reasoning as MULE_SCORE_MAX_RECEIPTS_SCANNED (config.js): an unbounded expansion would grow
@@ -115,14 +118,62 @@ router.get('/graph/relationships', requireApiKey, (req, res) => {
     }
   }
 
-  const nodes = [...nodeIds].slice(0, GRAPH_MAX_NODES).map((id) => ({
+  const baseNodes = [...nodeIds].slice(0, GRAPH_MAX_NODES).map((id) => ({
     id,
     type: id === accountId ? 'root' : 'connected',
   }));
-  const keptNodeIds = new Set(nodes.map((n) => n.id));
+  const keptNodeIds = new Set(baseNodes.map((n) => n.id));
   const trimmedEdges = edges.filter((e) => keptNodeIds.has(e.source) && keptNodeIds.has(e.target));
+  const nodes = enrichNodesWithGraphIntelligence(db, baseNodes);
 
   res.json({ root: accountId, depth, nodes, edges: trimmedEdges, truncated: nodeIds.size > GRAPH_MAX_NODES });
+});
+
+// Continuous Learning Extension, Phase C: annotates each node with its persisted graph_clusters
+// membership (server/graphIntelligence.js's periodic union-find pass, not recomputed live here)
+// and its degree in graph_edges -- cheap reads over the now-persisted tables, additive to the
+// existing live self-join response rather than a replacement for it.
+function enrichNodesWithGraphIntelligence(db, nodes) {
+  const clusterRows = db.prepare('SELECT cluster_id, member_ids_json FROM graph_clusters').all();
+  const clusterByMember = new Map();
+  for (const row of clusterRows) {
+    let members = [];
+    try {
+      members = JSON.parse(row.member_ids_json);
+    } catch {
+      members = [];
+    }
+    for (const m of members) clusterByMember.set(m, row.cluster_id);
+  }
+
+  const degreeStmt = db.prepare('SELECT COUNT(*) AS n FROM graph_edges WHERE source = ? OR target = ?');
+  return nodes.map((node) => ({
+    ...node,
+    cluster_id: clusterByMember.get(node.id) || null,
+    degree: degreeStmt.get(node.id, node.id).n,
+  }));
+}
+
+// GET /graph/clusters?limit=20 -- Continuous Learning Extension, Phase C: the persisted,
+// periodically-discovered mule-ring/community clusters (server/graphIntelligence.js), distinct
+// from GET /graph/relationships' single-account live neighborhood view above.
+router.get('/graph/clusters', requireApiKey, (req, res) => {
+  const db = req.app.locals.db;
+  const requested = Number(req.query.limit);
+  const limit = Number.isFinite(requested) && requested > 0 ? Math.min(Math.floor(requested), MAX_CLUSTER_LIMIT) : DEFAULT_CLUSTER_LIMIT;
+
+  const rows = db
+    .prepare('SELECT cluster_id, member_ids_json, risk_score, discovered_at FROM graph_clusters ORDER BY risk_score DESC LIMIT ?')
+    .all(limit);
+
+  res.json({
+    clusters: rows.map((r) => ({
+      cluster_id: r.cluster_id,
+      members: JSON.parse(r.member_ids_json),
+      risk_score: Number(r.risk_score.toFixed(2)),
+      discovered_at: r.discovered_at,
+    })),
+  });
 });
 
 module.exports = router;

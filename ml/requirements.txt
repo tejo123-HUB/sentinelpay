@@ -1,2 +1,7 @@
 numpy>=1.26
 scikit-learn>=1.4
+# Continuous Learning Extension: GPU-accelerated gradient boosting for train_model_gpu.py /
+# retrain.py. GPU support (tree_method="hist", device="cuda") is built into the standard pip
+# wheel -- no separate CUDA toolkit install needed beyond the driver already present.
+xgboost>=2.0
+pandas>=2.0

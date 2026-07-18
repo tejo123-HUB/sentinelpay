@@ -83,7 +83,7 @@ test('GET /graph/relationships: an unknown account still returns a valid empty-i
   try {
     const res = await request(server, 'GET', '/graph/relationships?account_id=u_never_seen');
     assert.equal(res.status, 200);
-    assert.deepEqual(res.body.nodes, [{ id: 'u_never_seen', type: 'root' }]);
+    assert.deepEqual(res.body.nodes, [{ id: 'u_never_seen', type: 'root', cluster_id: null, degree: 0 }]);
     assert.deepEqual(res.body.edges, []);
   } finally {
     server.close();
