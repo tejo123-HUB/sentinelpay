@@ -21,3 +21,7 @@ npm-debug.log*
 # Partial-Feature Completion Pass: uploaded case-evidence binary content (server/caseEvidence.js)
 # -- runtime data, same reasoning as *.db above, not source.
 data/evidence/
+
+# Personal study notes explaining the project for presentations/vivas -- not part of the product,
+# not meant to be shared/reviewed as project source.
+PROJECT_EXPLAINED.md
