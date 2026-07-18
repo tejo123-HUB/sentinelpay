@@ -186,3 +186,21 @@ test('custom-rules mutations require admin role', async () => {
     delete process.env.API_KEY_ANALYST;
   }
 });
+
+// Security fix (post-merge audit): a rule's exact field/operator/value/weight is precisely what a
+// caller needs to learn to craft a transaction that slips under it -- GET /custom-rules previously
+// allowed any valid key (including viewer) to read that out; now requires analyst.
+test('GET /custom-rules requires the analyst role, not just any valid key', async () => {
+  process.env.API_KEY_VIEWER = 'test-viewer-key-rules';
+  const { server } = await freshServer();
+  try {
+    const viewerRes = await request(server, 'GET', '/custom-rules', null, { 'X-API-Key': 'test-viewer-key-rules' });
+    assert.equal(viewerRes.status, 403);
+
+    const adminRes = await request(server, 'GET', '/custom-rules');
+    assert.equal(adminRes.status, 200);
+  } finally {
+    server.close();
+    delete process.env.API_KEY_VIEWER;
+  }
+});

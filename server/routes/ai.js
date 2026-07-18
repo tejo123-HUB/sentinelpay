@@ -4,7 +4,7 @@
 const express = require('express');
 const router = express.Router();
 
-const { requireApiKey } = require('../middleware/apiKeyAuth');
+const { requireApiKey, requireRole } = require('../middleware/apiKeyAuth');
 const { MAX_ID_LENGTH } = require('../validate');
 const {
   parseNaturalLanguageQuery,
@@ -39,7 +39,12 @@ router.post('/ai/search', requireApiKey, (req, res) => {
 // (the same endpoint, scoped to a case's own context when case_id is supplied -- one generic
 // mechanism rather than two near-identical endpoints, this project's established convention e.g.
 // GET /analytics/top-risky's single dimension-parameterized route).
-router.post('/ai/chat', requireApiKey, async (req, res) => {
+// Security fix (post-merge audit): analyst-or-above, not just any valid key -- when
+// ANTHROPIC_API_KEY is configured this makes a real, billed outbound call to the Claude API on
+// every invocation, the same "real-world consequence, not just a read" reasoning that already
+// gates POST /notifications/push-subscriptions above viewer level. /ai/search stays viewer-level:
+// it's regex-only, no external call, no cost.
+router.post('/ai/chat', requireApiKey, requireRole('analyst'), async (req, res) => {
   const db = req.app.locals.db;
   const { message, case_id } = req.body || {};
   if (typeof message !== 'string' || message.trim() === '' || message.length > MAX_MESSAGE_LENGTH) {

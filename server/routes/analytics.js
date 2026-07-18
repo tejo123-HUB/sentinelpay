@@ -303,6 +303,15 @@ router.get('/analytics/known-mules', requireApiKey, (req, res) => {
   res.json(rows);
 });
 
+// Security fix (post-merge audit): `merchant_id` is a caller-supplied field on POST /transaction
+// (validate.js caps it at 128 chars but places no limit on how many distinct values exist) -- a
+// business genuinely has a handful of real payment gateways, but nothing stopped an `analyst`-role
+// caller from inflating merchant_id cardinality arbitrarily and making this endpoint (viewer-
+// reachable, previously no LIMIT at all) return an unbounded result set every time it's called.
+// Capped well above any real deployment's gateway count, not client-configurable (this panel has
+// no pagination UI to drive a `limit` param) -- a safety ceiling, not a feature.
+const MAX_GATEWAY_COMPARISON_ROWS = 500;
+
 // GET /analytics/gateway-comparison — per-merchant_id (gateway) volume/fraud comparison, for the
 // "gateway comparison" dashboard panel -- the whole point of this product per architecture.md
 // Section 1: one aggregated view across every gateway the business uses.
@@ -321,9 +330,10 @@ router.get('/analytics/gateway-comparison', requireApiKey, (req, res) => {
       FROM transactions
       WHERE merchant_id IS NOT NULL
       GROUP BY merchant_id
-      ORDER BY total DESC`
+      ORDER BY total DESC
+      LIMIT ?`
     )
-    .all();
+    .all(MAX_GATEWAY_COMPARISON_ROWS);
 
   res.json(
     rows.map((r) => ({
@@ -347,6 +357,13 @@ const TREND_BUCKET_MS = {
 };
 const DEFAULT_TREND_LOOKBACK_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_TREND_LOOKBACK_MS = 365 * 24 * 60 * 60 * 1000;
+// Security fix (post-merge audit): the time-window cap above bounds *when* rows come from, not
+// *how many* -- a high-volume deployment's 365-day window can still hold millions of rows, and
+// node:sqlite's DatabaseSync is fully synchronous, so pulling all of them into JS to bucket
+// blocks the entire process for every concurrent caller, not just the requester. This row-count
+// safety cap is generous enough that no real-scale trend/forecast chart would ever hit it, but
+// bounds the worst case regardless of how much history accumulates over time.
+const MAX_TREND_ROWS = 200_000;
 
 // GET /analytics/trend?bucket=hour|day|week|month&lookbackHours=720 — fraud trend over time at a
 // configurable granularity, generalizing /audit/summary's fixed hourly-bucket trend chart to the
@@ -362,8 +379,8 @@ router.get('/analytics/trend', requireApiKey, (req, res) => {
   const sinceIso = new Date(Date.now() - lookbackMs).toISOString();
 
   const rows = db
-    .prepare('SELECT timestamp, decision, fraud_score FROM transactions WHERE timestamp >= ? ORDER BY timestamp ASC')
-    .all(sinceIso);
+    .prepare('SELECT timestamp, decision, fraud_score FROM transactions WHERE timestamp >= ? ORDER BY timestamp ASC LIMIT ?')
+    .all(sinceIso, MAX_TREND_ROWS);
 
   const buckets = new Map();
   for (const row of rows) {
@@ -388,7 +405,7 @@ router.get('/analytics/trend', requireApiKey, (req, res) => {
       avg_fraud_score: b.count > 0 ? Number((b.total_score / b.count).toFixed(2)) : 0,
     }));
 
-  res.json({ bucket, buckets: sortedBuckets });
+  res.json({ bucket, buckets: sortedBuckets, truncated: rows.length >= MAX_TREND_ROWS });
 });
 
 const DEFAULT_FORECAST_HORIZON = 6;
@@ -407,8 +424,8 @@ router.get('/analytics/forecast', requireApiKey, (req, res) => {
   const sinceIso = new Date(Date.now() - lookbackMs).toISOString();
 
   const rows = db
-    .prepare(`SELECT timestamp, decision, amount FROM transactions WHERE timestamp >= ? ORDER BY timestamp ASC`)
-    .all(sinceIso);
+    .prepare(`SELECT timestamp, decision, amount FROM transactions WHERE timestamp >= ? ORDER BY timestamp ASC LIMIT ?`)
+    .all(sinceIso, MAX_TREND_ROWS);
 
   const buckets = new Map();
   const nowBucketStart = Math.floor(Date.now() / bucketMs) * bucketMs;

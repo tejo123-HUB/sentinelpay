@@ -179,6 +179,32 @@ test('POST /cases/:caseId/evidence: requires the analyst role', async () => {
   }
 });
 
+// Security fix (post-merge audit): this route streams actual attachment content, not just
+// metadata -- previously reachable by any valid key (including viewer), now requires analyst,
+// matching the upload route's own floor.
+test('GET /cases/:caseId/evidence/:evidenceId/content: requires the analyst role', async () => {
+  process.env.API_KEY_VIEWER = 'test-viewer-key-evidence-read';
+  const { server } = await freshServer();
+  try {
+    const caseId = await createCase(server);
+    const uploadRes = await request(server, 'POST', `/cases/${caseId}/evidence`, {
+      filename: 'a.txt',
+      content_base64: Buffer.from('x').toString('base64'),
+    });
+    const res = await request(
+      server,
+      'GET',
+      `/cases/${caseId}/evidence/${uploadRes.body.evidence_id}/content`,
+      null,
+      { 'X-API-Key': 'test-viewer-key-evidence-read' }
+    );
+    assert.equal(res.status, 403);
+  } finally {
+    delete process.env.API_KEY_VIEWER;
+    server.close();
+  }
+});
+
 test('GET /cases/:caseId/evidence/:evidenceId/content: 404s for an unknown evidence id', async () => {
   const { server } = await freshServer();
   try {

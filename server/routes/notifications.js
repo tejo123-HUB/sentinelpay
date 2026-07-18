@@ -29,6 +29,7 @@ router.post('/notifications/test', requireApiKey, requireRole('admin'), async (r
 const { vapidKeysConfigured } = require('../webPush');
 const { MAX_ID_LENGTH } = require('../validate');
 const { PUSH_SUBSCRIPTIONS } = require('../config');
+const { isDisallowedPushEndpointHost } = require('../utils/ssrf');
 
 // GET /notifications/vapid-public-key -- the dashboard's subscribe flow (dashboard/app.js's
 // initPushNotifications) needs this to call pushManager.subscribe({applicationServerKey}). Public
@@ -49,12 +50,16 @@ router.get('/notifications/vapid-public-key', requireApiKey, (req, res) => {
 //
 // Code-review follow-up (Partial-Feature Completion Pass): analyst-or-above, not just any valid
 // key. A registered subscription causes this server to make a real, VAPID-authenticated outbound
-// HTTPS request to whatever endpoint the caller supplies (only the https:// scheme is validated,
-// there's no allowlist of known push-service hosts) every time a Critical alert fires -- letting
-// the lowest-privilege `viewer` role (elsewhere in this app explicitly scoped to "watch the
-// dashboard but not inject transactions") trigger that is a real privilege-boundary violation, not
-// just a theoretical one. MAX_SUBSCRIPTIONS below bounds the other half of the same risk: even an
-// authorized caller can't turn one Critical alert into an unbounded outbound-request fan-out.
+// HTTPS request to whatever endpoint the caller supplies every time a Critical alert fires --
+// letting the lowest-privilege `viewer` role (elsewhere in this app explicitly scoped to "watch
+// the dashboard but not inject transactions") trigger that is a real privilege-boundary violation,
+// not just a theoretical one. MAX_SUBSCRIPTIONS below bounds the other half of the same risk: even
+// an authorized caller can't turn one Critical alert into an unbounded outbound-request fan-out.
+//
+// Security fix (post-merge audit): the https:// check alone doesn't stop an analyst-role caller
+// from registering an internal/loopback destination directly (e.g. https://169.254.169.254/... or
+// https://127.0.0.1:6379/...) -- see server/utils/ssrf.js for the full SSRF rationale and the
+// documented scope of what this does and doesn't cover.
 router.post('/notifications/push-subscriptions', requireApiKey, requireRole('analyst'), (req, res) => {
   const db = req.app.locals.db;
   const { endpoint, keys } = req.body || {};
@@ -69,6 +74,9 @@ router.post('/notifications/push-subscriptions', requireApiKey, requireRole('ana
   }
   if (parsedOrigin.protocol !== 'https:') {
     return res.status(400).json({ error: 'endpoint must be an https:// URL' });
+  }
+  if (isDisallowedPushEndpointHost(parsedOrigin.hostname)) {
+    return res.status(400).json({ error: 'endpoint host is not allowed' });
   }
   if (!keys || typeof keys.p256dh !== 'string' || typeof keys.auth !== 'string' || keys.p256dh.length > MAX_ID_LENGTH || keys.auth.length > MAX_ID_LENGTH) {
     return res.status(400).json({ error: 'keys.p256dh and keys.auth are required strings' });

@@ -47,7 +47,11 @@ router.post('/custom-rules', requireApiKey, requireRole('admin'), (req, res) => 
   res.status(201).json({ rule_id: ruleId, name, field, operator, value: String(value), weight, severity, enabled: true, created_at: nowIso });
 });
 
-router.get('/custom-rules', requireApiKey, (req, res) => {
+// Security fix (post-merge audit): analyst-or-above, not viewer. A rule's exact field/operator/
+// value/weight is precisely what a caller would need to learn in order to craft a transaction
+// that slips under it -- a business-logic-bypass enabler, not just an operational-config read the
+// way e.g. business_accounts/fraud_lists' own GETs (still viewer-level) are.
+router.get('/custom-rules', requireApiKey, requireRole('analyst'), (req, res) => {
   const db = req.app.locals.db;
   const rows = db.prepare('SELECT * FROM custom_rules ORDER BY created_at DESC').all();
   res.json(rows.map((r) => ({ ...r, enabled: !!r.enabled })));

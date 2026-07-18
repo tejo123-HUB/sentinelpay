@@ -15,6 +15,7 @@
 // silently skipped, same graceful-degradation convention as every other notification channel in
 // notifications.js.
 const crypto = require('node:crypto');
+const { isDisallowedPushEndpointHost } = require('./utils/ssrf');
 
 const VAPID_JWT_TTL_SECONDS = 12 * 60 * 60; // RFC 8292 recommends no more than 24h; well under it
 
@@ -143,6 +144,20 @@ const WEB_PUSH_TIMEOUT_MS = 3000; // same bound as notifications.js's other webh
 async function sendWebPushNotification(subscription, message) {
   if (!vapidKeysConfigured()) {
     return { sent: false, reason: 'VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY not configured' };
+  }
+  // Security fix (post-merge audit): re-check at dispatch time, not just at registration -- a
+  // defense-in-depth backstop for any subscription row already in the database from before this
+  // check existed, rather than assuming the write-side validation is the only guard (same
+  // reasoning as e.g. cases.js's timeline route capping the IN(...) clause regardless of the
+  // write-side cap). See server/utils/ssrf.js for the full rationale.
+  let endpointHost;
+  try {
+    endpointHost = new URL(subscription.endpoint).hostname;
+  } catch {
+    return { sent: false, reason: 'endpoint is not a valid URL' };
+  }
+  if (isDisallowedPushEndpointHost(endpointHost)) {
+    return { sent: false, reason: 'endpoint host is not allowed' };
   }
   try {
     const body = encryptWebPushPayload(subscription, message);

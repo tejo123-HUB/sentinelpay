@@ -82,6 +82,34 @@ async function sendSmsNotification(message) {
   return { sent: true };
 }
 
+// Security fix (post-merge audit): `message` here ultimately traces back to caller-supplied
+// transaction fields (POST /transaction's sender_id/country/ip_address/etc., echoed verbatim into
+// several rule detectors' `reason` strings -- e.g. geoRisk.js -- which end up in the Critical-alert
+// message this function is called with) with no charset restriction from validate.js. Without
+// dot-stuffing, a message containing a bare "\r\n.\r\n" line prematurely ends the SMTP DATA phase,
+// and any bytes written after it in the same socket.write() get parsed as fresh SMTP commands on
+// the same authenticated session (MAIL FROM/RCPT TO/DATA/etc.) -- a genuine SMTP command-injection
+// primitive, not a theoretical one, since this path is reachable end-to-end from an analyst-role
+// POST /transaction call. RFC 5321 §4.5.2's "transparency" mechanism is exactly this: escape any
+// line that begins with "." so only a real, deliberately-written terminator line can end DATA.
+function dotStuffSmtpBody(text) {
+  return String(text ?? '')
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map((line) => (line.startsWith('.') ? `.${line}` : line))
+    .join('\r\n');
+}
+
+// Defense-in-depth for the header block: `subject` is always a hardcoded literal in this
+// codebase's own callers today (CHANNEL_SENDERS.email below), so header injection isn't currently
+// reachable the way the body injection above is -- but sendEmailNotification is an exported,
+// general-purpose function, and a header value containing \r\n could otherwise inject extra
+// headers (e.g. a spoofed Bcc:) before the blank-line body separator. Stripping CR/LF here costs
+// nothing and closes that class of bug for any future caller, not just today's.
+function sanitizeHeaderValue(value) {
+  return String(value ?? '').replace(/[\r\n]+/g, ' ');
+}
+
 // Email, via a minimal hand-rolled SMTP client (Node's built-in net/tls, no nodemailer
 // dependency -- consistent with this project's dependency-light convention). Supports plain
 // SMTP + AUTH LOGIN over a TLS connection (port 465, implicit TLS -- the common case for
@@ -125,8 +153,8 @@ async function sendEmailNotification(subject, message) {
           socket.write(`${commands[step]}\r\n`);
         } else if (!dataSent) {
           dataSent = true;
-          const headers = `From: ${from}\r\nTo: ${to}\r\nSubject: ${subject}\r\n\r\n`;
-          socket.write(`${headers}${message}\r\n.\r\n`);
+          const headers = `From: ${sanitizeHeaderValue(from)}\r\nTo: ${sanitizeHeaderValue(to)}\r\nSubject: ${sanitizeHeaderValue(subject)}\r\n\r\n`;
+          socket.write(`${headers}${dotStuffSmtpBody(message)}\r\n.\r\n`);
         } else {
           socket.write('QUIT\r\n');
           socket.end();
@@ -191,4 +219,6 @@ module.exports = {
   sendSmsNotification,
   sendEmailNotification,
   dispatchCriticalAlert,
+  dotStuffSmtpBody,
+  sanitizeHeaderValue,
 };

@@ -452,6 +452,37 @@ test('multipleRefundDetection: flags cumulative refunds exceeding the original p
   assert.equal(result.reason, 'Refund amount exceeds original purchase.');
 });
 
+// Bug fix (post-merge audit): refundWithoutPurchase.js's referenced-purchase branch and
+// multipleRefundDetection.js's purchase-exceeds branch previously both fired on the exact same
+// underlying fact whenever a refund named the purchase it exceeded (outboundContext.js only ever
+// populates referencedPurchase/referencedPurchaseRefundedTotal together with
+// reference_transaction_id) -- double-counting one real signal as 55+50=105 weight, enough alone
+// to force a block that neither detector's own severity would justify. Confirms only
+// refundWithoutPurchase.js flags this case now, using a realistic context shape (a
+// reference_transaction_id is set, matching how outboundContext.js actually wires this).
+test('multipleRefundDetection + refundWithoutPurchase: do not double-count the same "exceeds original purchase" fact when a reference_transaction_id is given (regression)', () => {
+  const transaction = {
+    amount: 300,
+    purpose: 'Refund',
+    timestamp: isoAt(0),
+    sender_id: 'biz_1',
+    receiver_id: 'cust_1',
+    reference_transaction_id: 't_original_purchase',
+    merchant_id: null,
+  };
+  const context = {
+    referencedPurchase: { transaction_id: 't_original_purchase', receiver_id: 'biz_1', amount: 500, merchant_id: null },
+    referencedPurchaseRefundedTotal: 300,
+  };
+
+  const multipleResult = multipleRefundDetection(transaction, context);
+  const withoutPurchaseResult = refundWithoutPurchase(transaction, context);
+
+  assert.equal(multipleResult.flagged, false, 'multipleRefundDetection should defer to refundWithoutPurchase when a reference is given');
+  assert.equal(withoutPurchaseResult.flagged, true);
+  assert.match(withoutPurchaseResult.reason, /exceeds the remaining refundable amount/);
+});
+
 test('multipleRefundDetection: does not flag a single ordinary refund', () => {
   const transaction = { amount: 100, purpose: 'Refund', timestamp: isoAt(0) };
   const context = { referencedPurchase: { amount: 500 }, referencedPurchaseRefundedTotal: 0 };

@@ -17,6 +17,12 @@ const MAX_TITLE_LENGTH = 256;
 const MAX_ASSIGNED_TO_LENGTH = 128;
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 500;
+// Security fix (post-merge audit): previously only an upper bound on each element's *length* was
+// checked, not the *array's* length or a minimum per-element length -- an analyst-role caller
+// could send hundreds of thousands of short/empty-string entries within the 1mb JSON body limit,
+// causing that many synchronous case_transactions inserts in one request, and later feeding a
+// matching number of bound parameters into GET /cases/:caseId/timeline's SQL IN (...) clause.
+const MAX_LINKED_TRANSACTION_IDS = 500;
 
 function serializeCase(row) {
   return {
@@ -44,8 +50,11 @@ router.post('/cases', requireApiKey, requireRole('analyst'), (req, res) => {
     return res.status(400).json({ error: `assigned_to must be at most ${MAX_ASSIGNED_TO_LENGTH} characters` });
   }
   const ids = Array.isArray(transaction_ids) ? transaction_ids : [];
-  if (ids.some((id) => typeof id !== 'string' || id.length > MAX_ID_LENGTH)) {
-    return res.status(400).json({ error: 'transaction_ids, if provided, must be an array of transaction_id strings' });
+  if (ids.length > MAX_LINKED_TRANSACTION_IDS) {
+    return res.status(400).json({ error: `transaction_ids must contain at most ${MAX_LINKED_TRANSACTION_IDS} entries` });
+  }
+  if (ids.some((id) => typeof id !== 'string' || id.trim() === '' || id.length > MAX_ID_LENGTH)) {
+    return res.status(400).json({ error: 'transaction_ids, if provided, must be an array of non-empty transaction_id strings' });
   }
 
   const caseId = `case_${crypto.randomUUID()}`;
@@ -199,14 +208,22 @@ router.get('/cases/:caseId/timeline', requireApiKey, (req, res) => {
     return res.status(404).json({ error: `No case found with case_id ${req.params.caseId}` });
   }
 
-  const transactionIds = db
+  const allTransactionIds = db
     .prepare('SELECT transaction_id FROM case_transactions WHERE case_id = ?')
     .all(req.params.caseId)
     .map((r) => r.transaction_id);
 
-  if (transactionIds.length === 0) {
+  if (allTransactionIds.length === 0) {
     return res.json({ case_id: req.params.caseId, events: [] });
   }
+
+  // Security fix (post-merge audit): POST /cases and POST /cases/:caseId/transactions now bound
+  // how many links a single request can add, but a case can still accumulate more than
+  // MAX_LINKED_TRANSACTION_IDS over its lifetime via repeated legitimate additions -- defensively
+  // cap the IN (...) clause built below regardless, rather than assuming the write-side caps
+  // alone guarantee this read path never sees more.
+  const truncated = allTransactionIds.length > MAX_LINKED_TRANSACTION_IDS;
+  const transactionIds = truncated ? allTransactionIds.slice(0, MAX_LINKED_TRANSACTION_IDS) : allTransactionIds;
 
   const placeholders = transactionIds.map(() => '?').join(',');
   const events = [];
@@ -251,7 +268,7 @@ router.get('/cases/:caseId/timeline', requireApiKey, (req, res) => {
 
   events.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
 
-  res.json({ case_id: req.params.caseId, events });
+  res.json({ case_id: req.params.caseId, events, truncated });
 });
 
 module.exports = router;

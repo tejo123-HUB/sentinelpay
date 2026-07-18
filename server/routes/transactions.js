@@ -109,6 +109,12 @@ const MAX_LIST_LIMIT = 500;
 const VALID_DECISIONS = ['allow', 'step_up', 'block'];
 const DEFAULT_AUDIT_HOURS = 24; // default lookback window for the audit trend summary
 const MAX_AUDIT_HOURS = 24 * 90; // cap at ~90 days so a huge range can't make one request scan the whole table pathologically
+// Security fix (post-merge audit): the hour cap above bounds the time window, not the row count
+// within it -- a high-volume deployment's 90-day window can still hold millions of rows, and
+// node:sqlite's DatabaseSync is fully synchronous, so loading all of them blocks the whole
+// process for every concurrent caller. Bucketing still uses the (indexed, cheap) true count for
+// `totalTransactions`; only the row-by-row fetch used to build buckets is capped.
+const MAX_AUDIT_ROWS = 200_000;
 const DEFAULT_BUCKET_MINUTES = 60;
 const MIN_BUCKET_MINUTES = 1;
 const MAX_BUCKET_MINUTES = 24 * 60; // one bucket per day, at most
@@ -248,6 +254,17 @@ router.post('/transaction', requireApiKey, requireRole('analyst'), async (req, r
           ...riskBreakdown,
           { type: 'outbound_amount_restrictor', reason: reasons[reasons.length - 1], weight: null, severity: 'Medium' },
         ];
+        // Bug fix (post-merge audit): `severity` is computed once inside computeFraudScore, over
+        // riskBreakdown as it stood *before* this restrictor entry existed -- left alone, a
+        // transaction that only got flagged by the amount restrictor (no rule/ML/structuring
+        // signal at all) would report severity:'None' next to a non-empty risk_breakdown and a
+        // step_up/block decision, contradicting scoring.js's own documented contract that
+        // `severity` is "the single highest severity among all contributing signals". Recompute
+        // it the same way computeFraudScore does, over the now-final riskBreakdown.
+        severity = riskBreakdown.reduce(
+          (worst, r) => (computeFraudScore.SEVERITY_RANK[r.severity] > computeFraudScore.SEVERITY_RANK[worst] ? r.severity : worst),
+          severity
+        );
       }
     }
     const decision = decide(score);
@@ -322,10 +339,22 @@ router.post('/transaction', requireApiKey, requireRole('analyst'), async (req, r
 
     // Continuous Learning Extension: bump every touched entity's composite reputation
     // (server/reputation.js) with this transaction's own outcome -- cheap O(1) counter updates,
-    // same synchronous-scoring-path cost class as the baseline update just above. ruleResults is
-    // [] for a non-outbound transaction (no rule detectors run), which correctly counts as "not
-    // flagged" for reputation purposes rather than an error.
-    updateReputationAfterTransaction(db, { ...input, transaction_id: transactionId }, ruleResults);
+    // same synchronous-scoring-path cost class as the baseline update just above.
+    //
+    // Security fix (post-merge audit / score-poisoning): scoped to outbound transactions only,
+    // same as the auto-whitelist check just below and for the same reason -- a non-outbound
+    // transaction never runs rule detectors (ruleResults is always [] here), so counting it would
+    // record "not flagged" as if it had been screened and found clean, when it was never screened
+    // at all. Before this fix, an attacker could cheaply inflate their own txn_count with trivial
+    // unscreened purchases to a business, driving their smoothed reputation score below
+    // AUTO_WHITELIST.MAX_REPUTATION_SCORE with zero real fraud screening, then get
+    // autoWhitelistTrustedAccount'd the first time they're the receiver of any outbound payment --
+    // after which WHITELIST_CEILING caps all future outbound scoring to them regardless of actual
+    // risk signals. Gating this the same way rules/ML already are closes that off: a customer's
+    // reputation now only moves when they actually participate in a screened (outbound) transaction.
+    if (outbound) {
+      updateReputationAfterTransaction(db, { ...input, transaction_id: transactionId }, ruleResults);
+    }
 
     // Automation (real Auto Whitelisting -- see autoFraudListing.js's autoWhitelistTrustedAccount
     // header comment for why the prior "auto-whitelist" function never actually did this), using
@@ -517,9 +546,13 @@ router.get('/audit/summary', requireApiKey, (req, res) => {
   const bucketMs = bucketMinutes * 60 * 1000;
   const sinceIso = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
 
+  const totalTransactions = db
+    .prepare('SELECT COUNT(*) AS n FROM transactions WHERE timestamp >= ?')
+    .get(sinceIso).n;
+
   const rows = db
-    .prepare('SELECT timestamp, decision FROM transactions WHERE timestamp >= ? ORDER BY timestamp ASC')
-    .all(sinceIso);
+    .prepare('SELECT timestamp, decision FROM transactions WHERE timestamp >= ? ORDER BY timestamp ASC LIMIT ?')
+    .all(sinceIso, MAX_AUDIT_ROWS);
 
   const buckets = new Map();
   for (const row of rows) {
@@ -537,8 +570,9 @@ router.get('/audit/summary', requireApiKey, (req, res) => {
   res.json({
     hours,
     bucketMinutes,
-    totalTransactions: rows.length,
+    totalTransactions,
     buckets: sortedBuckets,
+    truncated: rows.length < totalTransactions,
   });
 });
 

@@ -69,6 +69,8 @@ const {
   sendSmsNotification,
   sendEmailNotification,
   dispatchCriticalAlert,
+  dotStuffSmtpBody,
+  sanitizeHeaderValue,
 } = require('../server/notifications');
 
 function withMockServer(handler) {
@@ -197,6 +199,45 @@ test('sendEmailNotification: not configured returns sent:false without throwing'
   const result = await sendEmailNotification('Subject', 'Body');
   assert.equal(result.sent, false);
   assert.match(result.reason, /SMTP_HOST/);
+});
+
+// Security fix (post-merge audit): SMTP command injection via an unescaped message body. A
+// message ending in a bare "\r\n.\r\n" line would previously terminate the DATA phase early and
+// let anything written after it be parsed as fresh SMTP commands on the same session --
+// reachable end-to-end from a Critical-severity POST /transaction, since several rule detectors
+// echo caller-supplied fields (country/ip_address/sender_id/etc.) verbatim into the alert
+// message. dotStuffSmtpBody is the fix (RFC 5321 §4.5.2 transparency); these tests exercise it
+// directly rather than standing up a fake TLS/SMTP server.
+test('dotStuffSmtpBody: escapes a bare dot-line so it can never be mistaken for the DATA terminator', () => {
+  const malicious = 'Fraud detected.\r\n.\r\nMAIL FROM:<attacker@evil.example>\r\nRCPT TO:<victim@external.example>\r\nDATA\r\nSubject: spoofed\r\n\r\nbody\r\n.\r\nQUIT';
+  const stuffed = dotStuffSmtpBody(malicious);
+
+  // No line in the stuffed output may be a bare "." -- every one that started with "." now
+  // starts with "..", so an SMTP server's dot-unstuffing on receipt recovers the original text
+  // as inert message content, never as a protocol-level terminator.
+  const lines = stuffed.split('\r\n');
+  assert.ok(lines.every((line) => line !== '.'), `found an unescaped bare dot-line in: ${JSON.stringify(stuffed)}`);
+  assert.ok(stuffed.includes('..\r\nMAIL FROM'), 'expected the injected dot-line to be escaped to ".."');
+});
+
+test('dotStuffSmtpBody: a line starting with "." anywhere (not just full command-injection shapes) gets escaped', () => {
+  assert.equal(dotStuffSmtpBody('.hidden'), '..hidden');
+  assert.equal(dotStuffSmtpBody('line one\n.line two\nline three'), 'line one\r\n..line two\r\nline three');
+});
+
+test('dotStuffSmtpBody: ordinary text with no leading dots round-trips unchanged (module dots, sentences)', () => {
+  assert.equal(dotStuffSmtpBody('Transaction t_abc blocked. Score 95.'), 'Transaction t_abc blocked. Score 95.');
+});
+
+test('sanitizeHeaderValue: strips CR/LF so a header value can never inject additional headers', () => {
+  const malicious = 'spoofed\r\nBcc: attacker@evil.example\r\nX-Injected: true';
+  const sanitized = sanitizeHeaderValue(malicious);
+  // The security property is "no CR/LF survives" -- a stray "Bcc:" substring with no line break
+  // around it is just inert text inside one Subject: line's value, not a real extra header the
+  // SMTP DATA parser could ever interpret separately. Assert on the actual property (no CR/LF,
+  // and the whole thing stays a single line), not on substring content.
+  assert.ok(!sanitized.includes('\r') && !sanitized.includes('\n'), `expected no CR/LF, got: ${JSON.stringify(sanitized)}`);
+  assert.equal(sanitized.split('\n').length, 1);
 });
 
 test('dispatchCriticalAlert: isolates a failing channel from the others, never throws', async () => {

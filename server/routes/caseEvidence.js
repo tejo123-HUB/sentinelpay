@@ -98,7 +98,12 @@ function contentDispositionHeader(filename) {
 
 // GET /cases/:caseId/evidence/:evidenceId/content -- the actual binary bytes, served with the
 // stored mime_type and a safely-encoded Content-Disposition header.
-router.get('/cases/:caseId/evidence/:evidenceId/content', requireApiKey, (req, res) => {
+// Security fix (post-merge audit): analyst-or-above, not just any valid key. The metadata list
+// route above is deliberately left at viewer level (filenames/sizes only, low sensitivity), but
+// this route streams the actual attached content (screenshots, documents an analyst uploaded to
+// an investigation) -- the same elevated floor the upload route (POST, above) already requires,
+// which a read-only viewer key shouldn't bypass just because reading is "only" a GET.
+router.get('/cases/:caseId/evidence/:evidenceId/content', requireApiKey, requireRole('analyst'), (req, res) => {
   const db = req.app.locals.db;
   const row = db
     .prepare('SELECT * FROM case_evidence WHERE case_id = ? AND evidence_id = ?')

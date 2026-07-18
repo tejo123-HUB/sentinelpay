@@ -108,6 +108,35 @@ test('POST /notifications/push-subscriptions: rejects a non-https endpoint', asy
   }
 });
 
+// Security fix (post-merge audit / SSRF): the https:// check alone doesn't stop a caller from
+// registering an internal/loopback/link-local destination directly. A registered endpoint causes
+// this server to make a real outbound VAPID-authenticated request to it on every future Critical
+// alert -- an analyst-role key shouldn't be able to point that at internal infrastructure.
+test('POST /notifications/push-subscriptions: rejects internal/loopback/link-local endpoint hosts', async () => {
+  const { server } = await freshServer();
+  try {
+    const disallowed = [
+      'https://127.0.0.1/hook',
+      'https://localhost/hook',
+      'https://169.254.169.254/latest/meta-data/', // cloud metadata service
+      'https://10.0.0.5/hook',
+      'https://192.168.1.1/hook',
+      'https://172.16.0.1/hook',
+      'https://[::1]/hook',
+      'https://[fc00::1]/hook',
+    ];
+    for (const endpoint of disallowed) {
+      const res = await request(server, 'POST', '/notifications/push-subscriptions', {
+        endpoint,
+        keys: { p256dh: 'x', auth: 'y' },
+      });
+      assert.equal(res.status, 400, `expected ${endpoint} to be rejected`);
+    }
+  } finally {
+    server.close();
+  }
+});
+
 test('POST /notifications/push-subscriptions: rejects a missing keys object', async () => {
   const { server } = await freshServer();
   try {

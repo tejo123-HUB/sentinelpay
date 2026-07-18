@@ -7,7 +7,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 
-const { encryptWebPushPayload, buildVapidAuthorizationHeader, vapidKeysConfigured } = require('../server/webPush');
+const { encryptWebPushPayload, buildVapidAuthorizationHeader, vapidKeysConfigured, sendWebPushNotification } = require('../server/webPush');
 
 function base64url(buf) {
   return Buffer.from(buf).toString('base64url');
@@ -88,6 +88,30 @@ test('vapidKeysConfigured: false when unset', () => {
   } finally {
     if (savedPub !== undefined) process.env.VAPID_PUBLIC_KEY = savedPub;
     if (savedPriv !== undefined) process.env.VAPID_PRIVATE_KEY = savedPriv;
+  }
+});
+
+// Security fix (post-merge audit / SSRF): dispatch-time backstop for any push_subscriptions row
+// that predates the registration-time host check (server/routes/notifications.js) -- confirms it
+// short-circuits before ever attempting the outbound request, for a subscription whose endpoint
+// points at an internal host.
+test('sendWebPushNotification: refuses to send to a disallowed (internal/loopback) endpoint host', async () => {
+  const savedPub = process.env.VAPID_PUBLIC_KEY;
+  const savedPriv = process.env.VAPID_PRIVATE_KEY;
+  const ecdh = crypto.createECDH('prime256v1');
+  ecdh.generateKeys();
+  process.env.VAPID_PUBLIC_KEY = ecdh.getPublicKey().toString('base64url');
+  process.env.VAPID_PRIVATE_KEY = ecdh.getPrivateKey().toString('base64url');
+  try {
+    const result = await sendWebPushNotification(
+      { endpoint: 'https://127.0.0.1/internal-hook', p256dh: 'irrelevant', auth: 'irrelevant' },
+      'test message'
+    );
+    assert.equal(result.sent, false);
+    assert.match(result.reason, /not allowed/);
+  } finally {
+    if (savedPub !== undefined) process.env.VAPID_PUBLIC_KEY = savedPub; else delete process.env.VAPID_PUBLIC_KEY;
+    if (savedPriv !== undefined) process.env.VAPID_PRIVATE_KEY = savedPriv; else delete process.env.VAPID_PRIVATE_KEY;
   }
 });
 

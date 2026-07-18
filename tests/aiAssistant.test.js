@@ -145,10 +145,16 @@ process.env.DB_PATH = ':memory:';
 process.env.PORT = '0';
 process.env.API_KEY = 'test-key-for-automated-tests';
 
+// Full server-tree cache clear, not just index.js/rateLimit.js/websocket.js: a test below sets
+// API_KEY_VIEWER, which server/middleware/apiKeyAuth.js reads once at module-load time -- every
+// route file that captured a reference to its (then-stale) exports needs to be re-required too,
+// same reasoning as tests/customRules.test.js / tests/caseEvidence.test.js.
+const path = require('node:path');
 function freshServer() {
-  delete require.cache[require.resolve('../server/index')];
-  delete require.cache[require.resolve('../server/middleware/rateLimit')];
-  delete require.cache[require.resolve('../server/websocket')];
+  const serverDir = path.join(__dirname, '..', 'server');
+  for (const resolvedPath of Object.keys(require.cache)) {
+    if (resolvedPath.startsWith(serverDir)) delete require.cache[resolvedPath];
+  }
   const { app, server } = require('../server/index');
   return new Promise((resolve) => {
     if (server.listening) return resolve({ app, server });
@@ -156,11 +162,14 @@ function freshServer() {
   });
 }
 
-function request(server, method, path, body) {
+function request(server, method, path, body, headerOverrides = {}) {
   return new Promise((resolve, reject) => {
     const port = server.address().port;
     const data = body ? JSON.stringify(body) : null;
-    const headers = { 'Content-Type': 'application/json', 'X-API-Key': process.env.API_KEY };
+    const headers = { 'Content-Type': 'application/json', 'X-API-Key': process.env.API_KEY, ...headerOverrides };
+    for (const key of Object.keys(headers)) {
+      if (headers[key] === undefined) delete headers[key];
+    }
     if (data) headers['Content-Length'] = Buffer.byteLength(data);
     const req = http.request({ host: '127.0.0.1', port, method, path, headers }, (res) => {
       let raw = '';
@@ -216,6 +225,34 @@ test('POST /ai/chat: 404s for an unknown case_id', async () => {
     const res = await request(server, 'POST', '/ai/chat', { message: 'summarize this case', case_id: 'case_nonexistent' });
     assert.equal(res.status, 404);
   } finally {
+    server.close();
+  }
+});
+
+// Security fix (post-merge audit): when ANTHROPIC_API_KEY is configured, this route makes a real,
+// billed outbound call to the Claude API per invocation -- previously reachable by any valid key
+// (including viewer), now requires analyst, the same "real-world consequence" floor already
+// applied to POST /notifications/push-subscriptions.
+test('POST /ai/chat: requires the analyst role, not just any valid key', async () => {
+  process.env.API_KEY_VIEWER = 'test-viewer-key-ai-chat';
+  const { server } = await freshServer();
+  try {
+    const res = await request(server, 'POST', '/ai/chat', { message: 'give me a summary' }, { 'X-API-Key': 'test-viewer-key-ai-chat' });
+    assert.equal(res.status, 403);
+  } finally {
+    delete process.env.API_KEY_VIEWER;
+    server.close();
+  }
+});
+
+test('POST /ai/search: a viewer-role key is still allowed (no external call, no cost)', async () => {
+  process.env.API_KEY_VIEWER = 'test-viewer-key-ai-search';
+  const { server } = await freshServer();
+  try {
+    const res = await request(server, 'POST', '/ai/search', { query: 'transactions over 100' }, { 'X-API-Key': 'test-viewer-key-ai-search' });
+    assert.equal(res.status, 200);
+  } finally {
+    delete process.env.API_KEY_VIEWER;
     server.close();
   }
 });

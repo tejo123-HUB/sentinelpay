@@ -47,8 +47,21 @@ function multipleRefundDetection(transaction, outboundContext) {
     }
   }
 
+  // Bug fix (post-merge audit): only when there's no explicit reference_transaction_id.
+  // outboundContext.js only ever populates referencedPurchase/referencedPurchaseRefundedTotal
+  // together with transaction.reference_transaction_id (see outboundContext.js's referencedPurchase
+  // block) -- so in the real pipeline, `purchase` being truthy here always means
+  // refundWithoutPurchase.js's own referenced-purchase branch already checked this exact same
+  // invariant (transaction.amount vs. purchase.amount - referencedPurchaseRefundedTotal) with a
+  // more specific, reference-aware reason. Without this guard the two detectors fired together on
+  // one underlying fact and double-counted it as two independent signals (55 + 50 weight) --
+  // enough on its own to push a transaction to a block decision that neither detector's actual
+  // severity would justify alone. This branch stays reachable for a context built without a
+  // reference_transaction_id (which can't happen via outboundContext.js today, but keeps this
+  // function's own "hard mathematical invariant" check honest as a standalone unit, per this
+  // file's header comment, rather than silently deleting it).
   const purchase = outboundContext && outboundContext.referencedPurchase;
-  if (purchase) {
+  if (purchase && !transaction.reference_transaction_id) {
     const priorRefundedOnPurchase = (outboundContext && outboundContext.referencedPurchaseRefundedTotal) || 0;
     if (priorRefundedOnPurchase + transaction.amount > purchase.amount) {
       return {
