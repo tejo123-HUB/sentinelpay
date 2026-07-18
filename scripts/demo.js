@@ -106,14 +106,16 @@ Dashboard: ${BASE_URL}  (ambient traffic is running in the background)
   1) Outbound fraud       compromised business account rapidly drains funds -> block
   2) Refund fraud         large refund with no matching prior purchase -> flagged
   3) Structuring pattern  6 transfers -> 3 mules -> 2 rapid withdrawals -> grouped alert
-  4) Old inbound "fraud" scenario  kept for reference — no longer blocks (see below)
-  5) Old inbound "odd-hour" scenario  kept for reference — no longer blocks (see below)
-  6) All of the above, back to back
-  7) Latency benchmark (500 legit transactions, prints p50/p95/p99)
+  4) Merchant takeover    unrecognized device/country login, then an immediate refund -> block
+  5) Mule payout          business pays a receiver with a receive-then-drain history -> block
+  6) Old inbound "fraud" scenario  kept for reference — no longer blocks (see below)
+  7) Old inbound "odd-hour" scenario  kept for reference — no longer blocks (see below)
+  8) All of the above, back to back
+  9) Latency benchmark (500 legit transactions, prints p50/p95/p99)
   q) Quit — stops the server and background traffic
 
   Fraud/AML scoring is outbound-only now (money leaving the business) — a customer
-  paying you isn't scored, so 4/5 above intentionally just show "allow".
+  paying you isn't scored, so 6/7 above intentionally just show "allow".
 ------------------------------------------------------------------------
 > `);
 }
@@ -172,18 +174,26 @@ async function main() {
         await runScenario('structuring');
         break;
       case '4':
+        console.log('\n--- firing merchant account takeover scenario ---');
+        await runScenario('merchant-takeover');
+        break;
+      case '5':
+        console.log('\n--- firing mule payout scenario ---');
+        await runScenario('mule');
+        break;
+      case '6':
         console.log('\n--- firing old inbound "fraud" scenario (reference only) ---');
         await runScenario('fraud');
         break;
-      case '5':
+      case '7':
         console.log('\n--- firing old inbound "odd-hour" scenario (reference only) ---');
         await runScenario('odd-hour');
         break;
-      case '6':
+      case '8':
         console.log('\n--- firing all scenarios back to back ---');
         await runScenario('all');
         break;
-      case '7':
+      case '9':
         console.log('\n--- running latency benchmark (this takes a bit) ---');
         await runToCompletion('node', ['simulator/benchmark.js', '--count=500']);
         break;

@@ -21,10 +21,19 @@ const { getFraudProbability } = require('../ml/mlClient');
 // The whole dashboard was unstyled and inert as a result. Scoping the middleware to only the
 // routes that actually need it lets an unmatched path (style.css, a 404, anything) fall through
 // past this router entirely, the same as it would have with no auth middleware in the chain at all.
-const { requireApiKey } = require('../middleware/apiKeyAuth');
+const { requireApiKey, requireRole } = require('../middleware/apiKeyAuth');
 const { isBusinessAccount } = require('../businessAccounts');
 const getOutboundContext = require('../outboundContext');
 const applyOutboundRestrictors = require('../outboundRestrictor');
+const { checkFraudLists } = require('../fraudLists');
+const { dispatchCriticalAlert } = require('../notifications');
+const { evaluateCustomRules } = require('../customRules');
+const { recordConfirmedMule } = require('../muleScore');
+const { autoWatchlistConfirmedMule } = require('../autoFraudListing');
+const { updateBaseline } = require('../adaptiveBaseline');
+const { computeFeatureVector, updateEntityBaselinesAfterTransaction } = require('../featureStore');
+const { computeReputationScore, updateReputationAfterTransaction } = require('../reputation');
+const { upsertEdge } = require('../graphIntelligence');
 
 const velocity = require('../rules/velocity');
 const impossibleTravel = require('../rules/impossibleTravel');
@@ -35,6 +44,22 @@ const refundWithoutPurchase = require('../rules/refundWithoutPurchase');
 const payoutToNewReceiver = require('../rules/payoutToNewReceiver');
 const outboundRatioAnomaly = require('../rules/outboundRatioAnomaly');
 const outboundFanOutBurst = require('../rules/outboundFanOutBurst');
+const refundAccountMismatch = require('../rules/refundAccountMismatch');
+const multipleRefundDetection = require('../rules/multipleRefundDetection');
+const splitRefundDetection = require('../rules/splitRefundDetection');
+const refundVelocity = require('../rules/refundVelocity');
+const newVendorRisk = require('../rules/newVendorRisk');
+const dormantAccountReactivation = require('../rules/dormantAccountReactivation');
+const muleReceiverRisk = require('../rules/muleReceiverRisk');
+const geoRisk = require('../rules/geoRisk');
+const merchantAccountTakeover = require('../rules/merchantAccountTakeover');
+const friendlyFraud = require('../rules/friendlyFraud');
+const employeeFraud = require('../rules/employeeFraud');
+const crossGatewayStructuring = require('../rules/crossGatewayStructuring');
+const duplicateTransaction = require('../rules/duplicateTransaction');
+const sharedIdentifierRisk = require('../rules/sharedIdentifierRisk');
+const deviceFingerprintRisk = require('../rules/deviceFingerprintRisk');
+const entityReputationRisk = require('../rules/entityReputationRisk');
 
 const RULE_DETECTORS = [
   { type: 'velocity', check: velocity },
@@ -52,6 +77,22 @@ const OUTBOUND_RULE_DETECTORS = [
   { type: 'payout_new_receiver', check: payoutToNewReceiver },
   { type: 'outbound_ratio_anomaly', check: outboundRatioAnomaly },
   { type: 'outbound_fan_out_burst', check: outboundFanOutBurst },
+  { type: 'refund_account_mismatch', check: refundAccountMismatch },
+  { type: 'multiple_refund_detection', check: multipleRefundDetection },
+  { type: 'split_refund_detection', check: splitRefundDetection },
+  { type: 'refund_velocity', check: refundVelocity },
+  { type: 'new_vendor_risk', check: newVendorRisk },
+  { type: 'dormant_account_reactivation', check: dormantAccountReactivation },
+  { type: 'mule_receiver_risk', check: muleReceiverRisk },
+  { type: 'geo_risk', check: geoRisk },
+  { type: 'merchant_account_takeover', check: merchantAccountTakeover },
+  { type: 'friendly_fraud', check: friendlyFraud },
+  { type: 'employee_fraud', check: employeeFraud },
+  { type: 'cross_gateway_structuring', check: crossGatewayStructuring },
+  { type: 'duplicate_transaction', check: duplicateTransaction },
+  { type: 'shared_identifier_risk', check: sharedIdentifierRisk },
+  { type: 'device_fingerprint_risk', check: deviceFingerprintRisk },
+  { type: 'entity_reputation_risk', check: entityReputationRisk },
 ];
 
 const DEFAULT_LIST_LIMIT = 50;
@@ -73,7 +114,10 @@ const MAX_BUCKET_MINUTES = 24 * 60; // one bucket per day, at most
 // (hanging the client forever, and potentially crashing the whole process on modern Node,
 // which terminates by default on unhandled rejections) instead of reaching the error-handling
 // middleware in index.js.
-router.post('/transaction', requireApiKey, async (req, res, next) => {
+// analyst-or-above (Section 16, Category 20 RBAC): ingesting a transaction is an operational
+// action, not a read -- a viewer-only key can watch the dashboard but not inject transactions.
+router.post('/transaction', requireApiKey, requireRole('analyst'), async (req, res, next) => {
+  const requestStartMs = process.hrtime.bigint(); // Feature 18 analytics: average response latency -- not a scoring input, measured purely for observability
   try {
     const db = req.app.locals.db;
 
@@ -109,6 +153,11 @@ router.post('/transaction', requireApiKey, async (req, res, next) => {
     // transaction size" -- must hold for every transaction, not just outbound ones).
     const structuringLookup = findActiveAlert(db, input.sender_id, input.receiver_id, nowMs);
 
+    // Section 16 (Categories 19/21): the fraud_lists check also always runs, regardless of
+    // direction, same reasoning as the structuring lookup above -- a blacklisted account is a
+    // confirmed bad actor either way.
+    const fraudListCheck = checkFraudLists(db, input.sender_id, input.receiver_id);
+
     // Fraud/AML behavioral scoring (the rule detectors + ML) only runs for money leaving the
     // business -- a customer paying the business isn't a risk this system is positioned to
     // police (that's the card network's/payment gateway's problem: stolen cards, chargebacks),
@@ -118,29 +167,84 @@ router.post('/transaction', requireApiKey, async (req, res, next) => {
 
     let ruleResults = [];
     let mlProbability = 0;
+    let outboundContextForGraph = null; // Continuous Learning Extension: reused after this block to seed graph_edges from already-computed shared-identifier lists
     if (outbound) {
       const userHistory = getUserHistory(db, input.sender_id, nowMs);
       const outboundContext = getOutboundContext(db, input, nowMs);
+      outboundContextForGraph = outboundContext;
+      // Continuous Learning Extension: the receiver's composite reputation score
+      // (server/reputation.js), folded into outboundContext the same way every other
+      // DB-derived field here is -- rather than importing reputation.js into outboundContext.js
+      // itself, which would create a circular require (reputation.js -> featureStore.js ->
+      // outboundContext.js -> reputation.js).
+      outboundContext.receiverReputation = computeReputationScore(db, input.receiver_id, 'user');
+
+      // FA217/FA199: the moment this transaction's receiver is confirmed a mule (real-time, not
+      // a batch job), persist it to the standing mule_accounts record and auto-watchlist it --
+      // see server/muleScore.js's recordConfirmedMule and server/autoFraudListing.js for why.
+      if (outboundContext.receiverMuleScore && outboundContext.receiverMuleScore.isMule) {
+        recordConfirmedMule(db, input.receiver_id, outboundContext.receiverMuleScore.qualifyingCycles, nowMs);
+        autoWatchlistConfirmedMule(db, input.receiver_id, outboundContext.receiverMuleScore.qualifyingCycles);
+      }
+
+      // Dynamic Risk Engine: if this is a refund, feed the interval since this (business,
+      // customer) pair's own last refund into their refund-pacing baseline -- the same composite
+      // key outboundContext.js's read side already looked the baseline up under, so
+      // multipleRefundDetection.js's *next* refund for this pair compares against a baseline that
+      // includes this one. Uses outboundContext.lastRefundToCustomerAt (read before this
+      // transaction was inserted), not a fresh query -- there is no "prior refund" yet on this
+      // pair's first-ever refund, which is correctly a no-op here (nothing to measure an interval
+      // against), not an error.
+      if ((input.purpose || '').toLowerCase().includes('refund') && outboundContext.lastRefundToCustomerAt) {
+        const refundIntervalMs = nowMs - new Date(outboundContext.lastRefundToCustomerAt).getTime();
+        if (refundIntervalMs >= 0) {
+          updateBaseline(
+            db,
+            getOutboundContext.refundBaselineEntityId(input.sender_id, input.receiver_id),
+            'refund_interval',
+            refundIntervalMs,
+            input.timestamp
+          );
+        }
+      }
+
+      // Section 16, Category 19: custom rules are DB rows, not files, so they're fetched fresh
+      // per request (not statically imported like RULE_DETECTORS/OUTBOUND_RULE_DETECTORS) --
+      // this is what makes them editable via the API without a redeploy. Only enabled rules are
+      // evaluated; a disabled one is kept (not deleted) so it can be re-enabled later.
+      const enabledCustomRules = db.prepare('SELECT * FROM custom_rules WHERE enabled = 1').all();
 
       ruleResults = [
         ...RULE_DETECTORS.map(({ type, check }) => ({ type, ...check(input, userHistory) })),
         ...OUTBOUND_RULE_DETECTORS.map(({ type, check }) => ({ type, ...check(input, outboundContext) })),
+        ...evaluateCustomRules(input, enabledCustomRules),
       ];
-      mlProbability = await getFraudProbability(input, userHistory);
+      mlProbability = await getFraudProbability(input, userHistory, db);
     }
 
-    let { score, reasons } = computeFraudScore(ruleResults, structuringLookup, mlProbability);
+    let { score, reasons, riskBreakdown, severity, confidence } = computeFraudScore(ruleResults, structuringLookup, mlProbability, fraudListCheck);
     if (outbound) {
+      const reasonCountBeforeRestrictor = reasons.length;
       ({ score, reasons } = applyOutboundRestrictors(score, reasons, input));
+      // applyOutboundRestrictors is a pure amount-based floor, not a detector -- it has no
+      // `type`/`severity` of its own, but riskBreakdown should still account for any reason it
+      // appended so the two stay in sync (Feature 17: every reason traceable in the breakdown).
+      if (reasons.length > reasonCountBeforeRestrictor) {
+        riskBreakdown = [
+          ...riskBreakdown,
+          { type: 'outbound_amount_restrictor', reason: reasons[reasons.length - 1], weight: null, severity: 'Medium' },
+        ];
+      }
     }
     const decision = decide(score);
 
     const transactionId = `t_${crypto.randomUUID()}`;
+    const latencyMs = Number(process.hrtime.bigint() - requestStartMs) / 1e6;
 
     db.prepare(
       `INSERT INTO transactions
-        (transaction_id, sender_id, receiver_id, amount, timestamp, location_lat, location_lng, device_id, merchant_id, purpose, transaction_type, fraud_score, decision)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        (transaction_id, sender_id, receiver_id, amount, timestamp, location_lat, location_lng, device_id, merchant_id, purpose, transaction_type, fraud_score, decision, reference_transaction_id, employee_id, country, ip_address, latency_ms, confidence, phone, email, identity_hash, user_agent, state, city)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       transactionId,
       input.sender_id,
@@ -154,21 +258,87 @@ router.post('/transaction', requireApiKey, async (req, res, next) => {
       input.purpose,
       input.transaction_type,
       score,
-      decision
+      decision,
+      input.reference_transaction_id,
+      input.employee_id,
+      input.country,
+      input.ip_address,
+      latencyMs,
+      confidence,
+      input.phone,
+      input.email,
+      input.identity_hash,
+      input.user_agent,
+      input.state,
+      input.city
     );
 
     const flagInsert = db.prepare(
-      'INSERT INTO flags (flag_id, transaction_id, flag_type, reason, weight, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+      'INSERT INTO flags (flag_id, transaction_id, flag_type, reason, weight, severity, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
     );
     for (const r of ruleResults) {
       if (r.flagged) {
-        flagInsert.run(`fl_${crypto.randomUUID()}`, transactionId, r.type, r.reason, r.weight, input.timestamp);
+        flagInsert.run(`fl_${crypto.randomUUID()}`, transactionId, r.type, r.reason, r.weight, r.severity || null, input.timestamp);
       }
     }
 
+    // Continuous Learning Extension: snapshot this transaction's feature vector *before* any of
+    // this request's own baseline updates run below -- the exact same point-in-time state
+    // userHistory/outboundContext/ruleResults/mlProbability above were themselves computed from.
+    // label stays NULL until a feedback_labels row exists for this transaction (server/feedbackLabels.js).
+    // Growing training_examples live means retraining doesn't depend on re-running the offline
+    // replayFeatureHistory backfill after every request -- that backfill exists for historical
+    // transactions that predate this table, not as an ongoing per-request step.
+    const trainingVector = computeFeatureVector(db, { ...input, transaction_id: transactionId });
+    db.prepare(
+      `INSERT INTO training_examples (transaction_id, feature_json, label, computed_at)
+       VALUES (?, ?, NULL, ?)
+       ON CONFLICT(transaction_id) DO UPDATE SET feature_json = excluded.feature_json, computed_at = excluded.computed_at`
+    ).run(transactionId, JSON.stringify(trainingVector), input.timestamp);
+
     updateUserAfterTransaction(db, input.sender_id, input);
 
-    const responseBody = { transaction_id: transactionId, fraud_score: score, decision, reasons };
+    // Continuous Learning Extension: device/merchant/ip/pair-level baselines (server/featureStore.js),
+    // extending the Dynamic Risk Engine's per-sender baselines above to every entity type a
+    // transaction touches. Runs for every transaction (not just outbound), same scoping as
+    // updateUserAfterTransaction just above -- device/IP velocity fraud isn't outbound-only.
+    const insertedRow = db.prepare('SELECT rowid AS rowid_ FROM transactions WHERE transaction_id = ?').get(transactionId);
+    updateEntityBaselinesAfterTransaction(db, { ...input, transaction_id: transactionId }, insertedRow.rowid_);
+
+    // Continuous Learning Extension: bump every touched entity's composite reputation
+    // (server/reputation.js) with this transaction's own outcome -- cheap O(1) counter updates,
+    // same synchronous-scoring-path cost class as the baseline update just above. ruleResults is
+    // [] for a non-outbound transaction (no rule detectors run), which correctly counts as "not
+    // flagged" for reputation purposes rather than an error.
+    updateReputationAfterTransaction(db, { ...input, transaction_id: transactionId }, ruleResults);
+
+    // Continuous Learning Extension: the persisted graph store (server/graphIntelligence.js),
+    // replacing GET /graph/relationships' live self-joins for the edges a transaction actually
+    // produces. The transaction edge runs for every transaction; the shared-identifier edges only
+    // for outbound ones, reusing outboundContext's already-computed sharedDeviceAccountIds/
+    // sharedIpAccountIds/sharedIdentityHashAccountIds rather than re-querying.
+    upsertEdge(db, input.sender_id, input.receiver_id, 'transaction', input.amount, input.timestamp);
+    if (outbound) {
+      const oc = outboundContextForGraph;
+      for (const otherId of oc.sharedDeviceAccountIds) upsertEdge(db, input.sender_id, otherId, 'shared_device', 0, input.timestamp);
+      for (const otherId of oc.sharedIpAccountIds) upsertEdge(db, input.sender_id, otherId, 'shared_ip', 0, input.timestamp);
+      for (const otherId of oc.sharedIdentityHashAccountIds) upsertEdge(db, input.sender_id, otherId, 'shared_identity_hash', 0, input.timestamp);
+    }
+
+    // Section 15.16, Feature 17: every response includes fraud_score, decision, severity,
+    // detector names + human-readable reasons (risk_breakdown), and the plain reasons array
+    // (kept for backward compatibility with existing callers/tests). Section 16, Category 13:
+    // `confidence` (0-100) is a separate axis from `fraud_score` -- how much independent
+    // corroboration backs this decision, not how risky the transaction looks.
+    const responseBody = {
+      transaction_id: transactionId,
+      fraud_score: score,
+      decision,
+      severity,
+      confidence,
+      reasons,
+      risk_breakdown: riskBreakdown,
+    };
 
     // The WS broadcast carries the full transaction, not just the POST response shape: the
     // live dashboard table (sender/receiver/amount/type/time columns) and the map view
@@ -193,7 +363,24 @@ router.post('/transaction', requireApiKey, async (req, res, next) => {
         merchant_id: input.merchant_id,
         purpose: input.purpose,
         transaction_type: input.transaction_type,
+        reference_transaction_id: input.reference_transaction_id,
+        employee_id: input.employee_id,
+        country: input.country,
+        ip_address: input.ip_address,
+        state: input.state,
+        city: input.city,
       });
+    }
+
+    // Section 16, Category 17: Critical Fraud Alerts, dispatched to every configured
+    // notification channel. Deliberately not awaited -- a slow/unreachable Slack/Twilio/SMTP
+    // endpoint must never add latency to the scoring decision itself (the same reasoning that
+    // keeps the structuring engine's heavy analysis off the synchronous per-transaction path).
+    // dispatchCriticalAlert never throws (every channel's own error is caught internally), but
+    // .catch is kept as a defensive backstop against an unexpected synchronous throw.
+    if (severity === 'Critical') {
+      const alertMessage = `[SentinelPay] Critical fraud alert: ${transactionId} (${input.sender_id} -> ${input.receiver_id}, ${input.amount}) blocked at score ${score}. ${reasons.join('; ')}`;
+      dispatchCriticalAlert(alertMessage).catch(() => {});
     }
 
     res.status(201).json(responseBody);
@@ -231,14 +418,28 @@ router.get('/transactions', requireApiKey, (req, res) => {
 
   const transactionIds = rows.map((r) => r.transaction_id);
   const reasonsByTransaction = new Map();
+  const breakdownByTransaction = new Map();
   if (transactionIds.length > 0) {
     const flagRows = db
-      .prepare(`SELECT transaction_id, reason FROM flags WHERE transaction_id IN (${transactionIds.map(() => '?').join(',')})`)
+      .prepare(
+        `SELECT transaction_id, flag_type, reason, weight, severity FROM flags WHERE transaction_id IN (${transactionIds.map(() => '?').join(',')})`
+      )
       .all(...transactionIds);
     for (const f of flagRows) {
       if (!reasonsByTransaction.has(f.transaction_id)) reasonsByTransaction.set(f.transaction_id, []);
       reasonsByTransaction.get(f.transaction_id).push(f.reason);
+      if (!breakdownByTransaction.has(f.transaction_id)) breakdownByTransaction.set(f.transaction_id, []);
+      breakdownByTransaction.get(f.transaction_id).push({ type: f.flag_type, reason: f.reason, weight: f.weight, severity: f.severity });
     }
+  }
+
+  function overallSeverity(breakdown) {
+    const rank = { Low: 1, Medium: 2, High: 3, Critical: 4 };
+    let worst = 'None';
+    for (const entry of breakdown) {
+      if (entry.severity && (rank[entry.severity] || 0) > (rank[worst] || 0)) worst = entry.severity;
+    }
+    return worst;
   }
 
   res.json(
@@ -258,7 +459,16 @@ router.get('/transactions', requireApiKey, (req, res) => {
       transaction_type: row.transaction_type,
       fraud_score: row.fraud_score,
       decision: row.decision,
+      reference_transaction_id: row.reference_transaction_id,
+      employee_id: row.employee_id,
+      country: row.country,
+      ip_address: row.ip_address,
+      state: row.state,
+      city: row.city,
       reasons: reasonsByTransaction.get(row.transaction_id) || [],
+      risk_breakdown: breakdownByTransaction.get(row.transaction_id) || [],
+      severity: overallSeverity(breakdownByTransaction.get(row.transaction_id) || []),
+      confidence: row.confidence,
     }))
   );
 });

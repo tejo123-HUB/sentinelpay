@@ -112,6 +112,52 @@ A real-time scoring API that:
 9. **Audit Trail & Analytics View** ✅ built
    Historical view of flagged transactions over time, useful for showing "improvement over time" or trend analysis to judges. `dashboard/audit.js` + an "Audit Trail" dashboard tab: a Chart.js trend line (allow/step-up/block counts per hour, via the new `GET /audit/summary` endpoint) plus a filterable table of historical flagged transactions (via `GET /transactions?decision=...`, a new optional filter on the existing endpoint).
 
+### 4.3 21-Feature Extension (Section 15.16) — status tracked here, design detail in the dev log
+
+The full spec (verbatim) and design rationale live in Section 15.16; this table is the canonical status list this doc's own anti-drift rule requires — updated in the same commit as each feature lands, not after the fact.
+
+| # | Feature | Status | Where it lives |
+|---|---|---|---|
+| 1 | Refund Account Mismatch Detection | ✅ built | `server/rules/refundAccountMismatch.js` |
+| 2 | Multiple Refund Detection | ✅ built | `server/rules/multipleRefundDetection.js` |
+| 3 | Improve Existing Refund Validation | ✅ built | `server/rules/refundWithoutPurchase.js` (reference-based path) |
+| 4 | Merchant Account Takeover Detection | ✅ built | `server/rules/merchantAccountTakeover.js`, `POST/GET /merchant-logins` |
+| 5 | New Vendor Risk Detection | ✅ built | `server/rules/newVendorRisk.js` |
+| 6 | Circular Money Flow Detection | ✅ built | `server/structuring/circularFlow.js`, wired into `backgroundJob.js` |
+| 7 | Split Refund Detection | ✅ built | `server/rules/splitRefundDetection.js` |
+| 8 | Friendly Fraud Detection | ✅ built | `server/rules/friendlyFraud.js`, `POST/GET /disputes` |
+| 9 | Refund Velocity Detection | ✅ built | `server/rules/refundVelocity.js` |
+| 10 | Employee Fraud Detection | ✅ built | `server/rules/employeeFraud.js` |
+| 11 | Cross Gateway Fraud Detection | ✅ built | `server/rules/crossGatewayStructuring.js` |
+| 12 | Dormant Account Detection | ✅ built | `server/rules/dormantAccountReactivation.js` |
+| 13 | Mule Account Detection | ✅ built | `server/muleScore.js` + `server/rules/muleReceiverRisk.js` |
+| 14 | Geo Risk Scoring | ✅ built | `server/rules/geoRisk.js` |
+| 15 | Advanced Merchant Risk Dashboard | ✅ built | new "Analytics" tab (`dashboard/analytics.js`) + dark mode (`app.js`/`style.css`) |
+| 16 | Risk Scoring Engine (weights + critical force-block) | ✅ built | `server/scoring.js`'s `CRITICAL_SEVERITY_FLOOR` |
+| 17 | Fraud Explainability (severity on every detector) | ✅ built | `severity` backfilled onto all 13 detectors; `POST /transaction` and `GET /transactions` return `severity` + `risk_breakdown` |
+| 18 | Analytics endpoints | ✅ built | `server/routes/analytics.js` |
+| 19 | Configuration (no magic numbers) | ✅ built | `server/config.js` |
+| 20 | Testing (100% detector coverage) | 🔄 ongoing | every feature above ships with unit + integration tests as it lands; a final coverage sweep is still pending |
+| 21 | Documentation | 🔄 ongoing | this section + Section 15.16, updated per phase as each feature lands; a final consistency pass is still pending |
+
+All 21 features are now built and merged with passing tests. Feature 20 (100% detector coverage) and Feature 21 (documentation) are ongoing consistency passes, not new functionality — see below.
+
+**Feature 15 design note:** a fourth dashboard tab, "Analytics" (`dashboard/analytics.js`, `dashboard/index.html`), consumes every Feature 18 endpoint: an 8-stat overview row (reusing the existing `.stat-card` component), a trend chart with an hour/day/week/month bucket selector (Chart.js, same pattern as `audit.js`'s existing trend chart), a fraud heatmap (hour-of-day × day-of-week, computed client-side from a bounded `/analytics/export` call — a plain CSS-grid heatmap, sequential single-hue ramp per the dataviz skill's convention, not a new charting dependency), a dimension-selectable "Top Risky" table, top fraud categories, top mule accounts, gateway comparison, and CSV/PDF export (CSV via a blob download; PDF via the browser's native print-to-PDF against a `@media print` stylesheet that isolates the Analytics panel — no server-side PDF library, keeping this project's two-dependency-only convention). Dark mode (`app.js`'s `initThemeToggle`) applies site-wide via a `[data-theme="dark"]` CSS override block reusing the exact palette values already validated by the dataviz skill in the project's original dark theme (Section 15.8) — every existing component (all three prior tabs) inherits it for free since the whole stylesheet is already custom-property-driven.
+
+**Bug found and fixed while visually verifying the dashboard in a browser:** the business's own registered account showed up in the "Top Mule Accounts" panel. A merchant receiving customer payments and paying them back out (refunds, settlements, vendor payouts) is normal operation, but technically satisfies `computeMuleScore`'s generic receive-then-quickly-drain heuristic by construction — the detector had no notion of "this receiver is the business itself." Fixed in two places: `getOutboundContext`'s `receiverMuleScore` field now short-circuits to a non-mule result for any registered `business_accounts` entry (so `muleReceiverRisk.js` never flags a business account either), and `GET /analytics/mule-accounts` excludes business accounts from its candidate scan. Caught only by opening the dashboard in Chrome with seeded demo data — none of the unit/integration tests had a fixture combining "business account" with "receive-then-refund" activity. Two regression tests added (`tests/outboundContext.test.js`, `tests/analytics.test.js`) reproducing the exact live scenario.
+
+**Feature 18 design note:** `server/routes/analytics.js` adds `GET /analytics/summary`, `top-frauds`, `top-risky` (one generic endpoint parameterized by `dimension`, covering all of customers/merchants/employees/vendors/devices/IPs/countries rather than seven near-identical routes), `mule-accounts`, `gateway-comparison`, `trend` (generalizes the existing `/audit/summary` to hour/day/week/month buckets), and `export` (CSV or JSON; no server-side PDF generation — the dashboard's PDF export button renders client-side from this JSON, keeping this project's dependency-light convention). All read-only, all reuse the existing `transactions`/`flags` tables — no new tables. `transactions.latency_ms` (new nullable column) is measured via `process.hrtime.bigint()` around each `POST /transaction` request, purely for the `avg_latency_ms` analytics stat — not a scoring input, and distinct from `simulator/benchmark.js`'s own separate, more rigorous latency measurement (Section 11, Risk 3).
+
+**"Recovered amount," precisely defined:** this system has no post-decision recovery workflow to observe (no chargeback-resolution event, no "money actually got back" signal) — `recovered_amount` is the total value of transactions that scored `fraud_score >= 40` (step-up/block-tier risk) but were not ultimately blocked, i.e. money a step-up challenge plausibly kept from being lost. Documented here so the number is never mistaken for an audited recovery figure.
+
+**Bug found and fixed while testing Feature 18:** `server/muleScore.js`'s outflow query used a strict `timestamp >` lower bound — the same same-millisecond race class fixed twice already in this extension (Section 15.13, and the merchant-login-takeover query above). A receipt immediately followed by its outflow (the exact pattern this function exists to detect) can land on the same millisecond, and the strict bound silently excluded that outflow from the withdrawal ratio, undercounting a genuine mule pattern. Caught by `tests/analytics.test.js`'s new mule-accounts end-to-end test failing on a fast local run. Fixed by using `>=` instead of `>` — safe because a row can never be both the receipt and the outflow for the same account (`validate.js` enforces `sender_id != receiver_id`). Regression test added directly against `computeMuleScore` with two rows forced to an exact timestamp tie.
+
+**Feature 16/17 design note:** `scoring.js` gained `CRITICAL_SEVERITY_FLOOR` (85, above the block threshold) — any flagged rule carrying `severity: 'Critical'` (merchant account takeover, suspected mule receiver) floors the score there, the same explicit-floor pattern as the pre-existing `STRUCTURING_ALERT_FLOOR`, rather than a second implicit mechanism. Circular laundering and known structuring/fraud rings were already covered by `STRUCTURING_ALERT_FLOOR` (any active `structuring_alerts` row, direct or circular) with zero changes needed. `computeFraudScore` now also returns `riskBreakdown` (one `{type, reason, weight, severity}` entry per contributing signal, including the structuring alert and — when it fires — the outbound-amount restrictor) and an overall `severity` (the highest-ranked contributing signal, `'None'` if nothing flagged); both are surfaced in `POST /transaction`'s response and `GET /transactions`'s rows. `flags.severity` (new nullable column) persists each flag's severity so `GET /transactions` can reconstruct it without re-running detectors. All 13 detectors (the original 9 plus the 4 refund-integrity ones from Phase B, which already had severity) now carry a severity, backfilled without changing any existing detector's flagging logic or weight.
+
+**Bug found and fixed while wiring Feature 4/16:** `getOutboundContext`'s new merchant-login-takeover query used a strict `timestamp <` boundary to find "the login before the most recent one" — the same class of same-millisecond race already fixed once in this file (Section 15.13, finding #3) for the refund-context queries, reintroduced here in new code. Two `POST /merchant-logins` calls fired fast enough (a loaded test suite, or a real seed script) can land on the same millisecond; the strict comparison then silently excluded the earlier login entirely, leaving `takeoverRisk` null and the takeover flag never firing. Caught by the full test suite flaking under load, not by the individual test file run in isolation. Fixed by using SQLite's implicit `rowid` (unique even when timestamps tie) as the ordering/exclusion key instead of `timestamp` alone — `ORDER BY timestamp DESC, rowid DESC` and `rowid != ? AND timestamp <= ?` rather than a plain `timestamp <`. Verified with a regression test that inserts two logins at the exact same timestamp and confirms the correct one is still identified as "previous," plus 5 consecutive clean full-suite runs after the fix (previously flaky under load).
+
+**Feature 6 design note:** circular-flow alerts reuse the existing `structuring_alerts` table and the existing fast per-transaction lookup (`alertLookup.js`) with zero changes to either — a cycle is stored with `sender_id` = the origin business account and `receiver_ids` = the intermediate hop accounts, which `alertLookup.js`'s existing sender-match/receiver-membership checks already cover for any future transaction touching any account in the cycle. This is the "reuse existing graph engine" requirement satisfied structurally, not just in spirit: no parallel alert mechanism, no new scoring-floor logic (the existing `STRUCTURING_ALERT_FLOOR` already forces block once any structuring alert — split/fan-out or circular — is active for an account). The detector itself (`server/structuring/circularFlow.js`) is a pure DFS over a 24h-lookback transaction graph, bounded to `CIRCULAR_FLOW.MAX_CYCLE_HOPS` (3) intermediate hops, run from the background job (not per-transaction — too expensive, same reasoning as the existing split/fan-out detectors) against the business's own registered accounts as cycle origins.
+
 ---
 
 ## 5. GCP Architecture
@@ -168,6 +214,64 @@ A real-time scoring API that:
 **Why a Graph Engine is needed for structuring detection:** Rule-based single-transaction checks and even the ML classifier evaluate one transaction in isolation. Structuring is only visible when you look at *relationships between transactions across accounts over time* — one sender, many receivers, followed by fast withdrawals. Cloud Spanner stores the transaction data with strong consistency, but the structuring detector itself needs a lightweight graph traversal layer on top of it (can be implemented in-app for the hackathon using SQL self-joins/window functions — no separate graph database is required at this scale).
 
 **For local development and the hackathon demo:** use **SQLite** in place of Cloud Spanner, and **local scikit-learn inference** in place of Vertex AI if the deployment path proves too slow to set up. Comment this clearly in code (`// PROD: Cloud Spanner — DEMO: SQLite`) so it's obvious what's a demo stand-in vs. the intended production architecture.
+
+### Sequence diagram — one `POST /transaction` call (Section 16, Category 25)
+
+Every step below happens synchronously within the one request (no async/polling pattern, CLAUDE.md hard rule). Rendered as Mermaid, which GitHub renders natively in Markdown — no diagramming tool/export step required.
+
+```mermaid
+sequenceDiagram
+    participant GW as Payment Gateway
+    participant API as POST /transaction
+    participant DB as SQLite
+    participant FL as fraud_lists check
+    participant SA as Structuring alert lookup
+    participant RE as Rule engine (outbound only)
+    participant ML as ML client
+    participant SC as scoring.js
+    participant WS as WebSocket
+
+    GW->>API: transaction payload
+    API->>API: validate + overwrite timestamp with server time
+    API->>DB: ensureUserExists (sender, receiver)
+    API->>SA: findActiveAlert(sender, receiver)
+    API->>FL: checkFraudLists(sender, receiver)
+    alt sender is a registered business account
+        API->>DB: getUserHistory + getOutboundContext
+        API->>RE: run 18 detectors
+        API->>ML: getFraudProbability
+    else inbound (customer paying the business)
+        Note over API: rule/ML scoring skipped entirely
+    end
+    API->>SC: computeFraudScore(rules, structuring, ml, fraudLists)
+    SC-->>API: score, reasons, risk_breakdown, severity, confidence
+    API->>API: decide(score) -> allow / step_up / block
+    API->>DB: insert transaction + flags
+    API->>WS: broadcast full transaction
+    API-->>GW: 201 { fraud_score, decision, severity, confidence, reasons, risk_breakdown }
+```
+
+### Decision flow diagram (Section 16, Category 25)
+
+```mermaid
+flowchart TD
+    A[Transaction received] --> B{Structuring alert<br/>or blacklist match?}
+    B -- yes --> Z[BLOCK<br/>score floored at 90-95]
+    B -- no --> C{Sender is a<br/>registered business account?}
+    C -- no --> D[Auto-ALLOW<br/>no rule/ML scoring]
+    C -- yes --> E[Run 18 detectors + ML]
+    E --> F{Any Critical-severity<br/>flag?}
+    F -- yes --> Z
+    F -- no --> G[Sum rule weights + ML contribution]
+    G --> H{Whitelisted?}
+    H -- yes --> I[Cap score at 5]
+    H -- no --> J[score as computed]
+    I --> K
+    J --> K{score}
+    K -- "< 40" --> L[ALLOW]
+    K -- "40-80" --> M[STEP-UP]
+    K -- "> 80" --> Z
+```
 
 ---
 
@@ -234,11 +338,31 @@ CREATE TABLE structuring_alerts (
 
 **Schema change (dashboard ID-column collapse):** added a new table, `business_accounts (account_id TEXT PRIMARY KEY, created_at TEXT NOT NULL)` — the dashboard's editable registry of the business's own account IDs (see Section 7's `/business-accounts` routes), used to resolve which side of a `sender_id`/`receiver_id` pair is the customer. No FK to `users`, deliberately: an ID can be registered before or independent of having any transactions.
 
+**Schema changes (Section 15.16, 21-feature extension):** `transactions` gains four nullable columns — `reference_transaction_id` (links a refund to the purchase it refunds), `employee_id` (which staff member initiated a merchant-side transaction), `country`, `ip_address` (geo-risk scoring). Two new tables: `merchant_login_events` (merchant login metadata for takeover detection, Feature 4, including a `country` column) and `disputes` (chargeback/dispute events for friendly-fraud scoring, Feature 8), both indexed on their lookup key. `flags` gains a nullable `severity` column (Feature 17). All pure additions — see Section 15.16 for the full rationale and which feature each backs.
+
+**Schema changes (Section 16, Enterprise Edition triage):** `transactions` gains `latency_ms` (scoring-pipeline processing time, Category 16/23) and `confidence` (Category 13). Three new tables: `fraud_lists` (blacklist/whitelist/watchlist registry, Categories 19/21), `investigation_notes` (append-only notes on a transaction, Category 13/14), and `admin_audit_log` (mutations to `business_accounts`/`fraud_lists`, Category 20/21). Four more new tables added in the same pass: `cases`/`case_transactions` (Fraud Investigation Module, Category 14), `custom_rules` (Auto Rule Builder, Category 19), and `scheduled_reports` (Category 18). `transactions` also gains `phone`, `email`, `identity_hash` (all nullable, Category 11) — `identity_hash` is a caller-computed hash of a government ID (PAN/Aadhaar/etc); this system never receives or stores the raw document number, only the opaque token, so shared-identity-document detection works without collecting the PII itself. All three are detection-only inputs: deliberately not surfaced in `GET /transactions` or the WebSocket broadcast, since a flagged transaction's `reason` text ("Phone number shared with N other accounts") already conveys the signal without re-exposing raw contact/identity data in every listing. All pure additions.
+
+**Schema change (Category 10, Device Reputation Engine):** `transactions` gains `user_agent` (nullable, self-reported HTTP client string, not PII — same detection-only, never-surfaced convention as `phone`/`email`/`identity_hash` above, since `deviceFingerprintRisk.js`'s reason text already conveys the signal). A pure addition.
+
+**Schema change (Category 12, High-Risk State/City Detection):** `transactions` gains `state`/`city` (nullable, self-reported region/city strings). Unlike `phone`/`email`/`identity_hash`, these are ordinary geo context (same category as the pre-existing `country`/`ip_address`), not PII — surfaced in `GET /transactions` and the WebSocket broadcast exactly like `country` already is. A pure addition.
+
+**Schema change (Dynamic Risk Engine / Merchant Risk Intelligence pass):** a new table, `entity_baselines (entity_id TEXT, metric TEXT, count INTEGER, mean REAL, m2 REAL, last_observed_at TEXT, PRIMARY KEY (entity_id, metric))` — a generic, reusable per-entity/per-metric rolling statistical baseline (Welford's online mean/variance, `server/adaptiveBaseline.js`), replacing several previously-fixed magic-number thresholds (`velocity.js`, `amountAnomaly.js`, `multipleRefundDetection.js`) with a real z-score against each entity's own learned history. `entity_id` is deliberately free-form (a `user_id`, or a composite `"businessId:customerId"` pair for refund pacing) and `metric` a short label, so any detector can register a new adaptive baseline without a further schema change. A pure addition.
+
+**Schema changes (Continuous Learning Extension, 18 July 2026):** six more tables, all pure additions, all part of reopening the previously-declined Adaptive/Behavioral/Predictive/Graph-clustering items (see Section 16/17):
+- `training_examples (transaction_id TEXT PRIMARY KEY, feature_json TEXT, label INTEGER, computed_at TEXT)` — the feature store's point-in-time snapshots (`server/featureStore.js`), one row per transaction, `label` filled in once a `feedback_labels` row exists.
+- `feedback_labels (transaction_id TEXT PRIMARY KEY, label INTEGER CHECK (label IN (0,1)), source TEXT, created_at TEXT)` — real analyst-decision training labels (`server/feedbackLabels.js`), populated automatically from `POST /fraud-lists` blacklist/whitelist decisions and `PATCH /cases/:caseId`'s `outcome`.
+- `entity_reputation (entity_id TEXT, entity_type TEXT, score REAL, flag_count INTEGER, txn_count INTEGER, last_updated_at TEXT, PRIMARY KEY (entity_id, entity_type))` — self-updating composite reputation per entity (`server/reputation.js`), distinct from `mule_accounts`' narrow receive-then-drain pattern.
+- `graph_edges (source TEXT, target TEXT, edge_type TEXT, weight REAL, txn_count INTEGER, total_amount REAL, last_seen_at TEXT, PRIMARY KEY (source, target, edge_type))` — a persisted graph store (`server/graphIntelligence.js`), replacing `GET /graph/relationships`'s live self-joins for the edges a transaction actually produces.
+- `graph_clusters (cluster_id TEXT PRIMARY KEY, member_ids_json TEXT, risk_score REAL, discovered_at TEXT)` — mule-ring/community clusters discovered by a periodic union-find pass over `graph_edges`, run inside the existing structuring background job cycle.
+- `cases` gains a nullable `outcome TEXT CHECK (outcome IN ('confirmed_fraud', 'false_positive'))` column — a real analyst verdict on a resolved case, separate from `status`, feeding `feedback_labels` for every transaction linked to that case.
+
 **Important:** `sender_id` and `receiver_id` must exist from the very first schema migration — do not add them later; the structuring detector depends on them from day one. They're directional, not role-fixed: on an ordinary payment the customer is `sender_id` and the merchant is `receiver_id`; on a refund/payout the merchant is `sender_id` and the customer is `receiver_id`.
 
 **Implementation note (Task 2):** `server/db.js` adds two extra indexes beyond the ones listed above — `idx_flags_transaction` on `flags(transaction_id)` and `idx_structuring_alerts_sender` on `structuring_alerts(sender_id)` — both pure lookup-performance additions with no schema/column changes, needed for the fast per-transaction structuring-alert lookup (Task 6) and for fetching flags per transaction. The `users.avg_transaction_amount` running average (Task 3) is maintained using an indexed `COUNT(*)` over `transactions` for the per-user transaction count rather than adding a redundant `transaction_count` column to `users`.
 
 **Implementation note (Section 15.6):** `server/db.js` adds a third index, `idx_structuring_alerts_created_at` on `structuring_alerts(created_at)` — `alertLookup.js`'s receiver-side check and the background job's re-alert cooldown check both filter/order by `created_at` with no supporting index before this; fine at demo-table sizes, but a full scan waiting to happen at real volume. Pure performance addition, no schema/column change.
+
+**Implementation note (Section 17, PR review):** `server/db.js` adds a fourth index, `idx_transactions_device` on `transactions(device_id, timestamp)` — `outboundContext.js`'s new `devicePriorFlagCount` query (Category 10, Device Reputation Engine) filters on `device_id` on every outbound transaction with no supporting index before this; same reasoning as the three indexes above, found during this PR's own review rather than a later pass.
 
 ---
 
@@ -252,10 +376,30 @@ apiKeyAuth.js` and Section 15.6 for why this was added and its documented demo-o
 build). Requests are also rate-limited per IP (`server/middleware/rateLimit.js`, default 2000/60s
 across all routes) -> `429` once exceeded.
 
+**Roles (Section 16, Category 20):** up to three keys are recognized — `API_KEY` (admin, the original variable), and optional `API_KEY_ANALYST`/`API_KEY_VIEWER`. Unset optional keys mean only the admin key works, exactly as before. **viewer** (any valid key): every `GET` route. **analyst**: also `POST /transaction`, `/merchant-logins`, `/disputes`, `/investigation-notes`, `/cases` create/update. **admin**: also `business_accounts`/`fraud_lists` mutations (system-wide scoring effects) and `GET /admin-audit-log`. A recognized key below its route's required role gets `403`, not `401` — `401` is reserved for "not a recognized key at all."
+
+### `POST/GET/PATCH /cases`, `POST /cases/:caseId/transactions`, `GET /cases/:caseId/timeline` (Section 16, Category 14)
+Real case management: `POST { title, transaction_ids?, assigned_to? }` creates a case (status starts `open`); `GET /cases?status=&assigned_to=` lists/filters; `GET /cases/:caseId` returns detail + linked transaction IDs; `PATCH /cases/:caseId { status?, assigned_to?, title? }` updates (status one of `open`/`investigating`/`resolved`/`escalated`); `POST /cases/:caseId/transactions { transaction_id }` links another transaction. `GET /cases/:caseId/timeline` — "Investigation Timeline"/"Fraud Replay" — merges every linked transaction, its structuring alerts, and its investigation notes into one chronologically-sorted event list. `assigned_to` is caller-supplied free text, not a verified identity (no login system, Section 15.6).
+
+### `POST/GET/PATCH/DELETE /custom-rules` (Section 16, Category 19)
+The no-code rule engine. `POST { name, field, operator, value, weight, severity }` — `field` one of `amount`/`country`/`ip_address`/`transaction_type`/`purpose`/`device_id`/`merchant_id`/`employee_id`; `operator` one of `>`/`>=`/`<`/`<=`/`==`/`!=`/`contains`. Evaluated (`server/customRules.js`) against every outbound transaction alongside the 23 hardcoded detectors — fetched fresh from the DB per request, not statically imported, which is what lets a new rule take effect without a redeploy. `PATCH { enabled?, weight?, severity? }` toggles/tunes a rule without deleting it. All mutations admin-only (a bad rule affects scoring for every future transaction).
+
+### `GET /scheduled-reports?type=&limit=`, `POST /scheduled-reports/generate` (Section 16, Category 18)
+`GET` lists generated report snapshots (`summary` — the same aggregation shape as `GET /analytics/summary`, scoped to the report's period). `POST { type: 'daily'|'weekly'|'monthly' }` (admin-only) generates on demand — `409` if a report for the current period already exists (idempotent, matching the background job's own periodic-tick behavior). A report's period is aligned to the most recently *completed* period boundary, not "now," and generation attempts an email via `server/notifications.js` when SMTP is configured.
+
+### `POST /notifications/test` (Section 16, Category 17)
+admin-only. `{ message? }` — sends a real test message to every configured notification channel (`server/notifications.js`) and returns per-channel `{ sent: boolean, reason?: string }`. The same dispatch fires automatically (not awaited, so it never adds latency to a scoring decision) from `POST /transaction` whenever a transaction's `severity` is `Critical`.
+
 ### `POST /transaction`
 Accepts a single transaction and returns a decision **synchronously** — scoring (rules + structuring lookup + ML) happens within the same request/response cycle. There is no async/polling pattern in this project. `amount` must be a positive finite number, capped at `MAX_AMOUNT` (10,000,000 — a sanity bound added in Section 15.6, well above any plausible transaction here, including a whole structuring burst).
 
 `sender_id`/`receiver_id` are directional, not role-fixed: the paying party (a customer, or the merchant itself on a refund/payout) is `sender_id`, and the receiving party (the merchant, or the customer on a refund) is `receiver_id`. `merchant_id` (optional) identifies which of the business's own payment-gateway accounts (Stripe/Razorpay/PayPal, etc.) the transaction was ingested from. `purpose` (optional, max 256 chars) is a human-readable note, mainly populated on merchant-initiated outgoing transactions (refunds, payouts, vendor settlements) for analyst context — it is not a scoring input.
+
+**New optional fields (Section 15.16):** `reference_transaction_id` (the specific purchase a refund is refunding — powers Features 1/3/7's account-mismatch/purchase-validation/split-refund checks, sharper than the purpose-string/customer-aggregate fallback used when it's omitted), `employee_id` (which internal staff member initiated a merchant-side transaction — Feature 10), `country`/`ip_address` (geo-risk scoring — Feature 14). All four are pure additions, analyst/detection context only, never required.
+
+**`user_agent` (Section 16, Category 10, Device Reputation Engine):** optional, max 512 chars, the calling gateway's self-reported HTTP client string. Feeds `server/rules/deviceFingerprintRisk.js`: (1) has this exact `device_id` been attached to a prior `step_up`/`block` transaction, from *any* sender, in the last 90 days — a device genuinely tied to prior fraud, stronger than merely-shared-device (`sharedIdentifierRisk.js`); (2) does `user_agent` match a known automation/scripting signature (`bot`/`curl`/`wget`/`python-requests`/headless-browser patterns) — a weaker heuristic signal, since a script can lie about its UA as easily as a real client can. Neither can detect emulation/rooting, which needs native mobile-SDK device attestation this JSON HTTP API structurally cannot provide. Detection-only, same as `phone`/`email`/`identity_hash` below — never echoed in the response, `GET /transactions`, or the WebSocket broadcast.
+
+**`state`/`city` (Section 16, Category 12, High-Risk State/City Detection):** optional, max 64 chars each, self-reported region/city strings. Feeds `geoRisk.js`'s config-driven match against `HIGH_RISK_STATES`/`HIGH_RISK_CITIES`, same pattern as the pre-existing `country` check. Unlike `user_agent`/`phone`/`email`/`identity_hash`, these are ordinary geo context, not PII — echoed in the response, `GET /transactions`, and the WebSocket broadcast the same way `country` already is.
 
 **Request body (ordinary customer payment):**
 ```json
@@ -290,12 +434,21 @@ Accepts a single transaction and returns a decision **synchronously** — scorin
   "transaction_id": "t_abc123",
   "fraud_score": 87,
   "decision": "block",
+  "severity": "High",
+  "confidence": 79,
   "reasons": [
     "3 transactions in 10 seconds",
     "412 km location jump from last transaction"
+  ],
+  "risk_breakdown": [
+    { "type": "velocity", "reason": "3 transactions in 10 seconds", "weight": 35, "severity": "Medium" },
+    { "type": "impossible_travel", "reason": "412 km location jump from last transaction", "weight": 40, "severity": "High" }
   ]
 }
 ```
+**`severity`/`risk_breakdown` (Section 15.16, Feature 17):** `severity` is the highest-ranked severity (`Low`/`Medium`/`High`/`Critical`) among every contributing signal, `None` if nothing was flagged. `risk_breakdown` gives per-signal detail (detector name, reason, weight, severity) beyond the flat `reasons` array, which is kept unchanged for backward compatibility. `GET /transactions` returns the same fields per row (`severity` reconstructed from the `flags` table's `severity` column; `confidence` from the persisted `transactions.confidence` column).
+
+**`confidence` (Section 16, Category 13):** a separate 0-100 axis from `fraud_score` — how much independent corroboration backs the decision, not how risky the transaction looks. A direct hit against a known record (an active structuring alert, a blacklist entry) is near-certain (99) regardless of how many other detectors also fired; otherwise confidence scales with the number of independently agreeing detectors and whether the ML signal agrees directionally, or — when no rule fired at all — how clean the ML probability itself is. See `server/scoring.js`'s `computeFraudScore` for the exact formula.
 
 ### `GET /transactions?limit=50&decision=block,step_up`
 Returns recent transactions with their decisions and flag reasons, for the dashboard's live table and the Task 11 audit trail. `decision` (optional, comma-separated, one or more of `allow`/`step_up`/`block`) filters the results — added when building the audit trail (Section 15.2).
@@ -305,6 +458,27 @@ Returns active structuring/layering alerts (grouped, not per-transaction).
 
 ### `GET /business-accounts`, `POST /business-accounts`, `DELETE /business-accounts/:accountId`
 The dashboard's editable registry of the business's own account IDs. There's no schema flag marking an ID as "the business" vs. "a customer" — `merchant_id` identifies which *gateway* a transaction came through, not which party in `sender_id`/`receiver_id` is the business. This registry is what lets the dashboard collapse the Sender/Receiver pair into a single "ID" column showing only the customer: `GET` returns `[{ account_id, created_at }, ...]`; `POST { account_id }` registers one (`INSERT OR IGNORE` — re-adding is a no-op, not an error); `DELETE /business-accounts/:accountId` removes one (idempotent — removing an unregistered ID still returns `204`). Analyst-facing only, like `purpose`/`merchant_id` — not a scoring input.
+
+### `POST /merchant-logins`, `GET /merchant-logins?merchant_id=...&limit=20` (Section 15.16, Feature 4)
+Ingests merchant login/session metadata (`merchant_id`, `device_id`, `browser`, `os`, `ip_address`, `location`, `country`, optional `timestamp`) used by `merchantAccountTakeover.js` to detect an unrecognized-device login shortly before a refund/payout/settlement. Same trust model as `POST /transaction` — a backend-to-backend integration point (in production, sourced from the business's own auth/session system), not something end users call. Unlike `POST /transaction`, a caller-supplied `timestamp` is honored rather than overridden, since seed/demo data legitimately needs to backdate login history and this endpoint moves no money.
+
+### `POST /disputes`, `GET /disputes?customer_id=...&limit=50` (Section 15.16, Feature 8)
+Ingests chargeback/dispute events (`transaction_id` optional, `customer_id`, `dispute_type`) used by `friendlyFraud.js` to score repeat-dispute customers. In production this would arrive via a payment gateway's chargeback webhook; here it's a directly-callable ingestion endpoint, same trust model as the routes above.
+
+### `GET /analytics/*` (Section 15.16, Feature 18)
+`summary` (overview stat-card totals), `top-frauds?limit=` (most common flag types), `top-risky?dimension=customers|merchants|employees|vendors|devices|ips|countries&limit=`, `mule-accounts?limit=`, `gateway-comparison`, `trend?bucket=hour|day|week|month&lookbackHours=`, `export?format=csv|json&limit=`. All read-only, all `requireApiKey`. See Section 15.16 for field-level detail and the "recovered amount" definition.
+
+### `GET /analytics/risk-profile?dimension=&id=` (Section 16, Categories 6/7/8)
+A dedicated per-entity profile — "Customer Risk Score", "Merchant Health Score", "Vendor Trust Score" — beyond `top-risky`'s ranked list (which only answers "who's riskiest right now", not "how risky is this specific ID"). Same `dimension`/column/purpose-filter convention as `top-risky`. Returns `health_score` (0-100, `100 - avg_fraud_score` over this entity's own transaction history, `100` with no history — a plain formula traceable back to the same `fraud_score` every transaction response already shows, not a black box), `risk_tier` (Low/Medium/High, from `health_score` and flagged ratio), `total_transactions`/`flagged_transactions`/`flagged_ratio`, `blocked`/`step_up` counts, `total_amount`, `avg_fraud_score`, `last_activity`, `top_flag_types` (up to 5, by count), and `recent_transactions` (up to 10, newest first — the "Customer Transaction Timeline" item).
+
+### `GET /fraud-lists?list_type=`, `POST /fraud-lists`, `DELETE /fraud-lists/:entryId` (Section 16, Categories 19/21)
+The blacklist/whitelist/watchlist registry. `POST { list_type: 'blacklist'|'whitelist'|'watchlist', account_id, reason? }` — not `INSERT OR IGNORE` like `business_accounts`: the same account can validly appear more than once over time (e.g. watchlisted, then later confirmed and blacklisted), so `entry_id` is the primary key, not `(list_type, account_id)`. `DELETE` is idempotent. Checked on **every** transaction regardless of direction (`server/fraudLists.js`'s `checkFraudLists`, called alongside the structuring-alert lookup in `routes/transactions.js`) — a blacklisted account is a confirmed bad actor whether it's paying the business or being paid by it. Precedence in `scoring.js`: an active structuring alert or a blacklist entry always forces block; a whitelist entry only reduces the score when neither of those apply, and never overrides a Critical-severity rule flag (merchant takeover, suspected mule) even on an otherwise-trusted account; a watchlist entry just adds `WATCHLIST_WEIGHT` (15) and a reason, never forcing an outcome.
+
+### `POST /investigation-notes`, `GET /investigation-notes?transaction_id=` (Section 16, Category 13/14)
+Free-text notes attachable to a transaction (`transaction_id`, `note`, `author?`) — the safe, tractable subset of "Investigation Notes"/"Investigation Timeline" that doesn't require the full Fraud Investigation Module (case assignment, analyst identity, workflow state), which this build has deliberately declined (Section 16, Category 14). No DELETE route — notes are append-only, since an investigation record that could be silently erased isn't a trustworthy one. `author` is caller-supplied free text, not a verified identity (this build has no login system, Section 15.6).
+
+### `GET /admin-audit-log?limit=` (Section 16, Category 20/21)
+Read-only view of every mutation to `business_accounts`/`fraud_lists` — action, target, an optional detail string, the caller's IP (there being no user identity to log instead), and when. Written by `server/adminAuditLog.js`'s `recordAdminAction`, called from `businessAccounts.js`/`fraudLists.js`'s POST/DELETE handlers.
 
 ### `GET /audit/summary?hours=24&bucketMinutes=60`
 Task 11 (audit trail): time-bucketed counts of `allow`/`step_up`/`block` over the given lookback window, for the trend chart. Added in Section 15.2. Returns `{ hours, bucketMinutes, totalTransactions, buckets: [{ bucket_start, allow, step_up, block }, ...] }`.
@@ -385,6 +559,7 @@ sentinelpay/
 - `tests/api.test.js`, `tests/ml.test.js`, `tests/validate.test.js`, `tests/websocket.test.js`, `tests/dashboard.test.js` — additional test coverage (ingestion API incl. the timestamp-security regression, ML client incl. the timeout regression, input validation, WebSocket error resilience, and a script-load-order regression guard) beyond the three test files originally listed.
 - `server/middleware/apiKeyAuth.js`, `server/middleware/rateLimit.js`, `server/middleware/securityHeaders.js` — added in Section 15.6's security review pass: shared-secret API key auth, per-IP rate limiting, and response security headers, all hand-rolled (no new npm dependencies) to match this project's dependency-light conventions.
 - `tests/userProfile.test.js`, `tests/rateLimit.test.js` — additional test coverage added alongside Section 15.6 (the bounded/narrowing `typical_active_hours` fix, and the rate limiter).
+- **Section 15.16 (21-feature extension) additions:** `server/config.js` (Feature 19); `server/muleScore.js` (Feature 13); `server/structuring/circularFlow.js` (Feature 6); `server/routes/merchantLogins.js`, `server/routes/disputes.js`, `server/routes/analytics.js` (Features 4/8/18); thirteen new files in `server/rules/` (Features 1/2/4/5/7/8/9/10/11/12/13/14 — see Section 4.3 for the full mapping); `dashboard/analytics.js` (Feature 15); `tests/newIngestionRoutes.test.js`, `tests/analytics.test.js` (new test files, same one-file-per-concern convention as `tests/rateLimit.test.js`/`tests/userProfile.test.js` above).
 
 ---
 
@@ -406,6 +581,15 @@ sentinelpay/
 | Map visualization (stretch) | Leaflet.js |
 | Version control | Git + GitHub |
 | UUID generation | Built-in `crypto.randomUUID()` — no `uuid` package dependency |
+| Feature store (demo) | `entity_baselines` + `training_examples` tables in the same SQLite DB (`server/featureStore.js`), point-in-time correctness via `replayFeatureHistory`'s chronological replay |
+| Feature store (production target) | A real feature store (e.g. Vertex AI Feature Store) with online/offline stores kept in sync |
+| Reputation engine (demo) | `entity_reputation` table, Laplace-smoothed flag-rate + blacklist/mule floors, incrementally updated per transaction (`server/reputation.js`) |
+| Graph store (demo) | `graph_edges`/`graph_clusters` tables, union-find connected-components run inside the existing structuring background job (`server/graphIntelligence.js`) |
+| Graph store (production target) | A real graph database (e.g. Neo4j) with a live community-detection job |
+| Continuous-learning training | Python 3 + XGBoost (`tree_method="hist", device="cuda"`), GPU-only (hard-fails without CUDA) — `ml/train_model_gpu.py`, `ml/retrain.py`, run in an `ml/.venv` virtualenv |
+| Continuous-learning training (production target) | Vertex AI custom training jobs, scheduled/triggered retraining pipeline |
+| Continuous-learning serving | XGBoost's native JSON export, evaluated natively inside Node (`server/ml/xgbTreeEval.js`) — same "no pickle/joblib, no sidecar required for the default path" convention as the original logistic model |
+| Continuous-learning feedback | `feedback_labels` table, populated automatically from real analyst decisions (blacklist/whitelist via `POST /fraud-lists`, case resolution via `PATCH /cases/:caseId`'s `outcome`) — `server/feedbackLabels.js` |
 
 **Deviation note (16 July 2026):** `better-sqlite3` requires a native (node-gyp) build step, and the dev machine has no Visual Studio C++ build tools installed, so `npm install` failed. The Node runtime in use is v26.4.0, which ships the built-in `node:sqlite` module (`DatabaseSync`) — a synchronous SQLite API with no native compilation and no extra dependency, and it's API-compatible enough with the `better-sqlite3` patterns this doc assumes (`db.prepare(sql).run/get/all(...)`) that no schema or query logic changes were needed. Same reasoning applied to drop the `uuid` package in favor of the built-in `crypto.randomUUID()`. Requires Node >= 22.5.0 (where `node:sqlite` was introduced); pinned in `package.json` `engines`.
 
@@ -413,7 +597,9 @@ sentinelpay/
 1. **Training data.** `ml/train_model.py` does not use the Kaggle "Credit Card Fraud Detection" dataset the doc originally suggested — that dataset's `V1`-`V28` features are anonymized PCA components with no interpretable meaning, and none of them correspond to a signal this API actually has at scoring time. Instead it generates a synthetic dataset over the *same* behavioral feature space the rule engine already computes (`velocity_count_60s`, `amount_to_avg_ratio`, `travel_speed_kmh`, `is_new_device`, `is_odd_hour`, `amount`), with fraud patterns injected as a mixture of anomalous signal combinations (matching the fraud/step-up worked examples in `user-manual.md`). This lets the ML layer learn nonlinear interactions between the same signals the rules use, rather than operating on a disconnected feature space. It is a genuinely trained `scikit-learn` `LogisticRegression` (`class_weight="balanced"`), evaluated on a held-out test split (AUC ≈ 0.88, recall ≈ 0.73, precision ≈ 0.35 — recall-biased on purpose, since this is one signal feeding a broader scoring pipeline, not a standalone gate).
 2. **Serving path.** The demo does not call a live Vertex AI endpoint (no GCP project provisioned in this dev environment) and does not default to a Flask/FastAPI sidecar either (neither package is installed here). Instead the trained weights are exported to `ml/model_export/model.json` and `server/ml/mlClient.js` runs the logistic-regression forward pass (standardize → dot product → sigmoid) natively inside the Node process by default (`ML_SERVING_MODE=local`) — sub-millisecond, no extra process to keep alive during a live demo. `ml/serve.py` is still a genuine, independently runnable fallback (stdlib `http.server`, `POST /predict`) reachable via `ML_SERVING_MODE=python-service`, and a `ML_SERVING_MODE=vertex` path exists as an explicit, honest stub for the production target. The pitch should say plainly: "designed for Vertex AI edge deployment, demoed with local inference of the same trained model."
 
-*Last confirmed accurate as of: 16 July 2026, Task 1 (scaffolding).*
+**Continuous Learning Extension note (18 July 2026):** the "Adaptive Risk Scoring / Behavioral Pattern Learning / Predictive Fraud Forecasting / Adaptive Rule Learning / Auto Threshold Learning" items this doc previously marked ⛔ ("needs an online-learning/retraining pipeline this project doesn't have") were revisited and built for real, at a scope this SQLite + single-machine-GPU stack can actually support honestly — see Section 16/17 for the reconciled status and Section 17.30 for the full phase-by-phase breakdown of what was actually built. In short: `server/featureStore.js` extends the existing Welford-baseline "Dynamic Risk Engine" (`server/adaptiveBaseline.js`) into a genuine per-entity feature store with point-in-time-correct training-data replay; `server/reputation.js` adds self-updating composite reputation for every entity type (user, device, merchant, IP, business↔customer pair), not just senders; `server/graphIntelligence.js` adds real union-find cluster discovery over a persisted graph store (reopening Section 16 Category 4, previously also declined); and `ml/train_model_gpu.py`/`ml/retrain.py` add a real GPU-trained (XGBoost, CUDA-only, hard-fails without a GPU) model with genuine incremental (warm-started) retraining triggered by real analyst decisions (`server/feedbackLabels.js` — blacklist/whitelist/case-resolution verdicts become training labels). This is still explicitly a demo-scoped system (one SQLite file, one machine's GPU, no model registry or A/B rollout) standing in for real ML infrastructure, marked with the same `// PROD: X — DEMO: Y` convention as everything else in this codebase — not a claim that it's production-grade continuous-learning infrastructure.
+
+*Last confirmed accurate as of: 18 July 2026, Continuous Learning Extension.*
 
 ---
 
@@ -773,6 +959,610 @@ Every prior review pass (15.1–15.13) was scoped to whichever feature had just 
 
 `npm test`: 128 passing, unchanged (this pass fixed a Python-only file with no JS test surface; verified separately via live `curl` checks, described above).
 
+### 15.16 21-feature extension: refund integrity, account/vendor risk, employee/merchant/gateway fraud, geo risk, circular-flow detection, dashboard v2, analytics, config-driven thresholds
+
+A large follow-on spec (21 numbered features, verbatim, on `feature/advanced-fraud-detection-suite`) extending the outbound-fraud pipeline from 15.12 well beyond the original MVP. Recorded here per this doc's own anti-drift rule — every implementation decision below is binding until superseded by a later dev-log entry, the same as every other numbered feature in Section 4.
+
+**Ground rules carried over from the spec, non-negotiable:** don't rewrite working modules — extend; reuse existing tables/graph engine/websocket/scoring engine wherever possible, new tables only where the data genuinely doesn't exist yet; every detector is its own file, pure, unit-tested; every flag/alert has a human-readable reason and a severity (Low/Medium/High/Critical); every dashboard update goes through the existing WebSocket; every threshold is a named constant in `server/config.js`, not scattered magic numbers; run `npm test` after every feature and fix regressions before moving on; docs updated as part of the same work, not deferred to the end.
+
+**Schema additions (all pure additions — no `sender_id`/`receiver_id`-style retrofit, nothing removed):**
+- `transactions.reference_transaction_id TEXT` (nullable) — links a refund to the specific purchase it refunds. Optional in the API; when present, powers Feature 1 (account-mismatch) and sharpens Feature 3/7 (same-purchase refund accounting) beyond the purpose-string/customer-total heuristics `refundWithoutPurchase.js` already used.
+- `transactions.employee_id TEXT` (nullable) — which internal staff member initiated a merchant-side transaction (refunds/payouts), for Feature 10. No employee identity table — `employee_id` is caller-supplied, same trust model as `sender_id`/`merchant_id` today.
+- `transactions.country TEXT`, `transactions.ip_address TEXT` (nullable) — for Feature 14 (geo risk); no existing field carried country/IP, only lat/lng and device_id.
+- New table `merchant_login_events` (`login_id` PK, `merchant_id`, `device_id`, `browser`, `os`, `ip_address`, `location_lat`, `location_lng`, `timestamp`, `created_at`) — Feature 4 needs merchant login metadata, which is not transaction data and has no existing home. New `POST /merchant-logins` ingestion route (simulator/demo-only caller, same trust model as `POST /transaction`).
+- New table `disputes` (`dispute_id` PK, `transaction_id`, `customer_id`, `dispute_type`, `created_at`) — Feature 8 needs chargeback/dispute events, which don't exist anywhere in the current schema. New `POST /disputes` ingestion route. Scope cut: delivery-status tracking (mentioned in the spec's Feature 8 text) is out — this system has no shipping/fulfillment integration to source it from, and the dispute-recurrence signal alone is sufficient for a customer risk score at this project's scope; documented here rather than silently dropped.
+- No new table for mule scoring (Feature 13) or dormant-account detection (Feature 12) — both are computed on demand from existing `transactions` rows (a receiver's receive/withdraw ratio; a sender's/receiver's `MAX(timestamp)` gap), consistent with "reuse existing tables whenever possible."
+- Cross-gateway detection (Feature 11) needs no new field at all — `merchant_id` already identifies the gateway a transaction came through; the detector is a new query pattern over existing columns, not a new column.
+
+**`server/config.js` (new, Feature 19):** centralizes every threshold introduced by this extension (`MAX_REFUNDS`, `MAX_REFUND_RATIO`, `MAX_NEW_VENDOR_AMOUNT`, `MAX_NEW_VENDOR_BLOCK_AMOUNT`, `HIGH_RISK_COUNTRIES`, `HIGH_RISK_IP_PREFIXES`, `MULE_WITHDRAWAL_RATIO`, `MULE_WINDOW_MS`, `REFUND_VELOCITY_COUNT`/`_WINDOW_MS`, `DORMANT_DAYS`, `DORMANT_REACTIVATION_AMOUNT`, `CROSS_GATEWAY_WINDOW_MS`/`_AMOUNT`, `EMPLOYEE_REFUND_COUNT_THRESHOLD`, etc.), one object per feature area, each constant commented with what it controls. Deliberately scoped to the *new* features only — Section 14's existing convention (named constants at the top of each existing rule file, e.g. `velocity.js`'s own `MAX_TRANSACTIONS_PER_WINDOW`) is left as-is per "do not rewrite existing working modules"; migrating those into `config.js` too would touch nine already-shipped, already-tested files for no functional gain and is explicitly out of scope for this pass.
+
+**Detector wiring:** all new outbound-side detectors join the existing `server/rules/` directory and the same `(transaction, context) => {flagged, reason, weight, severity}` shape as the nine detectors already there, extended with a `severity` field (Low/Medium/High/Critical, Feature 17) that the six pre-existing detectors also gain (backfilled, not just the new nine) so `scoring.js`'s explainability output is uniform rather than half the detectors having severity and half not. Circular-flow (Feature 6) and cross-gateway-structuring (Feature 11) are graph/aggregate patterns, not per-transaction rules, so they follow the existing `server/structuring/` background-job + fast-lookup split (same shape as split/fan-out/withdrawal-correlation) rather than living in `server/rules/`.
+
+**Force-block list (Feature 16):** `scoring.js` gains a small `CRITICAL_DETECTORS` set — merchant account takeover (Feature 4), circular laundering (Feature 6), known mule (Feature 13), known structuring/fraud ring (already-existing alert lookup) — any of which floors the decision at `block` regardless of the numeric score, mirroring the existing `STRUCTURING_ALERT_FLOOR`/`outboundRestrictor.js` floor pattern rather than inventing a new mechanism.
+
+**Phasing (given the 21 July deadline, 4 days out from when this section was written):** implemented in dependency order, `npm test` gating each step — (A) `config.js` + schema; (B) refund-integrity cluster, Features 1/2/3/7/9 (highest value, builds directly on the already-shipped `refundWithoutPurchase.js`/`outboundContext.js`, no new data model); (C) account/vendor risk, Features 5/12/13/14 (query-only, existing tables); (D) new data-model features, 4/8/10/11; (E) circular-flow graph, Feature 6; (F) scoring/explainability wiring, 16/17; (G) dashboard v2 + analytics endpoints, 15/18; (H) test-coverage/doc sweep, 20/21. Each lettered phase is a commit; this doc and `README.md` are updated in the same phase that changes them, not deferred to phase H — phase H is a final consistency sweep, not the first time docs are touched.
+
 ---
 
-*Document prepared for Digital Campus 2.0 on Google Cloud — Hack Sprint (24 July 2026). This is the team's single source of truth — keep it up to date as the project evolves.*
+## 16. "Enterprise Edition" wishlist (26 categories, verbatim) — status against the actual build
+
+A follow-on request supplied a much larger 26-category feature list ("SentinelPay – Final Feature List (Enterprise Edition)") and asked for it to be reflected here and built. It's an order of magnitude bigger than Section 15.16's 21 features, and a meaningful slice of it needs things this hackathon build cannot responsibly fabricate: real third-party credentials (Slack/Teams/Discord/Telegram/SMS/email), collection of sensitive government ID numbers (PAN, Aadhaar), a real login/authentication system this project has never had, native mobile-SDK-level device attestation, or a new LLM integration. Faking any of those — a "Slack alerts" toggle with no real webhook, an "RBAC" system with no actual users to assign roles to — would misrepresent what's actually working, which cuts against this document's own standing rule (the `// PROD: X — DEMO: Y` convention, Section 14) of never letting a stand-in pass as the real thing. So: every category below is triaged honestly — ✅ already built (with the file), 🔶 partially covered by something that already exists (explained), 🆕 newly built in this pass, or ⛔ explicitly out of scope for this build, with the concrete reason (not just "later").
+
+Legend: ✅ built · 🔶 partially covered by something that already exists · 🆕 newly built in this pass · ⛔ out of scope for this build (reason given at the category, not repeated per item).
+
+**1. Core Transaction Engine** — ✅ all ten: Real-time Transaction Ingestion API (`POST /transaction`) · Multi-Gateway Transaction Processing (`merchant_id`) · REST API Support · WebSocket Live Streaming · Transaction Validation (`validate.js`) · Merchant Account Registry · Business Account Management (`business_accounts`) · Transaction History (`GET /transactions`) · High Throughput Processing · Low Latency <150ms (measured, Section 11)
+
+**2. Rule-Based Fraud Detection** — ✅ Velocity · Impossible Travel · Amount Anomaly · Device/IP Mismatch (`deviceMismatch.js` + `geoRisk.js`'s IP check) · Odd Hour Activity · Refund Without Purchase · Refund Account Mismatch · Multiple Refund Detection · Split Refund Detection · Refund Velocity Detection · Refund Abuse Detection (🔶 covered jointly by `multipleRefundDetection.js`+`refundWithoutPurchase.js`, not a separate file) · Refund Chain Detection (🔶 `splitRefundDetection.js`) · Payout to New Receiver · Outbound Ratio Anomaly · Outbound Fan-Out Burst · Dormant Account Reactivation · High-Risk Transaction Detection (🔶 the score/decision tiering itself) · **Duplicate Transaction Detection 🆕** (`server/rules/duplicateTransaction.js`) · Suspicious Merchant Behavior Detection (🔶 the outbound detector suite collectively)
+
+**3. Anti-Money Laundering** — ✅ all 14: Structuring · Smurfing · Layering · Fan-Out · Split Transaction · Withdrawal Correlation · Mule Account Detection · Mule Account Risk Scoring · Circular Money Flow Detection · Chain Tracking · Multi-Hop Transaction Tracking · Graph-Based AML Detection · Money Flow Analysis · Suspicious Network Detection (🔶 structuring + mule + circular-flow together)
+
+**4. Graph Intelligence** — **Relationship Graph 🆕 / Transaction Graph 🆕 / Graph-Based AML Detection 🆕** (`GET /graph/relationships?account_id=&depth=` — a real `{nodes, edges}` JSON graph, transaction edges aggregated by counterparty plus shared-device/IP/identity-hash link edges, bounded to 50 nodes; closes the "data model supports it, no endpoint" gap) · Fraud Ring Detection ✅ (`structuring_alerts`) · **Community Detection 🆕 / Graph Clustering 🆕** (Continuous Learning Extension, 18 July 2026 — `server/graphIntelligence.js`'s union-find connected-components over a persisted `graph_edges` store, run periodically inside the existing structuring background job; discovered rings surfaced at `GET /graph/clusters` and as `cluster_id`/`degree` annotations on `GET /graph/relationships`' nodes once a cluster's members' average reputation crosses a risk threshold) · **Shared Device Graph 🆕** / **Shared IP Graph 🆕** (`server/rules/sharedIdentifierRisk.js`, now also visualizable via the graph endpoint above, and now also part of the persisted graph store's edges) · Shared Bank Account Graph ⛔ (no separate "bank account" concept distinct from `account_id` in this schema) · **Hidden Relationship Discovery 🆕** (clustering surfaces accounts linked only through shared devices/IPs/identity hashes, not direct transactions) · **Network Risk Scoring 🆕 / Suspicious Network Detection 🆕** (each discovered cluster's persisted `risk_score`, from `server/reputation.js`'s composite score averaged across the cluster's members) · Interactive Graph Visualization ⛔ (still a dependency-adding UI library — vis.js/Cytoscape.js — genuinely separate from the graph/clustering data itself, which is now real; the endpoints return plain JSON, not a rendered graph).
+
+**5. Machine Learning & AI** — ✅ Logistic Regression Fraud Model · Fraud Probability Prediction · AI Fraud Prediction · ML Feature Extraction · Vertex AI Ready · Local ML Inference · AI Explainability Engine. **Adaptive Risk Scoring 🆕 / Behavioral Pattern Learning 🆕 / Predictive Fraud Forecasting 🔶** (Continuous Learning Extension, 18 July 2026) — a genuine online-learning pipeline now exists at demo scale: `server/featureStore.js` computes real per-entity behavior vectors (extending the pre-existing Dynamic Risk Engine's Welford baselines, `server/adaptiveBaseline.js`) with point-in-time-correct training replay (`replayFeatureHistory`); `ml/train_model_gpu.py` trains a GPU-only XGBoost classifier (hard-fails without CUDA) on the app's own accumulated data plus an optional external dataset; `ml/retrain.py` performs genuine incremental (warm-started) retraining triggered by real analyst decisions (`server/feedbackLabels.js`); `server/ml/xgbTreeEval.js` serves the result natively in Node, hot-swapped via `ml/model_export/current.json` with no server restart. Predictive Fraud Forecasting is marked 🔶, not 🆕: the fraud *probability per transaction* is now genuinely adaptive/model-driven, but there's no separate time-series forecast (e.g. "expected fraud volume next week") — that remains unbuilt. What's still explicitly a demo stand-in, not production ML infrastructure: one SQLite file as the feature store, one machine's single GPU, no model registry/versioning beyond the `current.json` pointer, no A/B rollout — see Section 9's Continuous Learning Extension note.
+
+**6. Customer Intelligence** — **Customer Risk Score / Profile / Reputation Engine / Trusted Score 🆕** and **Customer Transaction Timeline 🆕**, both via `GET /analytics/risk-profile?dimension=customers&id=` (a dedicated per-entity endpoint, not just the ranked `top-risky` list) · Repeat Offender Detection (`friendlyFraud.js`'s dispute-repeat count) · Friendly Fraud Detection ✅ · Chargeback Pattern Analysis (`disputes` table) · Customer Behavioral Profiling (`userProfile.js`)
+
+**7. Merchant Intelligence** — **Merchant Risk/Health Score 🆕 / Merchant Trust Score 🆕** (`GET /analytics/risk-profile?dimension=merchants&id=`, a real per-merchant 0-100 score, not just `gateway-comparison`'s aggregate `avg_fraud_score`) · Merchant Behavioral Profiling 🔶 · Merchant Account Takeover Detection ✅ · Merchant Login Monitoring ✅ · Merchant Device Tracking ✅ (`merchant_login_events`) · Merchant Security Analytics 🔶
+
+**8. Vendor Intelligence** — 🔶 Vendor Reputation Engine / Trusted Vendor Detection (`knownOutboundReceiverIds`) · New Vendor Risk Detection ✅ · Vendor Risk Dashboard ✅ (`top-risky?dimension=vendors`) · **Vendor Trust Score 🆕 / Vendor Payment Analysis 🆕** (`GET /analytics/risk-profile?dimension=vendors&id=`)
+
+**9. Employee Intelligence** — ✅ all five: Employee Fraud Detection · Employee Refund Monitoring · Employee Risk Score (`top-risky?dimension=employees`) · Insider Threat Detection (`employeeFraud.js`) · Employee Activity Analytics
+
+**10. Device Intelligence** — **Device Reputation Engine 🆕 / Trusted Device Score 🆕** (`server/rules/deviceFingerprintRisk.js` — scores a device against its own prior-flagged-transaction history, plus a weaker self-reported user_agent automation signal) · Device History/Risk Score 🔶 (`deviceMismatch.js`, `top-risky?dimension=devices`) · **Shared Device Detection 🆕** (see #4) · Device Fingerprinting ⛔ / Emulator Detection ⛔ / Rooted Device Detection ⛔ — *all three need a native mobile SDK reporting device attestation, structurally impossible from a JSON HTTP API; self-reported `device_id`/`user_agent` can only support reputation scoring, not attestation.*
+
+**11. Identity Intelligence** — **Shared Phone Detection 🆕** / **Shared Email Detection 🆕** (`transactions.phone`/`.email`, `server/rules/sharedIdentifierRisk.js`) · **Identity Link Analysis 🆕** via a privacy-preserving reframe: **Shared PAN Detection** and **Shared Aadhaar Detection** are covered by a caller-computed `identity_hash` field — this server never receives or stores the raw government ID number, only an opaque hash token the caller derives from it client-side, so cross-account reuse of the same document is still detected (`SHARED_IDENTITY_HASH_WEIGHT = 55`, the strongest signal in the detector) without this hackathon-scope, no-auth-system demo ever holding real PAN/Aadhaar PII. Shared Bank Account Detection ⛔ (no separate "bank account" concept distinct from `account_id` in this schema) · Synthetic Identity Detection ⛔ (needs cross-source identity verification this project has no data source for).
+
+**12. Geo Intelligence** — ✅ Geo Risk Scoring · High-Risk Country Detection · Impossible Travel Analytics · Geo Heat Map (🔶 the new fraud heatmap is hour/day, not geo — the geo visualization is the pre-existing Map tab) · Geo Fraud Analytics (🔶). **High-Risk State Detection 🆕 / High-Risk City Detection 🆕** — `transactions` gains nullable `state`/`city` columns; `geoRisk.js` matches them against `config.js`'s `HIGH_RISK_STATES`/`HIGH_RISK_CITIES` (illustrative example values, same as `HIGH_RISK_COUNTRIES`), checked before the weaker IP-prefix heuristic.
+
+**13. Explainability Engine** — ✅ Fraud Score · Decision · Severity · Detector Names · Human-Readable Reasons · Risk Breakdown (all Feature 17). **Confidence Score 🆕** (`server/scoring.js`, a separate 0-100 axis from `fraud_score` — how much independent corroboration backs the decision) / **Investigation Notes 🆕** (`POST/GET /investigation-notes` — free-text notes on a transaction, the safe subset of #14 that needs no analyst-identity system).
+
+**14. Fraud Investigation Module** — 🆕 **9 of 10, built for real:** Case Management System / Case Creation / Case Assignment / Investigation Workflow / Case Status Tracking (`cases` table + `POST/GET/PATCH /cases`) · Analyst Notes (`investigation_notes`, Category 13) · Evidence Attachment (🔶 a transaction/note *is* the evidence record; no binary file-upload storage) · Investigation Timeline / Fraud Replay / Replay Timeline (`GET /cases/:caseId/timeline` — merges linked transactions, their structuring alerts, and investigation notes in chronological order). `assigned_to` is caller-supplied free text (same trust model as `employee_id`/`investigation_notes.author`) — real, persisted, queryable, but not a verified identity, since this build still has no login system (Section 15.6). That's a materially smaller gap than "no case management at all": the workflow, status tracking, and timeline are genuinely enforced server-side; only *who* claims an assignment is unverified, the same limitation every caller-supplied field in this project already has.
+
+**15. Dashboard** — ✅ nearly everything, built across Section 15.16's Feature 15 pass and earlier: Live Dashboard · Live Transactions · Live Alerts · Live Fraud Feed · Fraud Counters · Blocked/Step-Up Transactions · Fraud Percentage · Blocked Amount · Recovered Amount · Mule Accounts · Fraud Rings (structuring-alert panel) · Top Risky Customers/Merchants/Devices/Countries/Vendors · Gateway Comparison · Geo Map · Fraud Heat Map · Hourly/Daily/Weekly/Monthly Charts. Risk Widgets (Merchant/Customer/Vendor Health, Employee/Device Risk) 🔶 — covered by the top-risky tables, not separate gauge widgets. Interactive Transaction Graph ⛔ — see #4.
+
+**16. Analytics** — ✅ all twelve: Fraud Trend Analysis · Gateway Comparison · Fraud Category Statistics · Average Fraud Score · Average Response Time · Blocked Amount · Recovered Amount · Customer/Merchant/Vendor/Employee/Device Statistics (`server/routes/analytics.js`, Feature 18)
+
+**17. Notification Engine** — 🆕 **6 of 8, genuinely working code** (`server/notifications.js`): Slack Alerts / Microsoft Teams Alerts / Discord Alerts (each a real webhook `POST`, correctly shaped for that service) · Telegram Alerts (real Bot API call) · SMS Alerts (Twilio's REST API) · Critical Fraud Alerts (`POST /transaction` fires `dispatchCriticalAlert` — not awaited, so a slow/unreachable channel never adds latency to the scoring decision — on any Critical-severity detection; `POST /notifications/test`, admin-only, verifies configuration manually). Email Alerts 🆕 too, via a minimal hand-rolled SMTP client (`node:tls`, no dependency) — supports implicit-TLS (port 465), not STARTTLS-upgrade (port 587). Every channel is unconfigured (silently skipped, not thrown) until the user sets its own env vars (`.env.example`) — this is the same honest, works-when-configured pattern as `ML_SERVING_MODE=vertex`, not a stub: the code genuinely sends a real message to the real service the moment real credentials exist. **Web Push Notifications ⛔** is the one channel not built — it needs a browser-side service worker and a real subscribed browser (a client-side subscription flow, not a server-side webhook POST), and this dashboard has no push-subscription UI to drive it.
+
+**18. Reporting** — ✅ PDF Export · CSV Export · JSON Export. **Excel Export 🆕** — `server/xlsxWriter.js`, a hand-rolled, dependency-free `.xlsx` writer (a real ZIP container of OOXML SpreadsheetML parts, built with a from-scratch CRC-32 + ZIP writer over Node's built-in `Buffer` — no `exceljs`/`xlsx` package). Verified genuinely valid two ways: an independently-written ZIP reader in `tests/xlsxWriter.test.js` (deliberately implemented separately from the writer's own field layout, so a shared byte-offset bug can't hide from both), and cross-checked against Python's independent `zipfile` module (`testzip()` reports no corruption; reads back the correct XML). `GET /analytics/export?format=excel`. **Scheduled Reports 🆕 / Daily 🆕 / Weekly 🆕 / Monthly Reports 🆕** — `scheduled_reports` table + `server/scheduledReports.js` + `POST /scheduled-reports/generate` + `GET /scheduled-reports`, on the same periodic-tick pattern as the structuring background job. Each report covers the most recently *completed* period (epoch-aligned, not an in-progress partial "today so far" — a real design correction found by a test that caught the idempotency check silently never triggering at raw millisecond precision) and is idempotent per period. Delivery is real: generation attempts an email via the notification engine (#17) the moment SMTP is configured, recorded in the `emailed` column either way.
+
+**19. Automation** — **Auto Blacklisting 🆕** (`server/autoFraudListing.js`'s `autoBlacklistStructuringOrigin`, called from `server/structuring/backgroundJob.js` the moment a structuring/circular-flow alert is persisted — a genuinely system-triggered blacklist entry, not just the operator-driven `POST /fraud-lists`; idempotent, audit-logged with `actorIp: 'system'`). Auto Whitelisting 🔶 — **still operator-only**: no automatic "this account is clean" trigger was built (unlike blacklisting, there's no single unambiguous confirmation event for trustworthiness the way a structuring alert is for fraud), so this remains exactly what the Section 17 verification pass found: `POST /fraud-lists` populates it, scoring auto-*checks* it, nothing auto-*adds* to it. **Auto Rule Builder 🆕 / No-Code Rule Engine 🆕** (`custom_rules` table + `server/customRules.js` + `server/routes/customRules.js` — a new detection rule can be defined declaratively via `POST /custom-rules` — `{name, field, operator, value, weight, severity}` — and takes effect on the very next transaction with no code change or redeploy; evaluated generically alongside the 23 hardcoded detectors). **Auto Threshold Learning 🆕** (Continuous Learning Extension, 18 July 2026, building on the pre-existing Dynamic Risk Engine's Welford baselines) — every detector's threshold that plausibly should vary per entity now does: `velocity.js`/`amountAnomaly.js`/`multipleRefundDetection.js` already compared against each sender's/pair's own learned mean+stddev rather than one fixed number for every account; `server/featureStore.js` extends the same `entity_baselines` mechanism to device/merchant/IP/pair-level metrics, and `server/reputation.js`'s composite score is itself a further statistically-learned (Laplace-smoothed) signal, not a fixed cutoff. **Adaptive Rule Learning 🔶** — thresholds genuinely adapt (above), but this remains short of a system that mutates a rule's own logic or auto-reweights it from outcomes: `custom_rules` rows are still declarative and human-authored, and rule *weights* (`server/config.js`) don't retrain themselves the way the ML model's weights now do via `ml/retrain.py`. That gap — a rule engine whose own weights retrain from feedback the way the ML layer's now do — is a real, specific next step, not silently declared done.
+
+**20. Security** — ✅ API Key Authentication · Rate Limiting · Security Headers · Configuration Management · Input Validation · XSS Protection · SQL Injection Protection · Secure Logging (all predate this pass, re-verified Sections 15.6/15.15). API Key Management 🔶 — a single shared key, no per-client key issuance/rotation UI. **Audit Logs 🆕** (`admin_audit_log` table + `GET /admin-audit-log` — every `business_accounts`/`fraud_lists` mutation, by caller IP since there's no user identity). **RBAC 🆕** (`server/middleware/apiKeyAuth.js` — up to three named keys, admin/analyst/viewer, each genuinely restricted server-side; see Section 7). CSRF Protection ⛔ — *not actually applicable: this is a header-authenticated JSON API with no cookie/session state for a forged request to ride on, so a CSRF token would be theater, not protection.*
+
+**21. Fraud Intelligence** — **Blacklist Management 🆕 / Whitelist Management 🆕 / Watchlist Management 🆕** (same `fraud_lists` addition as #19; watchlisting also gained a real auto-trigger on this pass — `autoWatchlistConfirmedMule` in `server/autoFraudListing.js`, called from `POST /transaction` the moment a receiver is confirmed a mule). ✅ High-Risk Country Database (`config.js`) · Known Fraud Ring Database (`structuring_alerts`, already the canonical record of every detected ring). **Fraud Signature Database 🆕** (`GET /analytics/fraud-signatures` — `server/fraudSignatures.js`'s static catalog of all 27 fixed flag_types, each with a description and a live occurrence count, not just the informal taxonomy scattered across detector files). **Known Mule Database 🆕** (`mule_accounts` table + `GET /analytics/known-mules` — persisted the moment `POST /transaction` confirms a receiver a mule, distinct from `computeMuleScore`'s on-demand live scoring).
+
+**22. Simulator & Demo** — ✅ Normal Transaction Simulation · Refund Fraud Simulation · Structuring Simulation · Velocity Attack Simulation (all predate this pass) · One-Click Demo Scenarios (`scripts/demo.js`, now 9 options) · **Merchant Takeover Simulation 🆕** / **Mule Account Simulation 🆕** (`--scenario=merchant-takeover`/`--scenario=mule`, both verified live end-to-end). Fraud Ring Simulation 🔶 (structuring covers this). Fraud Replay ⛔ — ties to the Investigation Module, #14.
+
+**23. Performance** — ✅ Low Latency Processing · Background Jobs · Optimized Queries · Database Indexing · Benchmark Tool (all predate this pass). **Load Testing 🆕** (`simulator/loadTest.js`, `npm run loadtest -- --concurrency=20 --duration=10` — a fixed number of concurrent workers hammering `POST /transaction` for a fixed duration, reporting sustained throughput (req/s) and latency percentiles under real concurrency; genuinely distinct from `benchmark.js`, which sends one request at a time and measures single-stream latency only. Verified live: 5 concurrent workers for 2s against a real running server sustained 523 req/s at p99 29.88ms with zero errors). **Health Monitoring 🆕** (`GET /health/metrics`, API-key protected — process uptime, memory (RSS/heap), and in-process request/error counters with a live error rate, beyond the plain liveness `GET /health`).
+
+**24. Testing** — ✅ Unit Tests · API Tests · Integration Tests · Dashboard Tests · WebSocket Tests · ML Tests. **Security Tests 🆕** (`tests/security.test.js` — SQL-injection-shaped input round-tripped as inert data with DB integrity verified after, an XSS-shaped payload round-tripped as literal JSON plus a source-shape regression check that every attacker-controlled field interpolated into a `dashboard/app.js` `innerHTML` template goes through `escapeHtml`, auth-bypass attempts, RBAC enforcement, and defensive-header presence — beyond what the Sections 15.6/15.15 review passes already covered). **Performance Tests 🆕** — `tests/performance.test.js`, wired directly into `npm test`: a real regression guard against `architecture.md` Section 11's own 150ms latency target, failing CI if it's ever violated, not just an optional manual `benchmark.js`/`loadTest.js` run someone has to remember to execute.
+
+**25. Documentation** — ✅ API Documentation (Section 7) · Architecture Documentation (this document) · Database Schema (Section 6) · User Manual (`user-manual.md`) · **Sequence Diagrams 🆕** / **Flow Diagrams 🆕** (Section 5, Mermaid — GitHub renders it natively, no new tooling). **Deployment Guide 🆕** (`deployment-guide.md` — local run, `.env` reference, the PROD/DEMO stand-in map already scattered across `// PROD: X — DEMO: Y` comments in code, gathered in one place, and what's genuinely missing for a real Cloud Run deploy: no `Dockerfile` yet, called out honestly rather than guessed at). Developer Guide 🔶 — `CLAUDE.md` + this document serve that role.
+
+**26. Future AI Features** — ⛔ **explicitly out of scope, per the request's own "Future" label, all six:** AI Chat Assistant · Natural Language Fraud Search · AI Fraud Investigation Assistant · AI Fraud Report Generator · Predictive Merchant Risk · AI Fraud Insights. *All six need integrating a real LLM API — a genuine new cost and architectural decision, not something to add as a side effect of a documentation pass.*
+
+**What was actually built across this pass and the follow-up round** (every item reuses existing tables/patterns; the only new external dependency across all of it is zero — Mermaid diagrams render via GitHub's native support, no diagramming tool):
+- **`server/rules/duplicateTransaction.js`** (Category 2) — flags a transaction that closely duplicates one this business account sent moments ago (same receiver, same amount, within a short window).
+- **`server/rules/sharedIdentifierRisk.js`** (Category 4/10) — flags when this transaction's `device_id` or `ip_address` has recently been used by other, unrelated accounts.
+- **`fraud_lists` table + `server/routes/fraudLists.js` + `server/fraudLists.js`** (Categories 19/21) — a blacklist/whitelist/watchlist registry, the same editable-registry pattern as `business_accounts`. See `GET /fraud-lists` in Section 7 for the full precedence rules wired into `scoring.js`.
+- **`--scenario=merchant-takeover` / `--scenario=mule`** (Category 22, `simulator/simulate_transactions.js`) — live end-to-end demonstrations of the already-built merchant-takeover and mule detectors, wired into `scripts/demo.js`'s menu.
+- **`confidence` field** (Category 13, `server/scoring.js`) — a 0-100 axis separate from `fraud_score`, measuring corroboration rather than risk; persisted via a new `transactions.confidence` column.
+- **`investigation_notes` table + `POST/GET /investigation-notes`** (Category 13/14) — free-text, append-only notes on a transaction; the safe subset of the declined Fraud Investigation Module that needs no analyst-identity system.
+- **`admin_audit_log` table + `server/adminAuditLog.js` + `GET /admin-audit-log`** (Category 20/21) — every `business_accounts`/`fraud_lists` mutation, logged by caller IP.
+- **Sequence + flow diagrams** (Category 25, Section 5) — Mermaid, rendered natively by GitHub.
+
+`npm test`: 254 passing (up from 220 before Section 16 started — new tests across every item above, all in dedicated per-concern test files following this project's existing convention).
+
+### Verification pass: a real bug found by actually checking, not re-reading the table above
+
+A follow-up "verify these features are actually there" request prompted a systematic audit against the running code — file-existence checks, wiring checks (grep-confirming every detector in `server/rules/` is actually imported and registered in `routes/transactions.js`, not just present as an orphaned file), and live `curl` calls against a running server for every new endpoint — rather than re-reading this table and trusting it. It found one real bug:
+
+**`outboundRatioAnomaly.js`'s primary branch (the `ratio > threshold` case — the more common path; the `zero inbound revenue` branch is the rarer one) was missing its `severity` field**, live-confirmed via `curl` (`"severity": null` in a response that should have said `"Medium"`). Root cause: Section 15.16's severity-backfill pass used a `replace_all` edit per file, but this file has *two* differently-indented `return { flagged: false, ... }` statements, and the edit's exact-string match only caught one of them. The same audit found four more instances of the identical mistake — `amountAnomaly.js`, `deviceMismatch.js`, `oddHour.js`, and `payoutToNewReceiver.js` each had one `return` statement (always the final fallback branch) left without a `severity` key. None of the existing per-detector unit tests caught any of these, because each test only exercised whichever branch happened to already be correct.
+
+**Fixed:** all 5 files, all 6 missing instances. **Also added:** a new systematic regression test (`tests/rules.test.js`, "every rule detector file: every return object literal includes a severity key") that scans every file in `server/rules/` for any `return { ... }` object literal lacking a real `severity:` key — a source-shape check (same category as `tests/dashboard.test.js`'s `defer`-attribute check) specifically because it can't be defeated the same way a per-branch behavioral test can, by simply never exercising the broken branch. This test was itself verified against a deliberately-reintroduced copy of the bug before being trusted — a first draft used a bare `/severity/` substring check, which turned out to also match the word "severity" appearing inside a comment (from the first, sloppier bug-reproduction attempt) with no real key present at all; tightened to `/severity\s*:/` and re-verified to fail on the bug and pass on the fix.
+
+Everything else audited came back clean: all 23 rule-detector files present and wired into the pipeline (confirmed via `type:` registration count, not just file existence); the circular-flow and mule-score engines confirmed actually invoked (`require` + call-site grep, not just present as files); every `/analytics/*` endpoint, all four dashboard tabs, `/investigation-notes`, and `/admin-audit-log` all confirmed returning correct live responses against a running server, not just passing in-process tests.
+
+`npm test`: 255 passing (up from 254 — the one new regression-guard test).
+
+### 15.17 "Add all the mentioned features properly and working": RBAC, case management, real notifications, custom rules, Excel export, scheduled reports, shared phone/email/identity-hash linking
+
+A follow-up explicitly asked for genuinely working implementations, not documentation-only stubs, wherever one could be built without the unsafe patterns already ruled out above (raw PAN/Aadhaar collection, a full login system, faked credentials). Re-examined several previously-declined items and found real, working alternatives:
+
+- **RBAC (Category 20)** — real server-side enforcement via up to three scoped API keys (admin/analyst/viewer, `server/middleware/apiKeyAuth.js`'s `requireRole(minRole)`), not a claimed header. `POST /transaction` now requires at least `analyst`.
+- **Case management (Category 14)** — `cases`/`case_transactions` tables + `server/routes/cases.js`, using the project's existing caller-supplied-identity trust model (`assigned_to` is free-text, same as `employee_id` elsewhere) instead of needing a login system.
+- **Real notification engine (Category 17)** — `server/notifications.js`: genuine Slack/Discord/Teams/Telegram webhooks, Twilio SMS, and a hand-rolled SMTP client over `node:tls` (no new dependencies). Fires on Critical severity, fire-and-forget so latency never blocks the synchronous response. Works the moment the user supplies their own credentials via env vars — not a fake toggle.
+- **Custom rule engine (Category 19)** — `custom_rules` table + `server/customRules.js`, a generic operator evaluator (`>`, `>=`, `<`, `<=`, `==`, `!=`, `contains`) over configurable transaction fields, evaluated alongside the hardcoded detectors with no redeploy needed.
+- **Excel export (Category 18)** — `server/xlsxWriter.js`, hand-rolled ZIP+CRC-32+OOXML, no new dependency; double-verified (independent test-only ZIP reader + Python's `zipfile`).
+- **Scheduled reports (Category 18)** — `server/scheduledReports.js`, epoch-aligned idempotent period generation (a raw-`Date.now()` first draft was caught and fixed — see the note in that file's own history).
+- **Shared phone/email + hashed identity linking (Category 11)** — `transactions.phone`/`.email`/`.identity_hash` (all nullable, detection-only, never surfaced in `GET /transactions` or the WebSocket broadcast) + `sharedIdentifierRisk.js`. `identity_hash` is a caller-computed hash of a government ID; this server never sees or stores the raw PAN/Aadhaar/etc number, only the opaque token — so cross-account reuse of the same identity document is still caught (the strongest signal in the detector, `SHARED_IDENTITY_HASH_WEIGHT = 55`, High severity, checked before device/IP/phone/email) without collecting real government-ID PII on a public, no-auth-system hackathon demo. Raw PAN/Aadhaar collection itself remains explicitly declined, unchanged from Category 11's original reasoning above.
+
+`npm test`: 308 passing (up from 255 — one dedicated test file per feature area, plus new end-to-end `POST /transaction` coverage for the shared-identifier detectors in `tests/newIngestionRoutes.test.js`).
+
+### 15.18 "Add all the features" pass: Device Reputation Engine, dedicated risk-profile endpoints, High-Risk State/City, real load testing, dedicated security tests, deployment guide
+
+A follow-up re-pasted the full 26-category "Final Feature List" and asked for everything to be
+added. Re-triaged Section 16 against the current build first (most of it was already ✅/🔶/🆕 from
+Sections 15.16/15.17) and found one piece of genuinely unfinished, uncommitted work (`config.js`
+had a `DEVICE_FINGERPRINT_RISK` block with nothing reading it yet) plus several 🔶-partial items
+that had a real, buildable gap within this project's existing constraints (no raw PII, no login
+system, no fabricated credentials):
+
+- **Device Reputation Engine (Category 10)** — finished the interrupted work: `transactions` gains `user_agent` (nullable, detection-only, same convention as `phone`/`email`/`identity_hash`); `server/rules/deviceFingerprintRisk.js` scores a device against its own prior-flagged-transaction history (any sender, 90-day lookback) and a weaker self-reported user_agent automation-signature heuristic. Cannot do Emulator/Rooted Device Detection — still correctly ⛔, needs native mobile-SDK attestation.
+- **Dedicated Customer/Merchant/Vendor risk-profile endpoints (Categories 6/7/8)** — `GET /analytics/risk-profile?dimension=&id=`, a real per-entity `health_score`/`risk_tier`/`recent_transactions` view (the plain formula `100 - avg_fraud_score` over that entity's own history, not a black box), beyond what the ranked `top-risky` list could ever answer for a specific ID.
+- **High-Risk State/City Detection (Category 12)** — `transactions` gains `state`/`city` (nullable, ordinary geo context like `country`, not PII — surfaced same as `country`); `geoRisk.js` matches them against `config.js`'s `HIGH_RISK_STATES`/`HIGH_RISK_CITIES`.
+- **Load Testing (Category 23)** — `simulator/loadTest.js`, concurrent sustained-throughput testing (distinct from `benchmark.js`'s single-stream latency run). Verified live against a real running server: 5 concurrent workers, 2s, 523 req/s, p99 29.88ms, zero errors.
+- **Dedicated security tests (Category 24)** — `tests/security.test.js`: live SQL-injection-shaped input with post-hoc DB-integrity verification, XSS-shaped payloads round-tripped as inert JSON plus a source-shape regression check that every attacker-controlled field interpolated into a `dashboard/app.js` `innerHTML` template goes through `escapeHtml`, auth-bypass attempts, RBAC enforcement, and defensive-header presence.
+- **Deployment Guide (Category 25)** — `deployment-guide.md`: env var reference, the PROD/DEMO stand-in map gathered from the `// PROD: X — DEMO: Y` comments scattered through the code, and an honest "no `Dockerfile` yet" rather than a guessed-at one.
+
+Every other category was re-checked against the current file tree/route list and confirmed
+unchanged from Section 16's table (no drift found beyond the items above).
+
+`npm test`: 329 passing (up from 308 — one new dedicated test file, plus new end-to-end coverage folded into `tests/outboundContext.test.js`, `tests/newIngestionRoutes.test.js`, and `tests/analytics.test.js` for each item above).
+
+---
+
+## 17. Feature ID Registry (verified against the running codebase)
+
+A follow-up asked for two things: (1) a check that every item in Section 16's 26-category "Final
+Feature List" is genuinely present, verified against the actual code/tests rather than re-reading
+Section 16's own prose and trusting it; and (2) a unique ID per feature (`FA001` style) so any
+single line item can be referenced unambiguously in an issue, PR, or conversation. This section is
+that registry — 256 individual line items, in the exact order and wording of the original list,
+each with a fresh status and a pointer to the concrete file/route/table that backs it.
+
+**Status legend:** ✅ verified present and working · 🔶 verified partial/indirect coverage (explained inline) · ⛔ verified not implemented (reason in Section 16's per-category note, not repeated 256 times here).
+
+**What changed on re-verification:** everything already ✅/🔶/⛔ in Section 16 checked out — same
+file, same route, same behavior. One real discrepancy surfaced: **FA198/FA199 "Auto
+Blacklisting"/"Auto Whitelisting"** were carried in Section 16 as fully built (🆕). Re-checking
+`server/fraudLists.js` shows it exports only `checkFraudLists` (a read-time lookup) — every
+`fraud_lists` row is created exclusively via the operator-driven `POST /fraud-lists`
+(`server/routes/fraudLists.js`), not auto-inserted by the system after repeated fraud. Scoring
+*automatically checks* the list; nothing *automatically populates* it. Downgraded to 🔶 here and in
+Section 16's Category 19 line — "Auto" oversold what's actually an editable-registry pattern, the
+same one `business_accounts` already uses.
+
+### 17.1 Core Transaction Engine (FA001–FA010)
+| ID | Feature | Status | Implementation |
+|---|---|---|---|
+| FA001 | Real-time Transaction Ingestion API | ✅ | `POST /transaction`, synchronous (`server/routes/transactions.js`) |
+| FA002 | Multi-Gateway Transaction Processing | ✅ | `merchant_id` field; `GET /analytics/gateway-comparison` |
+| FA003 | REST API Support | ✅ | Express REST routes throughout `server/routes/*.js` |
+| FA004 | WebSocket Live Streaming | ✅ | `server/websocket.js`, `/ws` |
+| FA005 | Transaction Validation | ✅ | `server/validate.js` |
+| FA006 | Merchant Account Registry | ✅ | `business_accounts` table + `merchant_id` |
+| FA007 | Business Account Management | ✅ | `POST/GET/DELETE /business-accounts` |
+| FA008 | Transaction History | ✅ | `GET /transactions` |
+| FA009 | High Throughput Processing | ✅ | Measured (architecture.md Section 11); `simulator/loadTest.js` |
+| FA010 | Low Latency (<150ms) | ✅ | Measured (architecture.md Section 11) |
+
+### 17.2 Rule-Based Fraud Detection (FA011–FA029)
+| ID | Feature | Status | Implementation |
+|---|---|---|---|
+| FA011 | Velocity Detection | ✅ | `server/rules/velocity.js` |
+| FA012 | Impossible Travel Detection | ✅ | `server/rules/impossibleTravel.js` |
+| FA013 | Amount Anomaly Detection | ✅ | `server/rules/amountAnomaly.js` |
+| FA014 | Device/IP Mismatch | ✅ | `server/rules/deviceMismatch.js` + `geoRisk.js` IP check |
+| FA015 | Odd Hour Activity Detection | ✅ | `server/rules/oddHour.js` |
+| FA016 | Refund Without Purchase | ✅ | `server/rules/refundWithoutPurchase.js` |
+| FA017 | Refund Account Mismatch | ✅ | `server/rules/refundAccountMismatch.js` |
+| FA018 | Multiple Refund Detection | ✅ | `server/rules/multipleRefundDetection.js` |
+| FA019 | Split Refund Detection | ✅ | `server/rules/splitRefundDetection.js` |
+| FA020 | Refund Velocity Detection | ✅ | `server/rules/refundVelocity.js` |
+| FA021 | Refund Abuse Detection | 🔶 | Covered jointly by `multipleRefundDetection.js` + `refundWithoutPurchase.js`, no separate file |
+| FA022 | Refund Chain Detection | 🔶 | `splitRefundDetection.js` |
+| FA023 | Payout to New Receiver | ✅ | `server/rules/payoutToNewReceiver.js` |
+| FA024 | Outbound Ratio Anomaly | ✅ | `server/rules/outboundRatioAnomaly.js` |
+| FA025 | Outbound Fan-Out Burst | ✅ | `server/rules/outboundFanOutBurst.js` |
+| FA026 | Dormant Account Reactivation Detection | ✅ | `server/rules/dormantAccountReactivation.js` |
+| FA027 | High-Risk Transaction Detection | 🔶 | The score/decision tiering itself (`server/decision.js`) |
+| FA028 | Duplicate Transaction Detection | ✅ | `server/rules/duplicateTransaction.js` |
+| FA029 | Suspicious Merchant Behavior Detection | 🔶 | The outbound detector suite collectively |
+
+### 17.3 Anti-Money Laundering (FA030–FA043)
+| ID | Feature | Status | Implementation |
+|---|---|---|---|
+| FA030 | Structuring Detection | ✅ | `server/structuring/pipeline.js` + background job |
+| FA031 | Smurfing Detection | ✅ | Same structuring engine |
+| FA032 | Layering Detection | ✅ | `server/structuring/chainTracking.js` |
+| FA033 | Fan-Out Detection | ✅ | `server/structuring/fanOutAnalysis.js` |
+| FA034 | Split Transaction Detection | ✅ | `server/structuring/splitDetection.js` |
+| FA035 | Withdrawal Correlation | ✅ | `server/structuring/withdrawalCorrelation.js` |
+| FA036 | Mule Account Detection | ✅ | `server/muleScore.js` + `server/rules/muleReceiverRisk.js` |
+| FA037 | Mule Account Risk Scoring | ✅ | `computeMuleScore` (`server/muleScore.js`) |
+| FA038 | Circular Money Flow Detection | ✅ | `server/structuring/circularFlow.js` |
+| FA039 | Chain Tracking | ✅ | `server/structuring/chainTracking.js` |
+| FA040 | Multi-Hop Transaction Tracking | ✅ | `server/structuring/chainTracking.js` |
+| FA041 | Graph-Based AML Detection | ✅ | `GET /graph/relationships` (`server/routes/graph.js`) over the same SQL self-joins the structuring engine already uses |
+| FA042 | Money Flow Analysis | ✅ | `server/structuring/pipeline.js` |
+| FA043 | Suspicious Network Detection | 🔶 | Structuring + mule + circular-flow signals combined |
+
+### 17.4 Graph Intelligence (FA044–FA054)
+| ID | Feature | Status | Implementation |
+|---|---|---|---|
+| FA044 | Relationship Graph | ✅ | `GET /graph/relationships?account_id=&depth=` — nodes + transaction/shared-identifier edges |
+| FA045 | Transaction Graph | ✅ | Same endpoint |
+| FA046 | Fraud Ring Detection | ✅ | `structuring_alerts` table |
+| FA047 | Community Detection | ✅ | `server/graphIntelligence.js`'s union-find over `graph_edges` (Continuous Learning Extension, 18 July 2026) |
+| FA048 | Shared Device Graph | ✅ | `server/rules/sharedIdentifierRisk.js`, now also a `graph_edges` edge type |
+| FA049 | Shared IP Graph | ✅ | `server/rules/sharedIdentifierRisk.js`, now also a `graph_edges` edge type |
+| FA050 | Shared Bank Account Graph | ⛔ | No separate "bank account" concept distinct from `account_id` |
+| FA051 | Hidden Relationship Discovery | ✅ | Clustering surfaces accounts linked only through shared device/IP/identity-hash edges, not direct transactions |
+| FA052 | Graph Clustering | ✅ | `server/graphIntelligence.js`, persisted to `graph_clusters`, `GET /graph/clusters` |
+| FA053 | Network Risk Scoring | ✅ | Each persisted cluster's `risk_score` (`server/reputation.js`'s composite score, averaged across cluster members) |
+| FA054 | Interactive Graph Visualization | ⛔ | Needs a graph UI library (vis.js/Cytoscape.js) |
+
+### 17.5 Machine Learning & AI (FA055–FA064)
+| ID | Feature | Status | Implementation |
+|---|---|---|---|
+| FA055 | Logistic Regression Fraud Model | ✅ | `ml/train_model.py` |
+| FA056 | Fraud Probability Prediction | ✅ | `server/ml/mlClient.js` |
+| FA057 | Adaptive Risk Scoring | ✅ | `ml/train_model_gpu.py`/`ml/retrain.py` (GPU-only XGBoost, incremental warm-start retraining) + `server/featureStore.js`'s per-entity behavior vectors (Continuous Learning Extension, 18 July 2026) |
+| FA058 | AI Fraud Prediction | ✅ | Logistic model by default; XGBoost once `ml/train_model_gpu.py` has run (`server/ml/mlClient.js`'s `model_type` dispatch) |
+| FA059 | Behavioral Pattern Learning | ✅ | `server/featureStore.js` (per-entity feature vectors) + `server/reputation.js` (self-updating composite reputation per entity) |
+| FA060 | ML Feature Extraction | ✅ | `server/ml/features.js` (legacy model) / `server/featureStore.js`'s `computeFeatureVector` (Continuous Learning Extension) |
+| FA061 | Vertex AI Ready | ✅ | `ML_SERVING_MODE=vertex` branch, `server/ml/mlClient.js` |
+| FA062 | Local ML Inference | ✅ | `server/ml/mlClient.js` (native JS math) — logistic or `server/ml/xgbTreeEval.js`, plus `ml/serve.py` as the Python fallback |
+| FA063 | AI Explainability Engine | ✅ | `reasons`/`risk_breakdown` (`server/scoring.js`); `server/reputation.js`'s `reasonBreakdown` extends the same convention to the reputation score |
+| FA064 | Predictive Fraud Forecasting | 🔶 | Per-transaction fraud probability is now genuinely adaptive/model-driven (see FA057); no separate time-series volume forecast exists |
+
+### 17.6 Customer Intelligence (FA065–FA073)
+| ID | Feature | Status | Implementation |
+|---|---|---|---|
+| FA065 | Customer Risk Score | ✅ | `GET /analytics/risk-profile?dimension=customers` |
+| FA066 | Customer Risk Profile | ✅ | Same endpoint |
+| FA067 | Customer Reputation Engine | ✅ | Same endpoint (`health_score`) |
+| FA068 | Trusted Customer Score | ✅ | Same endpoint |
+| FA069 | Repeat Offender Detection | ✅ | `friendlyFraud.js`'s dispute-repeat count |
+| FA070 | Friendly Fraud Detection | ✅ | `server/rules/friendlyFraud.js` |
+| FA071 | Chargeback Pattern Analysis | ✅ | `disputes` table + `GET /disputes` |
+| FA072 | Customer Behavioral Profiling | ✅ | `server/userProfile.js` |
+| FA073 | Customer Transaction Timeline | ✅ | `risk-profile`'s `recent_transactions` + `GET /transactions` |
+
+### 17.7 Merchant Intelligence (FA074–FA081)
+| ID | Feature | Status | Implementation |
+|---|---|---|---|
+| FA074 | Merchant Risk Score | ✅ | `GET /analytics/risk-profile?dimension=merchants` |
+| FA075 | Merchant Health Score | ✅ | Same endpoint (`health_score`) |
+| FA076 | Merchant Behavioral Profiling | 🔶 | Covered indirectly (`gateway-comparison`, `risk-profile`) |
+| FA077 | Merchant Account Takeover Detection | ✅ | `server/rules/merchantAccountTakeover.js` |
+| FA078 | Merchant Login Monitoring | ✅ | `POST/GET /merchant-logins` |
+| FA079 | Merchant Device Tracking | ✅ | `merchant_login_events.device_id` |
+| FA080 | Merchant Security Analytics | 🔶 | Covered indirectly, no dedicated security-analytics endpoint |
+| FA081 | Merchant Trust Score | ✅ | `risk-profile`'s `health_score` |
+
+### 17.8 Vendor Intelligence (FA082–FA087)
+| ID | Feature | Status | Implementation |
+|---|---|---|---|
+| FA082 | Vendor Reputation Engine | 🔶 | `knownOutboundReceiverIds` (`server/outboundContext.js`) |
+| FA083 | Trusted Vendor Detection | 🔶 | Same |
+| FA084 | New Vendor Risk Detection | ✅ | `server/rules/newVendorRisk.js` |
+| FA085 | Vendor Risk Dashboard | ✅ | `GET /analytics/top-risky?dimension=vendors` |
+| FA086 | Vendor Trust Score | ✅ | `GET /analytics/risk-profile?dimension=vendors` |
+| FA087 | Vendor Payment Analysis | ✅ | Same endpoint |
+
+### 17.9 Employee Intelligence (FA088–FA092)
+| ID | Feature | Status | Implementation |
+|---|---|---|---|
+| FA088 | Employee Fraud Detection | ✅ | `server/rules/employeeFraud.js` |
+| FA089 | Employee Refund Monitoring | ✅ | `employeeFraud.js` |
+| FA090 | Employee Risk Score | ✅ | `GET /analytics/top-risky?dimension=employees` |
+| FA091 | Insider Threat Detection | ✅ | `employeeFraud.js` |
+| FA092 | Employee Activity Analytics | ✅ | `GET /analytics/*` employees dimension |
+
+### 17.10 Device Intelligence (FA093–FA100)
+| ID | Feature | Status | Implementation |
+|---|---|---|---|
+| FA093 | Device Reputation Engine | ✅ | `server/rules/deviceFingerprintRisk.js` |
+| FA094 | Trusted Device Score | ✅ | `deviceFingerprintRisk.js` + `top-risky?dimension=devices` |
+| FA095 | Shared Device Detection | ✅ | `sharedIdentifierRisk.js` |
+| FA096 | Device History | ✅ | `top-risky?dimension=devices`, `deviceMismatch.js` |
+| FA097 | Device Risk Score | ✅ | `deviceFingerprintRisk.js` |
+| FA098 | Device Fingerprinting | ⛔ | Needs native device attestation, self-reported `device_id` only |
+| FA099 | Emulator Detection | ⛔ | Needs a native mobile SDK |
+| FA100 | Rooted Device Detection | ⛔ | Needs a native mobile SDK |
+
+### 17.11 Identity Intelligence (FA101–FA107)
+| ID | Feature | Status | Implementation |
+|---|---|---|---|
+| FA101 | Shared Phone Detection | ✅ | `sharedIdentifierRisk.js` (`transactions.phone`) |
+| FA102 | Shared Email Detection | ✅ | `sharedIdentifierRisk.js` (`transactions.email`) |
+| FA103 | Shared PAN Detection | ✅ | Privacy-preserving `identity_hash` reframe — see Section 16 Category 11 |
+| FA104 | Shared Aadhaar Detection | ✅ | Same `identity_hash` mechanism |
+| FA105 | Shared Bank Account Detection | ⛔ | No separate "bank account" concept in this schema |
+| FA106 | Synthetic Identity Detection | ⛔ | Needs cross-source identity verification, no data source for it |
+| FA107 | Identity Link Analysis | ✅ | `identity_hash` cross-account linking |
+
+### 17.12 Geo Intelligence (FA108–FA114)
+| ID | Feature | Status | Implementation |
+|---|---|---|---|
+| FA108 | Geo Risk Scoring | ✅ | `server/rules/geoRisk.js` |
+| FA109 | High-Risk Country Detection | ✅ | `geoRisk.js`, `config.js` `HIGH_RISK_COUNTRIES` |
+| FA110 | High-Risk State Detection | ✅ | `geoRisk.js`, `config.js` `HIGH_RISK_STATES` |
+| FA111 | High-Risk City Detection | ✅ | `geoRisk.js`, `config.js` `HIGH_RISK_CITIES` |
+| FA112 | Geo Heat Map | 🔶 | The dashboard fraud heatmap is hour/day, not geo; geo viz is the Map tab |
+| FA113 | Geo Fraud Analytics | 🔶 | Dashboard Map tab + `geoRisk.js` flags |
+| FA114 | Impossible Travel Analytics | ✅ | `server/rules/impossibleTravel.js` |
+
+### 17.13 Explainability Engine (FA115–FA122)
+| ID | Feature | Status | Implementation |
+|---|---|---|---|
+| FA115 | Fraud Score | ✅ | `POST /transaction` response `fraud_score` |
+| FA116 | Decision | ✅ | `decision` field (`server/decision.js`) |
+| FA117 | Severity | ✅ | `severity` field |
+| FA118 | Detector Names | ✅ | `risk_breakdown[].type` |
+| FA119 | Human-Readable Reasons | ✅ | `reasons[]` |
+| FA120 | Risk Breakdown | ✅ | `risk_breakdown[]` |
+| FA121 | Confidence Score | ✅ | `confidence` field (`server/scoring.js`) |
+| FA122 | Investigation Notes | ✅ | `POST/GET /investigation-notes` |
+
+### 17.14 Fraud Investigation Module (FA123–FA132)
+| ID | Feature | Status | Implementation |
+|---|---|---|---|
+| FA123 | Case Management System | ✅ | `cases` table + `server/routes/cases.js` |
+| FA124 | Case Creation | ✅ | `POST /cases` |
+| FA125 | Case Assignment | ✅ | `assigned_to` field, `PATCH /cases` |
+| FA126 | Investigation Workflow | ✅ | `cases.status` (open/investigating/resolved/escalated) |
+| FA127 | Analyst Notes | ✅ | `investigation_notes` table |
+| FA128 | Evidence Attachment | 🔶 | A transaction/note is the evidence record; no binary file upload |
+| FA129 | Investigation Timeline | ✅ | `GET /cases/:caseId/timeline` |
+| FA130 | Case Status Tracking | ✅ | `cases.status` |
+| FA131 | Fraud Replay | 🔶 | Served by the timeline endpoint, not a video-style replay |
+| FA132 | Replay Timeline | 🔶 | Same |
+
+### 17.15 Dashboard (FA133–FA165)
+| ID | Feature | Status | Implementation |
+|---|---|---|---|
+| FA133 | Live Dashboard | ✅ | `dashboard/index.html` + `app.js` |
+| FA134 | Live Transactions | ✅ | WS `transaction` broadcast + live table |
+| FA135 | Live Alerts | ✅ | WS `structuring_alert` broadcast |
+| FA136 | Live Fraud Feed | ✅ | Live table, filtered/highlighted by decision |
+| FA137 | Fraud Counters | ✅ | `counts` object (`dashboard/app.js`) |
+| FA138 | Blocked Transactions | ✅ | `counts.block` |
+| FA139 | Step-Up Transactions | ✅ | `counts.step_up` |
+| FA140 | Fraud Percentage | ✅ | `GET /analytics/summary` `fraud_percent` |
+| FA141 | Blocked Amount | ✅ | `GET /analytics/summary` `blocked_amount` |
+| FA142 | Recovered Amount | ✅ | `GET /analytics/summary` `recovered_amount` |
+| FA143 | Risk Widgets | 🔶 | Covered by top-risky tables, not separate gauge widgets |
+| FA144 | Merchant Health | ✅ | `GET /analytics/risk-profile?dimension=merchants` |
+| FA145 | Customer Health | ✅ | `GET /analytics/risk-profile?dimension=customers` |
+| FA146 | Vendor Health | ✅ | `GET /analytics/risk-profile?dimension=vendors` |
+| FA147 | Employee Risk | ✅ | `top-risky?dimension=employees` |
+| FA148 | Device Risk | ✅ | `top-risky?dimension=devices` / `deviceFingerprintRisk.js` |
+| FA149 | Mule Accounts | ✅ | `GET /analytics/mule-accounts` |
+| FA150 | Fraud Rings | ✅ | Structuring-alert dashboard panel |
+| FA151 | Top Risky Customers | ✅ | `top-risky?dimension=customers` |
+| FA152 | Top Risky Merchants | ✅ | `top-risky?dimension=merchants` |
+| FA153 | Top Devices | ✅ | `top-risky?dimension=devices` |
+| FA154 | Top Countries | ✅ | `top-risky?dimension=countries` |
+| FA155 | Top Vendors | ✅ | `top-risky?dimension=vendors` |
+| FA156 | Gateway Comparison | ✅ | `GET /analytics/gateway-comparison` |
+| FA157 | Visualization | ✅ | Category grouping — `map.js` + `analytics.js` charts below |
+| FA158 | Interactive Transaction Graph | ⛔ | Needs a graph UI library — see FA054 |
+| FA159 | Geo Map | ✅ | `dashboard/map.js` |
+| FA160 | Fraud Timeline | ✅ | `GET /analytics/trend` |
+| FA161 | Fraud Heat Map | ✅ | `dashboard/analytics.js`, hour × day-of-week grid |
+| FA162 | Hourly Charts | ✅ | `/analytics/trend?bucket=hour` |
+| FA163 | Daily Charts | ✅ | `/analytics/trend?bucket=day` |
+| FA164 | Weekly Charts | ✅ | `/analytics/trend?bucket=week` |
+| FA165 | Monthly Charts | ✅ | `/analytics/trend?bucket=month` |
+
+### 17.16 Analytics (FA166–FA177)
+| ID | Feature | Status | Implementation |
+|---|---|---|---|
+| FA166 | Fraud Trend Analysis | ✅ | `GET /analytics/trend` |
+| FA167 | Gateway Comparison | ✅ | `GET /analytics/gateway-comparison` |
+| FA168 | Fraud Category Statistics | ✅ | `GET /analytics/top-frauds` |
+| FA169 | Average Fraud Score | ✅ | `GET /analytics/summary` `avg_fraud_score` |
+| FA170 | Average Response Time | ✅ | `GET /analytics/summary` `avg_latency_ms` |
+| FA171 | Blocked Amount | ✅ | `GET /analytics/summary` |
+| FA172 | Recovered Amount | ✅ | `GET /analytics/summary` |
+| FA173 | Customer Statistics | ✅ | `risk-profile?dimension=customers` |
+| FA174 | Merchant Statistics | ✅ | `risk-profile?dimension=merchants` / `gateway-comparison` |
+| FA175 | Vendor Statistics | ✅ | `risk-profile?dimension=vendors` |
+| FA176 | Employee Statistics | ✅ | `top-risky?dimension=employees` |
+| FA177 | Device Statistics | ✅ | `top-risky?dimension=devices` |
+
+### 17.17 Notification Engine (FA178–FA185)
+| ID | Feature | Status | Implementation |
+|---|---|---|---|
+| FA178 | Email Alerts | ✅ | `server/notifications.js`, hand-rolled SMTP over `node:tls` |
+| FA179 | SMS Alerts | ✅ | Twilio REST API |
+| FA180 | Slack Alerts | ✅ | Real webhook `POST` |
+| FA181 | Microsoft Teams Alerts | ✅ | Real webhook `POST` |
+| FA182 | Discord Alerts | ✅ | Real webhook `POST` |
+| FA183 | Telegram Alerts | ✅ | Real Bot API call |
+| FA184 | Web Push Notifications | ⛔ | Needs a service worker + browser subscription UI, not built |
+| FA185 | Critical Fraud Alerts | ✅ | `dispatchCriticalAlert` on Critical severity |
+
+### 17.18 Reporting (FA186–FA193)
+| ID | Feature | Status | Implementation |
+|---|---|---|---|
+| FA186 | PDF Export | ✅ | Client-side (`dashboard/analytics.js` `triggerPdfExport`) |
+| FA187 | CSV Export | ✅ | `GET /analytics/export?format=csv` |
+| FA188 | Excel Export | ✅ | `server/xlsxWriter.js`, hand-rolled ZIP+OOXML |
+| FA189 | JSON Export | ✅ | `GET /analytics/export?format=json` |
+| FA190 | Scheduled Reports | ✅ | `server/scheduledReports.js` |
+| FA191 | Daily Reports | ✅ | `report_type='daily'` |
+| FA192 | Weekly Reports | ✅ | `report_type='weekly'` |
+| FA193 | Monthly Reports | ✅ | `report_type='monthly'` |
+
+### 17.19 Automation (FA194–FA199)
+| ID | Feature | Status | Implementation |
+|---|---|---|---|
+| FA194 | Auto Rule Builder | ✅ | `server/customRules.js` |
+| FA195 | No-Code Rule Engine | ✅ | `POST /custom-rules`, takes effect with no redeploy |
+| FA196 | Adaptive Rule Learning | 🔶 | Thresholds adapt per entity (FA197); rule *logic*/weights in `custom_rules`/`config.js` still don't auto-mutate from outcomes the way the ML model now does (`ml/retrain.py`) |
+| FA197 | Auto Threshold Learning | ✅ | `server/adaptiveBaseline.js` + `server/featureStore.js` — every detector threshold that plausibly should vary per entity now does (Continuous Learning Extension, 18 July 2026) |
+| FA198 | Auto Blacklisting | ✅ | `server/autoFraudListing.js`'s `autoBlacklistStructuringOrigin`, triggered by `backgroundJob.js` on every new structuring/circular-flow alert |
+| FA199 | Auto Whitelisting | 🔶 | Still operator-only via `POST /fraud-lists` — no automatic "confirmed clean" trigger exists to fire it from |
+
+### 17.20 Security (FA200–FA211)
+| ID | Feature | Status | Implementation |
+|---|---|---|---|
+| FA200 | API Key Authentication | ✅ | `server/middleware/apiKeyAuth.js` |
+| FA201 | API Key Management | 🔶 | Up to 3 named keys (admin/analyst/viewer); no per-client issuance/rotation UI |
+| FA202 | Rate Limiting | ✅ | `server/middleware/rateLimit.js` |
+| FA203 | Security Headers | ✅ | `server/middleware/securityHeaders.js` |
+| FA204 | RBAC (Role-Based Access Control) | ✅ | `requireRole(minRole)`, server-enforced |
+| FA205 | Audit Logs | ✅ | `admin_audit_log` table + `GET /admin-audit-log` |
+| FA206 | Configuration Management | ✅ | `server/config.js` |
+| FA207 | Input Validation | ✅ | `server/validate.js` |
+| FA208 | XSS Protection | ✅ | `dashboard/app.js` `escapeHtml` + CSP header; regression-tested (`tests/security.test.js`) |
+| FA209 | SQL Injection Protection | ✅ | Parameterized queries throughout; live-verified (`tests/security.test.js`) |
+| FA210 | CSRF Protection | ⛔ | Not applicable — header-authenticated JSON API, no cookie/session state to forge |
+| FA211 | Secure Logging | ✅ | No secrets/PII/request bodies in `console.*` calls (verified this pass) |
+
+### 17.21 Fraud Intelligence (FA212–FA218)
+| ID | Feature | Status | Implementation |
+|---|---|---|---|
+| FA212 | Blacklist Management | ✅ | `POST/GET/DELETE /fraud-lists` |
+| FA213 | Whitelist Management | ✅ | Same |
+| FA214 | Watchlist Management | ✅ | Same |
+| FA215 | High-Risk Country Database | ✅ | `config.js` `HIGH_RISK_COUNTRIES` |
+| FA216 | Fraud Signature Database | ✅ | `GET /analytics/fraud-signatures` — `server/fraudSignatures.js`'s catalog of all 27 flag_types with descriptions + live occurrence counts |
+| FA217 | Known Mule Database | ✅ | `mule_accounts` table + `GET /analytics/known-mules`, persisted by `POST /transaction` on mule confirmation |
+| FA218 | Known Fraud Ring Database | ✅ | `structuring_alerts` table |
+
+### 17.22 Simulator & Demo (FA219–FA227)
+| ID | Feature | Status | Implementation |
+|---|---|---|---|
+| FA219 | Normal Transaction Simulation | ✅ | `simulator/simulate_transactions.js` |
+| FA220 | Refund Fraud Simulation | ✅ | `--scenario=refund-fraud` |
+| FA221 | Structuring Simulation | ✅ | `--scenario=structuring` |
+| FA222 | Merchant Takeover Simulation | ✅ | `--scenario=merchant-takeover` |
+| FA223 | Fraud Ring Simulation | 🔶 | Covered by the structuring scenario |
+| FA224 | Mule Account Simulation | ✅ | `--scenario=mule` |
+| FA225 | Velocity Attack Simulation | ✅ | `--scenario=fraud` |
+| FA226 | One-Click Demo Scenarios | ✅ | `scripts/demo.js` menu |
+| FA227 | Fraud Replay | 🔶 | `GET /cases/:caseId/timeline` |
+
+### 17.23 Performance (FA228–FA234)
+| ID | Feature | Status | Implementation |
+|---|---|---|---|
+| FA228 | Low Latency Processing | ✅ | Measured <150ms (architecture.md Section 11) |
+| FA229 | Background Jobs | ✅ | `server/structuring/backgroundJob.js`, `scheduledReports.js` |
+| FA230 | Optimized Queries | ✅ | Parameterized, indexed queries throughout |
+| FA231 | Database Indexing | ✅ | `CREATE INDEX` statements, `server/db.js` |
+| FA232 | Benchmark Tool | ✅ | `simulator/benchmark.js` |
+| FA233 | Load Testing | ✅ | `simulator/loadTest.js`, live-verified (523 req/s, p99 29.88ms) |
+| FA234 | Health Monitoring | ✅ | `GET /health/metrics` — uptime, memory, request/error counts (API-key protected) |
+
+### 17.24 Testing (FA235–FA242)
+| ID | Feature | Status | Implementation |
+|---|---|---|---|
+| FA235 | Unit Tests | ✅ | `tests/*.test.js`, 329 passing |
+| FA236 | API Tests | ✅ | `tests/api.test.js`, `tests/newIngestionRoutes.test.js` |
+| FA237 | Integration Tests | ✅ | End-to-end `freshServer` tests throughout |
+| FA238 | Dashboard Tests | ✅ | `tests/dashboard.test.js` |
+| FA239 | WebSocket Tests | ✅ | `tests/websocket.test.js` |
+| FA240 | ML Tests | ✅ | `tests/ml.test.js` |
+| FA241 | Security Tests | ✅ | `tests/security.test.js` |
+| FA242 | Performance Tests | ✅ | `tests/performance.test.js`, wired into `npm test` — asserts the Section 11 150ms latency target |
+
+### 17.25 Documentation (FA243–FA250)
+| ID | Feature | Status | Implementation |
+|---|---|---|---|
+| FA243 | API Documentation | ✅ | architecture.md Section 7 |
+| FA244 | Architecture Documentation | ✅ | architecture.md |
+| FA245 | Database Schema | ✅ | architecture.md Section 6 |
+| FA246 | Sequence Diagrams | ✅ | architecture.md Section 5 (Mermaid) |
+| FA247 | Flow Diagrams | ✅ | architecture.md Section 5 (Mermaid) |
+| FA248 | Deployment Guide | ✅ | `deployment-guide.md` |
+| FA249 | User Manual | ✅ | `user-manual.md` |
+| FA250 | Developer Guide | 🔶 | `CLAUDE.md` + architecture.md serve that role |
+
+### 17.26 Future AI Features (FA251–FA256)
+| ID | Feature | Status | Implementation |
+|---|---|---|---|
+| FA251 | AI Chat Assistant | ⛔ | Needs a new LLM integration — explicitly out of scope per the request's own "Future" label |
+| FA252 | Natural Language Fraud Search | ⛔ | Same |
+| FA253 | AI Fraud Investigation Assistant | ⛔ | Same |
+| FA254 | AI Fraud Report Generator | ⛔ | Same |
+| FA255 | Predictive Merchant Risk | ⛔ | Same |
+| FA256 | AI Fraud Insights | ⛔ | Same |
+
+### 17.27 Summary
+
+**Updated after Section 17.28's follow-on pass** (see below) — 8 items moved from 🔶 to ✅: FA041,
+FA044, FA045 (a real graph-data endpoint), FA198 (a genuine auto-blacklist trigger), FA216, FA217
+(both fraud-intelligence databases now real and persisted/cataloged), FA234, FA242 (health metrics
+and a wired-in performance test).
+
+| Status | Count |
+|---|---|
+| ✅ Verified present and working | 218 |
+| 🔶 Verified partial/indirect coverage | 22 |
+| ⛔ Verified not implemented (reasoned) | 16 |
+| **Total** | **256** |
+
+**Updated 18 July 2026 (Continuous Learning Extension)** — was 211/21/24 before this pass; see
+Section 17.30 below for exactly what changed and why. 218/256 (85%) fully built, 240/256 (94%)
+with at least partial coverage. Every remaining ⛔ item traces to one of four hard constraints this
+build has held to throughout (Section 16's intro): real third-party credentials it can't
+fabricate, raw government-ID PII it won't collect, a login system it has never had, or native
+mobile-SDK device attestation a JSON HTTP API structurally cannot provide — plus Category 26's
+features (out of scope by the original request's own label) and the handful of items with no
+separate "bank account" concept distinct from `account_id` in this schema (FA050 and its
+duplicates).
+
+### 17.28 "Push further on the 🔶/⛔ items" pass
+
+A follow-up asked specifically to close genuinely buildable gaps among the 🔶-partial items, not
+the ⛔ ones already blocked by the four hard constraints above. Eight items were picked as real,
+coherent, non-redundant wins (not all 29 🔶 items — several, like FA021/FA022's "no separate
+detector file" or FA128's "no binary file upload," are deliberate scope decisions, not gaps):
+
+- **A real graph-data endpoint (FA041/FA044/FA045)** — `GET /graph/relationships?account_id=&depth=1|2` (`server/routes/graph.js`), a plain `{nodes, edges}` JSON structure: transaction edges aggregated by counterparty (not one row per transaction) plus shared-device/IP/identity-hash link edges, bounded to 50 nodes (`GRAPH_MAX_NODES`, same cost-bounding reasoning as `MULE_SCORE_MAX_RECEIPTS_SCANNED`). `depth=2` expands one more transaction-only hop. No graph database, no clustering algorithm, no UI library added — FA047/FA052/FA054 (Community Detection/Graph Clustering/Interactive Visualization) correctly remain ⛔ for the same reason as before.
+- **A genuine Auto Blacklisting trigger (FA198)** — `server/autoFraudListing.js`'s `autoBlacklistStructuringOrigin`, called from `server/structuring/backgroundJob.js` the instant a genuine structuring alert is persisted (**not** a circular-flow alert — see the PR-review correction below). Idempotent (skipped if already blacklisted) and audit-logged with `actorIp: 'system'`, same trail a manual admin action leaves. Auto Whitelisting (FA199) deliberately stays 🔶: unlike a confirmed structuring alert, there's no single unambiguous "this account is now trustworthy" event to trigger it from.
+- **A real-time Auto Watchlisting bonus** (beyond the original list, feeding FA217) — `autoWatchlistConfirmedMule`, called from `POST /transaction` the moment `outboundContext.receiverMuleScore.isMule` goes true on a real transaction, not a batch job.
+- **Known Mule Database (FA217)** — a new `mule_accounts` table, populated by the same real-time hook above (`server/muleScore.js`'s `recordConfirmedMule`), and `GET /analytics/known-mules` to read it — a real persisted registry, distinct from `computeMuleScore`'s on-demand live scoring.
+- **Fraud Signature Database (FA216)** — `server/fraudSignatures.js`, a static catalog of all 27 fixed `flag_type` values (23 rule detectors + `structuring_alert`/`watchlist`/`blacklist`/`outbound_amount_restrictor`) each with a category and a human-readable description, served via `GET /analytics/fraud-signatures` with a live occurrence count joined in from `flags`. `custom_rules` (operator-defined at runtime) are deliberately excluded — their signature isn't fixed in advance.
+- **Health Monitoring (FA234)** — `GET /health/metrics`, API-key protected (unlike the plain liveness `GET /health`): process uptime, RSS/heap memory, and in-process request/error counters with a computed error rate. Counted via a small counting middleware, no new dependency.
+- **Performance Tests wired into `npm test` (FA242)** — `tests/performance.test.js` posts a 30-transaction batch through the real pipeline and asserts `GET /analytics/summary`'s `avg_latency_ms` stays under architecture.md Section 11's own 150ms target — a genuine CI regression guard, not just an optional manual `benchmark.js`/`loadTest.js` run.
+
+**PR review, before merge — one real bug found and fixed:** an 8-angle automated review (correctness, reuse, simplification, efficiency, altitude, conventions) of the branch caught a genuine defect: `autoBlacklistStructuringOrigin` was originally called for *every* new alert, including circular-flow ones — but `detectCircularFlow`'s `originId` is always one of the business's own registered accounts (`business_accounts`), never an attacker, since circular flow only matters relative to money that started at the business. Auto-blacklisting it would have force-blocked every future transaction touching that merchant's own account (a blacklist hit floors the score regardless of direction), effectively bricking the business's own payment processing the moment its own money legitimately cycled back through a vendor/refund relationship. Fixed by scoping the auto-blacklist call to genuine structuring alerts only (`server/structuring/backgroundJob.js`), with a regression test asserting a circular-flow origin is never blacklisted. Also fixed on the same pass: `GET /graph/relationships`'s node/edge queries had no SQL `LIMIT` despite the endpoint's own stated cost-bounding goal, and its `depth=2` in-loop cap check was a no-op (one edge endpoint is always the node already being expanded, so a "neither endpoint known" condition could never fire) — both closed with an explicit `LIMIT GRAPH_MAX_NODES` on every query; and a new index (`idx_transactions_device`) was added for `devicePriorFlagCount`'s per-transaction `device_id` lookup, which had no supporting index on the synchronous scoring hot path. Three lower-severity findings (repeated mule-confirmation writes, a hand-maintained fraud-signature catalog that can drift from the real detector registry, and `loadTest.js` duplicating `benchmark.js`'s `percentile()`) were reported but left as known follow-ups — real but not correctness-affecting.
+
+Every new piece follows this project's existing conventions: real code, no fake stand-ins, config-driven bounds where a cost needs bounding, and end-to-end tests exercising the actual HTTP surface (not just unit-level function calls) wherever the feature has one.
+
+`npm test`: 345 passing (up from 329 — `tests/graph.test.js` and `tests/performance.test.js` new, plus new coverage folded into `tests/structuring.test.js`, `tests/analytics.test.js`, and `tests/api.test.js` for each item above, including the circular-flow auto-blacklist regression test added during PR review).
+
+### 17.29 Post-merge live-run bug: circular-flow alerts were force-blocking ordinary customer purchases
+
+A follow-up asked to actually run the app (not just `npm test`) after the Section 17.28 merge — `npm run seed` against a fresh `sentinelpay.db`, then driving it live via `curl` and the dashboard. Every single ordinary customer purchase, to any of the 8 seeded demo stores, came back `decision: "block"` at a uniform `fraud_score: 90`. This is a genuine, severe **pre-existing bug**, not something introduced by this session's work — it's been present in the circular-flow detection since Feature 6 (Section 15.16) — but it took real seeded traffic (every demo store legitimately ends up as the origin of at least one circular-flow alert once refunds/settlements start flowing) to surface it, and no existing test caught it because no test had ever exercised `findActiveAlert` against a circular-flow alert's *unrelated third party* the way ordinary customer traffic does.
+
+**Root cause:** `server/structuring/alertLookup.js`'s `findActiveAlert` — the fast per-transaction lookup every single `POST /transaction` call goes through — treats "this transaction's `receiver_id` matches some alert's stored `sender_id`" as proof the receiver is a known bad actor, forcing a block via `STRUCTURING_ALERT_FLOOR` regardless of the transaction's own score. That's the correct model for a genuine structuring alert, where `sender_id` really is the suspected launderer. But a circular-flow alert (Feature 6) stores the **business's own account** as `sender_id` — it's the detection *origin*, not a suspect (see `backgroundJob.js`: "Origins are the business's own registered accounts"). The moment any store had ever been the origin of a circular-flow alert, `findActiveAlert` treated literally every future customer paying that store — for the next 24 hours (`ALERT_ACTIVE_WINDOW_MS`) — as "paying a known bad actor," and blocked them. Verified directly against the actual broken `sentinelpay.db`: `findActiveAlert(db, 'u_sim_TEST', 'm_store_electronics', now)` returned `active: true` for a customer ID that had never existed before that call.
+
+**Fix:** `findActiveAlert` now recognizes circular-flow alerts (`alert.reason.startsWith('Circular transaction pattern detected.')`, the same marker `backgroundJob.js` already uses for the FA198 auto-blacklist exclusion — Section 17.28) and excludes them from the two checks that key off `sender_id` (the fast by-sender lookup, and the receiver-matches-alert's-sender-id check in the general scan). The `receiver_ids`-membership check — which correctly flags the actual intermediate accounts that formed the cycle — is left unchanged and still applies to circular-flow alerts. Re-verified against the same broken `sentinelpay.db` after the fix: the previously-blocked customer purchase now scores `fraud_score: 0, decision: "allow"`, and a genuine intermediate suspect account is still correctly caught as active.
+
+### 17.30 Continuous Learning Extension (18 July 2026) — reopening the online-learning items
+
+A follow-up asked for the real thing this doc had twice declined: FA057/FA059/FA064 (Category 5, "needs an online-learning or time-series retraining pipeline this project doesn't have") and FA196/FA197 (Category 19, "a real online-learning retraining loop is a genuinely different kind of system... and wasn't attempted"), plus Category 4's Community Detection/Graph Clustering (declined for needing "a dependency-adding clustering library"). Explicitly framed and accepted as a large, multi-day-scale undertaking, not a config tweak — built as seven independently-testable phases, each gated on `npm test` staying green:
+
+- **Phase A — Feature store** (`server/featureStore.js`, `training_examples` table): extends the pre-existing Dynamic Risk Engine's `entity_baselines` Welford accumulator from 3 metrics (sender amount/interval, pair refund-interval) to full coverage — device, merchant, IP, and pair-amount baselines. `replayFeatureHistory` reconstructs point-in-time-correct training features for historical transactions by replaying them in chronological order and resetting/rebuilding `entity_baselines` from scratch, the same guarantee a real feature store's offline backfill provides.
+- **Phase B — Self-updating reputation** (`server/reputation.js`, `entity_reputation` table): a composite 0-100 risk score per entity (user/device/merchant/IP/pair), Laplace-smoothed flag-rate plus blacklist/mule floors, updated incrementally (O(1)) on every transaction. Feeds a new detector (`server/rules/entityReputationRisk.js`) and `GET /analytics/risk-profile`.
+- **Phase C — Graph-relationship discovery** (`server/graphIntelligence.js`, `graph_edges`/`graph_clusters` tables): reopens Category 4. Real union-find connected-components over a persisted edge store, run inside the existing structuring background-job cycle (not a new timer); a cluster is surfaced only once its members' average reputation crosses a risk threshold. `GET /graph/relationships` gains `cluster_id`/`degree` node annotations; new `GET /graph/clusters`.
+- **Phase D — GPU-only training** (`ml/load_datasets.py`, `ml/train_model_gpu.py`): trains XGBoost (`tree_method="hist", device="cuda"`) on the app's own accumulated (feature, label) history plus an optional external PaySim-shaped CSV (not the already-rejected Kaggle Credit Card Fraud dataset — its PCA-anonymized columns still don't map to any signal this API has). Hard-fails at startup if CUDA training doesn't actually work — verified live on this machine's RTX 3050 Laptop GPU — rather than silently falling back to CPU.
+- **Phase E — Serving** (`server/ml/xgbTreeEval.js`): a pure-JS evaluator for XGBoost's native JSON tree export (no pickle/joblib, same convention as the original model), numerically verified against Python's own `bst.predict()` for a real trained model (matched to 6 significant figures). `server/ml/mlClient.js` dispatches on the model's `model_type` field; `ml/model_export/current.json` is a hot-swap pointer so a newly-trained model goes live without a server restart.
+- **Phase F — Feedback loop** (`server/feedbackLabels.js`, `feedback_labels` table, `cases.outcome` column): the literal "retrains from analyst decisions" mechanism — blacklisting/whitelisting an account (`POST /fraud-lists`) or resolving a case with a definite verdict (`PATCH /cases/:caseId`) automatically labels the relevant transactions. `ml/retrain.py` performs genuine incremental retraining (XGBoost's `xgb_model=` warm-start, not a from-scratch refit) once enough new labels exist.
+- **Phase G — this reconciliation pass.**
+
+**What this deliberately still is, not more than that:** one SQLite file as the feature store (not a real online/offline feature-store split), one machine's single GPU (not a training cluster), a `current.json` pointer for model versioning (not a real model registry or A/B rollout), and union-find clustering (not a full graph database with a live streaming community-detection job). Every one of these is marked `// PROD: X — DEMO: Y` in the code, the same convention this document has used throughout — this is real, working, genuinely adaptive behavior at demo scale, not a claim that production-grade continuous-learning infrastructure was built in an afternoon.
+
+`npm test`: 409 passing (up from 378 before this pass), including new suites `tests/featureStore.test.js`, `tests/reputation.test.js`, `tests/graphIntelligence.test.js`, `tests/xgbTreeEval.test.js`, and `tests/feedbackLabels.test.js`, plus updated coverage in `tests/graph.test.js`, `tests/ml.test.js`, and the routes each phase touched. Verified end-to-end, not just unit-tested: the entire suite ran live against a freshly GPU-trained (and later incrementally-retrained) XGBoost model via `server/ml/mlClient.js`'s real dispatch path, not a mocked one.
+
+New regression test (`tests/structuring.test.js`): a fresh circular-flow scenario asserts an unrelated new customer paying the business, and the business's own routine outbound payment, are both `active: false`, while the real intermediate suspect account is still `active: true`.
+
+`npm test`: 346 passing (up from 345 — one new regression test).
+
+### 17.30 The same live-run test, redone after seeding: a second root cause, "make the demo realistic"
+
+The 17.29 fix alone brought a fresh `npm run seed` run from **70% blocked down to 32%** — still not remotely realistic for a demo. Actually running the app (not just re-testing the one already-known failure) surfaced a second, distinct root cause in the same family: circular-flow cycles can route **through another of the business's own registered accounts** as an intermediate hop, not just terminate on one as origin. `detectCircularFlow`'s DFS (`server/structuring/circularFlow.js`) never excluded other origins from being used as pass-through nodes, so — since this project's demo seeds 8 stores sharing one synthetic customer pool — the DFS would eventually find something like `m_store_digital_goods -> customer -> m_store_grocery -> customer -> m_store_digital_goods` and record it as a genuine circular-flow cycle. That alert's `receiver_ids` (correctly still checked by `alertLookup.js` after the 17.29 fix, since intermediate accounts are the real suspects) then included `m_store_grocery` — an entirely different, entirely legitimate store — poisoning *its* traffic too. Two stores sharing a customer base is ordinary multi-store commerce, not the layering-through-unrelated-accounts pattern Feature 6 exists to catch; real laundering layering routes through accounts *outside* the business's own network.
+
+**Fix:** `detectCircularFlow` now builds the full origin set once and excludes every *other* origin from being used as an intermediate hop in each origin's own search (`findCycleFromOrigin`'s new `otherOriginIds` parameter) — the origin being searched from can still close its own cycle (unaffected, that check runs first), and genuine non-business intermediate accounts are tracked exactly as before. Two new tests in `tests/structuring.test.js`: two stores sharing a customer round-trip are no longer flagged, while a genuine cycle through real (non-business) accounts is still detected even with another business account present nearby in the same window.
+
+**Result, re-seeding from scratch with both fixes applied:** `allow=1425 (88.6%) step_up=67 (4.2%) block=117 (7.3%)` — down from the original `allow=483 step_up=29 block=1169 (69.5% blocked)`. Spot-checked the remaining blocks: every one traces to either a genuine seeded fraud scenario (the script's own `--fraud`/`--structuring`/`--outbound-fraud`/`--refund-fraud` generators) or a real same-store `Merchant -> customer -> Merchant` round-trip within the 24h circular-flow window (Feature 6's own documented, tested behavior — a customer refunded and then re-charged by the *same* store, not a cross-store artifact). A brand-new, unrelated customer paying a store with an active alert now correctly scores `allow` every time — verified directly against the regenerated `sentinelpay.db`, and visually via the dashboard's Live Monitor (44 allow / 2 step-up / 4 block in the last 50 rows, with the Structuring Alerts panel showing real, legible fraud stories instead of noise).
+
+`npm test`: 348 passing (up from 346 — two new `detectCircularFlow` regression tests).

@@ -11,7 +11,7 @@ function oddHour(transaction, userHistory) {
   const ranges = userHistory.user ? userHistory.user.typical_active_hours : null;
 
   if (!ranges || ranges.length === 0) {
-    return { flagged: false, reason: null, weight: 0 };
+    return { flagged: false, reason: null, weight: 0, severity: null };
   }
 
   const hour = new Date(transaction.timestamp).getUTCHours();
@@ -22,10 +22,11 @@ function oddHour(transaction, userHistory) {
       flagged: true,
       reason: `Transaction at ${String(hour).padStart(2, '0')}:00 UTC is outside this user's typical active hours`,
       weight: ODD_HOUR_WEIGHT,
+      severity: 'Low', // Section 15.16, Feature 17: severity backfilled onto the original 5 rule detectors for uniform explainability
     };
   }
 
-  return { flagged: false, reason: null, weight: 0 };
+  return { flagged: false, reason: null, weight: 0, severity: null };
 }
 
 oddHour.ODD_HOUR_WEIGHT = ODD_HOUR_WEIGHT;

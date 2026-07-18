@@ -11,7 +11,7 @@ function deviceMismatch(transaction, userHistory) {
   // A brand-new sender has no device history yet, so there is nothing to mismatch against —
   // flagging their very first transaction on that basis would be a guaranteed false positive.
   if (knownDeviceIds.length === 0) {
-    return { flagged: false, reason: null, weight: 0 };
+    return { flagged: false, reason: null, weight: 0, severity: null };
   }
 
   if (transaction.device_id && !knownDeviceIds.includes(transaction.device_id)) {
@@ -19,10 +19,11 @@ function deviceMismatch(transaction, userHistory) {
       flagged: true,
       reason: 'Transaction from a previously unseen device',
       weight: DEVICE_MISMATCH_WEIGHT,
+      severity: 'Low', // Section 15.16, Feature 17: severity backfilled onto the original 5 rule detectors for uniform explainability
     };
   }
 
-  return { flagged: false, reason: null, weight: 0 };
+  return { flagged: false, reason: null, weight: 0, severity: null };
 }
 
 deviceMismatch.DEVICE_MISMATCH_WEIGHT = DEVICE_MISMATCH_WEIGHT;

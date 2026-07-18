@@ -7,15 +7,40 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const extractFeatures = require('./features');
+const { scoreXgboost } = require('./xgbTreeEval');
+const { computeFeatureVector } = require('../featureStore');
 
-const MODEL_PATH = path.join(__dirname, '..', '..', 'ml', 'model_export', 'model.json');
+const MODEL_DIR = path.join(__dirname, '..', '..', 'ml', 'model_export');
+const LEGACY_MODEL_PATH = path.join(MODEL_DIR, 'model.json');
+// Continuous Learning Extension, Phase E: ml/train_model_gpu.py writes each new model to a
+// versioned model_v<timestamp>.json and updates this small pointer file -- checking it (a tiny
+// file) on every call, rather than only at process start, is what makes a hot model swap work
+// without a server restart.
+const CURRENT_POINTER_PATH = path.join(MODEL_DIR, 'current.json');
 const ML_SERVICE_TIMEOUT_MS = 100; // budget for the python-service fallback call, well inside the <150ms end-to-end target
 
+function resolveModelPath() {
+  try {
+    const pointer = JSON.parse(fs.readFileSync(CURRENT_POINTER_PATH, 'utf-8'));
+    if (pointer && pointer.model_file) {
+      return path.join(MODEL_DIR, pointer.model_file);
+    }
+  } catch {
+    // No pointer yet (never trained a GPU model on this machine), or it's unreadable -- fall
+    // back to the original static model.json path, same behavior as before this Continuous
+    // Learning Extension existed.
+  }
+  return LEGACY_MODEL_PATH;
+}
+
 let cachedModel = null;
+let cachedModelPath = null;
 function loadModel() {
-  if (cachedModel) return cachedModel;
-  const raw = fs.readFileSync(MODEL_PATH, 'utf-8');
+  const modelPath = resolveModelPath();
+  if (cachedModel && cachedModelPath === modelPath) return cachedModel;
+  const raw = fs.readFileSync(modelPath, 'utf-8');
   cachedModel = JSON.parse(raw);
+  cachedModelPath = modelPath;
   return cachedModel;
 }
 
@@ -23,10 +48,29 @@ function sigmoid(z) {
   return 1 / (1 + Math.exp(-z));
 }
 
-function scoreLocal(transaction, userHistory) {
+// Continuous Learning Extension, Phase E: model.json now comes in two shapes -- the original
+// hand-exported logistic-regression weights (ml/train_model.py, no model_type field, scored by
+// the standardize+dot-product+sigmoid math below), and ml/train_model_gpu.py's XGBoost export
+// (model_type: "xgboost", scored by server/ml/xgbTreeEval.js). Dispatching on model_type keeps
+// both formats readable by the same loadModel()/current.json machinery rather than needing two
+// separate client paths.
+//
+// `db` is only required for the xgboost path -- computeFeatureVector needs live DB access to
+// read entity_baselines/reputation (server/featureStore.js), unlike the legacy path's
+// extractFeatures, which only needs the userHistory object the caller already assembled. Not
+// threaded through scoreViaHttpService below: ML_SERVING_MODE=python-service's ml/serve.py only
+// implements the legacy logistic scoring today, a known scope boundary, not an oversight.
+function scoreLocal(transaction, userHistory, db) {
   const model = loadModel();
-  const features = extractFeatures(transaction, userHistory);
 
+  if (model.model_type === 'xgboost') {
+    if (!db) throw new Error('xgboost model scoring requires db access to compute the feature vector');
+    const featureVector = computeFeatureVector(db, transaction);
+    const orderedFeatures = model.learner.feature_names.map((name) => featureVector[name] ?? 0);
+    return scoreXgboost(model, orderedFeatures);
+  }
+
+  const features = extractFeatures(transaction, userHistory);
   const z = features.reduce((sum, x, i) => {
     const standardized = (x - model.scaler_mean[i]) / model.scaler_scale[i];
     return sum + standardized * model.coefficients[i];
@@ -62,14 +106,17 @@ async function scoreViaVertexAi() {
 /**
  * @param {object} transaction
  * @param {object} userHistory
+ * @param {import('node:sqlite').DatabaseSync} [db] - only required when the currently-loaded
+ *   local model is an XGBoost export (model_type: "xgboost"); unused by the legacy logistic path
+ *   and by python-service/vertex modes.
  * @returns {Promise<number>} fraud probability in [0, 1]
  */
-async function getFraudProbability(transaction, userHistory) {
+async function getFraudProbability(transaction, userHistory, db) {
   const mode = process.env.ML_SERVING_MODE || 'local';
   try {
     if (mode === 'python-service') return await scoreViaHttpService(transaction, userHistory);
     if (mode === 'vertex') return await scoreViaVertexAi(transaction, userHistory);
-    return scoreLocal(transaction, userHistory);
+    return scoreLocal(transaction, userHistory, db);
   } catch (err) {
     // Fail open on the ML signal alone — rules and the structuring lookup still apply, and a
     // missing/broken ML backend shouldn't take the whole scoring pipeline down synchronously.

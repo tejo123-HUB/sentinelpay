@@ -12,8 +12,10 @@ every payment gateway the business uses (Stripe, Razorpay, PayPal, etc.), giving
 view across gateways that no single gateway's own dashboard can show.
 
 See **`architecture.md`** for the full technical spec (schema, API contract, build plan,
-final thresholds, and every documented deviation from the original plan) and
-**`user-manual.md`** for a plain-language walkthrough with worked examples.
+final thresholds, and every documented deviation from the original plan),
+**`user-manual.md`** for a plain-language walkthrough with worked examples, and
+**`deployment-guide.md`** for running this somewhere beyond localhost (env vars, the PROD/DEMO
+stand-in map, Cloud Run/Spanner/Vertex AI migration path).
 
 ## Requirements
 
@@ -30,10 +32,12 @@ npm start          # starts the API + dashboard on http://localhost:3000
 ```
 
 That's it — the SQLite database (`sentinelpay.db`) and its schema are created automatically on
-first run. Open `http://localhost:3000` in a browser for the live dashboard, which has three
+first run. Open `http://localhost:3000` in a browser for the live dashboard, which has four
 tabs: **Live Monitor** (real-time transaction table + structuring alerts), **Map** (Leaflet view
-of transaction origins, color-coded by decision), and **Audit Trail** (a trend chart plus a
-filterable history of flagged transactions).
+of transaction origins, color-coded by decision), **Audit Trail** (a trend chart plus a
+filterable history of flagged transactions), and **Analytics** (overview stats, an hour/day/week/
+month fraud trend, a fraud heatmap, top-risky lists, top fraud categories, top mule accounts,
+gateway comparison, and CSV/PDF export). A dark-mode toggle in the top-right applies site-wide.
 
 **Authentication:** every API route except `GET /health` requires an `X-API-Key` header (the
 dashboard handles this for you automatically). For pure localhost demo use you don't need to set
@@ -84,9 +88,23 @@ node simulator/simulate_transactions.js --scenario=structuring
 # The odd-hour rule, live -> flags a transaction outside the account's usual active hours
 node simulator/simulate_transactions.js --scenario=odd-hour
 
-# All four in sequence
+# Compromised business account draining funds via rapid payouts -> block
+node simulator/simulate_transactions.js --scenario=outbound-fraud
+
+# A large refund with no matching prior purchase -> flagged
+node simulator/simulate_transactions.js --scenario=refund-fraud
+
+# Unrecognized-device merchant login followed by an immediate refund -> block
+node simulator/simulate_transactions.js --scenario=merchant-takeover
+
+# A payout to a receiver with a receive-then-quickly-drain history -> block
+node simulator/simulate_transactions.js --scenario=mule
+
+# Every scenario above, in sequence
 node simulator/simulate_transactions.js --scenario=all
 ```
+
+Or run `npm run demo` for an interactive menu covering all of the above — see "Running the demo" further up.
 
 The structuring scenario polls `GET /alerts` for you and prints the created alert once the
 background job (runs every 7s by default) picks it up — usually within one or two cycles.
@@ -105,15 +123,34 @@ around the scoring logic itself, which runs completely unmodified.
 npm test
 ```
 
-84 tests across the rule engine, structuring engine (including an end-to-end DB integration
-test replicating the Task 6 Definition of Done), scoring/decision layer, ML client, the
-ingestion API, input validation, API key auth (including that static dashboard assets stay
-reachable with no key), rate limiting (HTTP and WebSocket), WebSocket error resilience, and a
-dashboard script-load-order regression guard. See `architecture.md` Sections 15.1–15.7 for a
-detailed log of bugs found and fixed across six review passes (including several real security
-issues and one — the dashboard being entirely unstyled and inert — that only showed up by
-actually opening it in a browser), each with a regression test that was verified to fail without
-the fix and pass with it.
+254 tests across the rule engine (18 detectors — the original 5 general-purpose rules plus 13
+outbound-only detectors covering refund integrity, account/vendor risk, merchant/employee/
+cross-gateway fraud, mule and circular-flow laundering, geo risk, duplicate transactions, and
+shared-device/IP risk), the structuring/circular-flow engine (including end-to-end DB integration
+tests), scoring/decision layer (including the blacklist/whitelist/watchlist precedence rules),
+ML client, the ingestion API, analytics endpoints, the fraud-lists and merchant-login/dispute
+ingestion routes, input validation, API key auth, rate limiting, WebSocket error resilience, and
+a dashboard script-load-order regression guard. See `architecture.md` Sections 15.1–15.16 and 16
+for a detailed log of bugs found and fixed across every review pass — including several real
+security issues, a dashboard that was entirely unstyled and inert until opened in a real browser,
+and multiple same-millisecond race conditions in time-window queries — each with a regression
+test verified to fail without the fix and pass with it.
+
+## Fraud detection coverage
+
+Beyond the original 5 general-purpose rules and the structuring/layering graph engine, the API
+now covers refund integrity (account mismatch, multiple/split refunds, refund velocity),
+account/vendor risk (new-vendor tiers, dormant-account reactivation, mule scoring, geo risk),
+merchant/employee/cross-gateway fraud (account takeover via login tracking, employee refund
+abuse, cross-gateway structuring), circular money-flow detection, duplicate-transaction and
+shared-device/IP checks, and an editable blacklist/whitelist/watchlist registry — 18 rule
+detectors plus the 4-detector structuring/circular-flow engine in total, all with configurable
+thresholds (`server/config.js`), a severity on every flag, a `confidence` score separate from
+`fraud_score`, and a `risk_breakdown` in every `POST /transaction` response. New ingestion
+endpoints: `POST /merchant-logins`, `POST /disputes`, `POST /fraud-lists`,
+`POST /investigation-notes`. New read endpoints: `GET /analytics/*` (summary, trends, top-risky
+lists, gateway comparison, CSV/JSON export), `GET /admin-audit-log`. Full design rationale,
+what's built vs. explicitly out of scope, and why: `architecture.md` Sections 15.16 and 16.
 
 ## Measuring latency / false-positive behavior
 

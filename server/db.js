@@ -30,12 +30,29 @@ CREATE TABLE IF NOT EXISTS transactions (
   transaction_type TEXT NOT NULL CHECK (transaction_type IN ('transfer', 'withdrawal', 'deposit')),
   fraud_score REAL,
   decision TEXT CHECK (decision IN ('allow', 'step_up', 'block')),
+  reference_transaction_id TEXT, -- links a refund to the purchase it refunds (Section 15.16, Feature 1/3/7); optional
+  employee_id TEXT, -- internal staff member who initiated a merchant-side transaction (Section 15.16, Feature 10); optional
+  country TEXT, -- ISO country code, for geo-risk scoring (Section 15.16, Feature 14); optional
+  ip_address TEXT, -- for geo-risk IP-range scoring (Section 15.16, Feature 14); optional
+  latency_ms REAL, -- scoring-pipeline processing time for this request (Section 15.16, Feature 18 analytics); not a scoring input
+  confidence REAL, -- 0-100, how much independent corroboration backs the decision (Section 16, Category 13); distinct from fraud_score
+  phone TEXT, -- optional, for shared-phone detection (Section 16, Category 11)
+  email TEXT, -- optional, for shared-email detection (Section 16, Category 11)
+  identity_hash TEXT, -- optional, caller-computed hash of a government ID (PAN/Aadhaar/etc) -- this system never receives or stores the raw document number, only an opaque token, so shared-identity-document detection works without collecting the PII itself (Section 16, Category 11)
+  user_agent TEXT, -- optional, self-reported HTTP client identifier, for device-reputation scoring (Section 16, Category 10); not PII, just a client string
+  state TEXT, -- optional, self-reported region/state, for High-Risk State Detection (Section 16, Category 12)
+  city TEXT, -- optional, self-reported city, for High-Risk City Detection (Section 16, Category 12)
   FOREIGN KEY (sender_id) REFERENCES users(user_id),
   FOREIGN KEY (receiver_id) REFERENCES users(user_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_transactions_sender ON transactions(sender_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_transactions_receiver ON transactions(receiver_id, timestamp);
+-- Section 17 (Category 10, Device Reputation Engine): outboundContext.js's devicePriorFlagCount
+-- query filters on device_id on every outbound transaction (the synchronous scoring hot path) --
+-- same "new hot-path query needs a supporting index" reasoning as idx_transactions_sender/receiver
+-- above, and idx_flags_transaction/idx_structuring_alerts_created_at before that.
+CREATE INDEX IF NOT EXISTS idx_transactions_device ON transactions(device_id, timestamp);
 
 CREATE TABLE IF NOT EXISTS flags (
   flag_id TEXT PRIMARY KEY,
@@ -43,6 +60,7 @@ CREATE TABLE IF NOT EXISTS flags (
   flag_type TEXT NOT NULL,
   reason TEXT NOT NULL,
   weight REAL NOT NULL,
+  severity TEXT, -- Low/Medium/High/Critical (Section 15.16, Feature 17); nullable since flags predating this column have none recorded
   created_at TEXT NOT NULL,
   FOREIGN KEY (transaction_id) REFERENCES transactions(transaction_id)
 );
@@ -75,6 +93,255 @@ CREATE INDEX IF NOT EXISTS idx_structuring_alerts_created_at ON structuring_aler
 CREATE TABLE IF NOT EXISTS business_accounts (
   account_id TEXT PRIMARY KEY,
   created_at TEXT NOT NULL
+);
+
+-- Feature 4 (Section 15.16): merchant login metadata, so a takeover attempt (new device/location
+-- immediately followed by a refund/payout/settlement) can be detected. Independent of
+-- transactions -- a login event carries no amount/receiver, just who logged in, from where.
+CREATE TABLE IF NOT EXISTS merchant_login_events (
+  login_id TEXT PRIMARY KEY,
+  merchant_id TEXT NOT NULL,
+  device_id TEXT,
+  browser TEXT,
+  os TEXT,
+  ip_address TEXT,
+  location_lat REAL,
+  location_lng REAL,
+  country TEXT,
+  timestamp TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_merchant_login_events_merchant ON merchant_login_events(merchant_id, timestamp);
+
+-- Feature 8 (Section 15.16): chargeback/dispute events, for friendly-fraud customer risk scoring.
+-- No FK to transactions -- a dispute can reference a transaction the disputing party doesn't
+-- control the lifecycle of, and a missing/unknown transaction_id shouldn't block ingestion.
+CREATE TABLE IF NOT EXISTS disputes (
+  dispute_id TEXT PRIMARY KEY,
+  transaction_id TEXT,
+  customer_id TEXT NOT NULL,
+  dispute_type TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_disputes_customer ON disputes(customer_id);
+
+-- Section 16 (Enterprise Edition roadmap, Categories 19/21): blacklist/whitelist/watchlist
+-- registry, the same editable-registry pattern as business_accounts. An account can appear on
+-- more than one list over time (list_type + account_id is not unique) -- e.g. watchlisted, then
+-- later confirmed and blacklisted; the history stays, scoring only cares whether any row of a
+-- given type currently exists.
+CREATE TABLE IF NOT EXISTS fraud_lists (
+  entry_id TEXT PRIMARY KEY,
+  list_type TEXT NOT NULL CHECK (list_type IN ('blacklist', 'whitelist', 'watchlist')),
+  account_id TEXT NOT NULL,
+  reason TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_fraud_lists_account ON fraud_lists(account_id, list_type);
+
+-- Section 16, Category 13/14: the safe subset of "Investigation Notes" that doesn't need a real
+-- analyst-identity system -- free-text notes attachable to a transaction. Deliberately
+-- append-only (no DELETE route): an investigation record that could be silently erased isn't a
+-- trustworthy one. author is caller-supplied free text, same trust model as transactions.
+-- employee_id -- not a verified identity, since this build has no login system (Section 15.6).
+CREATE TABLE IF NOT EXISTS investigation_notes (
+  note_id TEXT PRIMARY KEY,
+  transaction_id TEXT NOT NULL,
+  note TEXT NOT NULL,
+  author TEXT,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (transaction_id) REFERENCES transactions(transaction_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_investigation_notes_transaction ON investigation_notes(transaction_id);
+
+-- Section 16, Category 20/21: records who (by IP, since there's no user auth) did what to the
+-- editable registries (business_accounts, fraud_lists) and when -- the same "no real identity,
+-- but a real trail" trust model as investigation_notes above.
+CREATE TABLE IF NOT EXISTS admin_audit_log (
+  log_id TEXT PRIMARY KEY,
+  action TEXT NOT NULL,
+  target_type TEXT NOT NULL,
+  target_id TEXT,
+  detail TEXT,
+  actor_ip TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_admin_audit_log_created_at ON admin_audit_log(created_at);
+
+-- Section 16, Category 14: the real, working subset of the Fraud Investigation Module that
+-- doesn't need a full analyst-identity/login system -- case creation, assignment (caller-
+-- supplied label, same trust model as employee_id/investigation_notes.author), and status
+-- tracking. "Investigation Timeline"/"Fraud Replay" are served by GET /cases/:caseId/timeline,
+-- which merges linked transactions, their structuring alerts, and investigation_notes in
+-- chronological order -- a real feature, not a video-style replay mechanism.
+-- outcome (Continuous Learning Extension, Phase F): nullable, same "added later, absent on rows
+-- predating this column" convention flags.severity already established -- set when a case is
+-- resolved with a definite verdict, feeding server/feedbackLabels.js's real "retrains from
+-- analyst decisions" labels for every transaction linked to the case. NULL covers both "not yet
+-- resolved" and "resolved without a definite verdict" (status alone can be 'resolved' with no
+-- outcome, e.g. a case closed as inconclusive) -- outcome is a separate, optional judgment on top
+-- of status, not implied by it.
+CREATE TABLE IF NOT EXISTS cases (
+  case_id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('open', 'investigating', 'resolved', 'escalated')),
+  assigned_to TEXT,
+  outcome TEXT CHECK (outcome IN ('confirmed_fraud', 'false_positive')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS case_transactions (
+  case_id TEXT NOT NULL,
+  transaction_id TEXT NOT NULL,
+  added_at TEXT NOT NULL,
+  PRIMARY KEY (case_id, transaction_id),
+  FOREIGN KEY (case_id) REFERENCES cases(case_id),
+  FOREIGN KEY (transaction_id) REFERENCES transactions(transaction_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_case_transactions_transaction ON case_transactions(transaction_id);
+CREATE INDEX IF NOT EXISTS idx_cases_status ON cases(status);
+
+-- Section 16, Category 19: a real, working no-code rule engine -- new detection rules defined
+-- declaratively via the API, not by writing a new server/rules/*.js file and redeploying.
+-- Evaluated generically (server/customRules.js) against every outbound transaction alongside the
+-- 23 hardcoded detectors.
+CREATE TABLE IF NOT EXISTS custom_rules (
+  rule_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  field TEXT NOT NULL,
+  operator TEXT NOT NULL,
+  value TEXT NOT NULL,
+  weight REAL NOT NULL,
+  severity TEXT NOT NULL CHECK (severity IN ('Low', 'Medium', 'High', 'Critical')),
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_custom_rules_enabled ON custom_rules(enabled);
+
+-- Section 16, Category 18: generated report snapshots (daily/weekly/monthly), produced by a
+-- background job (server/scheduledReports.js) on the same periodic-tick pattern as the
+-- structuring background job. Delivery (email, via the real notification engine, Category 17)
+-- is a side effect of generation, not a separate unimplemented step.
+CREATE TABLE IF NOT EXISTS scheduled_reports (
+  report_id TEXT PRIMARY KEY,
+  report_type TEXT NOT NULL CHECK (report_type IN ('daily', 'weekly', 'monthly')),
+  period_start TEXT NOT NULL,
+  period_end TEXT NOT NULL,
+  summary_json TEXT NOT NULL,
+  emailed INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_scheduled_reports_type_period ON scheduled_reports(report_type, period_end);
+
+-- Section 17 (FA217, "Known Mule Database"): a real persisted registry of confirmed mule
+-- accounts, distinct from computeMuleScore's on-demand live scoring (server/muleScore.js) --
+-- populated by server/routes/transactions.js the moment an outbound transaction's receiver is
+-- confirmed a mule (isMule per MULE_DETECTION config), so a once-confirmed mule stays a matter of
+-- record even if it goes quiet, not just "currently scoring high."
+CREATE TABLE IF NOT EXISTS mule_accounts (
+  account_id TEXT PRIMARY KEY,
+  qualifying_cycles INTEGER NOT NULL,
+  first_confirmed_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL
+);
+
+-- Dynamic Risk Engine (Merchant Risk Intelligence pass): a generic, reusable per-entity/per-metric
+-- rolling statistical baseline (mean + Welford's variance accumulator m2), incrementally updated
+-- on every observation -- see server/adaptiveBaseline.js. entity_id is deliberately free-form
+-- (a user_id, or a composite "businessId:customerId" pair for refund pacing, etc.) and metric is
+-- a short label ('interval', 'amount', 'refund_interval', ...) rather than one column per use
+-- case, so any detector can register a new adaptive baseline without a schema change -- the
+-- actual mechanism CLAUDE.md's "no magic numbers" convention and this pass's "learn historical
+-- behaviour, don't hardcode thresholds" goal both call for.
+CREATE TABLE IF NOT EXISTS entity_baselines (
+  entity_id TEXT NOT NULL,
+  metric TEXT NOT NULL,
+  count INTEGER NOT NULL DEFAULT 0,
+  mean REAL NOT NULL DEFAULT 0,
+  m2 REAL NOT NULL DEFAULT 0,
+  last_observed_at TEXT,
+  PRIMARY KEY (entity_id, metric)
+);
+
+-- Continuous Learning Extension: the feature store's point-in-time snapshots (server/featureStore.js).
+-- One row per transaction, written by replayFeatureHistory's offline backfill -- feature_json is
+-- the exact vector that transaction's own scoring saw at the time (or would have, for historical
+-- rows backfilled after the fact), never a value computed with knowledge of what happened after
+-- it. label starts NULL and is filled in once a feedback_labels row exists for this transaction --
+-- kept as a denormalized copy here (rather than always joining) so ml/load_datasets.py can read
+-- a single table for a ready-to-train (features, label) pair.
+CREATE TABLE IF NOT EXISTS training_examples (
+  transaction_id TEXT PRIMARY KEY,
+  feature_json TEXT NOT NULL,
+  label INTEGER,
+  computed_at TEXT NOT NULL,
+  FOREIGN KEY (transaction_id) REFERENCES transactions(transaction_id)
+);
+
+-- Continuous Learning Extension: the actual "retrains from analyst decisions" ground truth.
+-- Populated automatically (server/feedbackLabels.js) when an analyst blacklists/whitelists an
+-- account (existing POST /fraud-lists) or resolves a case (existing cases.outcome) -- these are
+-- real human decisions that already happen in this app, turned into training labels, not a new
+-- UI. source records which analyst action produced the label, for audit/debugging a model that
+-- later looks wrong.
+CREATE TABLE IF NOT EXISTS feedback_labels (
+  transaction_id TEXT PRIMARY KEY,
+  label INTEGER NOT NULL CHECK (label IN (0, 1)),
+  source TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (transaction_id) REFERENCES transactions(transaction_id)
+);
+
+-- Continuous Learning Extension: self-updating composite reputation per entity (server/reputation.js).
+-- Distinct from mule_accounts (a specific confirmed pattern) -- this is the general "how has this
+-- entity's own history looked so far" score, incrementally updated on every transaction it's a
+-- party to. entity_type keeps the same free-form entity_id space usable across user/device/
+-- merchant/ip/pair without collisions (mirrors entity_baselines' own entity_id conventions).
+CREATE TABLE IF NOT EXISTS entity_reputation (
+  entity_id TEXT NOT NULL,
+  entity_type TEXT NOT NULL,
+  score REAL NOT NULL DEFAULT 50,
+  flag_count INTEGER NOT NULL DEFAULT 0,
+  txn_count INTEGER NOT NULL DEFAULT 0,
+  last_updated_at TEXT,
+  PRIMARY KEY (entity_id, entity_type)
+);
+
+-- Continuous Learning Extension: a persisted graph store (server/graphIntelligence.js), replacing
+-- GET /graph/relationships' live SQL self-joins for the edges a transaction actually produces.
+-- Incrementally upserted after each transaction (mirrors entity_baselines' upsert pattern) rather
+-- than recomputed on read, so the periodic cluster-discovery pass (below) has a stable graph to
+-- run union-find over without re-deriving it from raw transactions every scan cycle.
+CREATE TABLE IF NOT EXISTS graph_edges (
+  source TEXT NOT NULL,
+  target TEXT NOT NULL,
+  edge_type TEXT NOT NULL,
+  weight REAL NOT NULL DEFAULT 0,
+  txn_count INTEGER NOT NULL DEFAULT 0,
+  total_amount REAL NOT NULL DEFAULT 0,
+  last_seen_at TEXT NOT NULL,
+  PRIMARY KEY (source, target, edge_type)
+);
+
+-- Continuous Learning Extension: mule-ring / community clusters discovered by
+-- graphIntelligence.js's periodic union-find pass over graph_edges (run inside the existing
+-- structuring background job cycle, not a new timer). Persisted (not just live-computed) so a
+-- once-discovered ring stays a matter of record, same reasoning mule_accounts already applies to
+-- individually confirmed mules.
+CREATE TABLE IF NOT EXISTS graph_clusters (
+  cluster_id TEXT PRIMARY KEY,
+  member_ids_json TEXT NOT NULL,
+  risk_score REAL NOT NULL,
+  discovered_at TEXT NOT NULL
 );
 `;
 

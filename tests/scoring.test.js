@@ -4,8 +4,8 @@ const assert = require('node:assert/strict');
 const computeFraudScore = require('../server/scoring');
 const decide = require('../server/decision');
 
-function ruleResult(flagged, weight, reason = 'flagged') {
-  return { flagged, reason: flagged ? reason : null, weight: flagged ? weight : 0 };
+function ruleResult(flagged, weight, reason = 'flagged', severity = null, type = 'test_rule') {
+  return { type, flagged, reason: flagged ? reason : null, weight: flagged ? weight : 0, severity: flagged ? severity : null };
 }
 
 test('scoring+decision: a clean transaction scores low and is allowed', () => {
@@ -67,6 +67,159 @@ test('scoring+decision: an active structuring alert always forces block, regardl
   assert.ok(score > 80, `expected block-tier score from structuring alert alone, got ${score}`);
   assert.equal(decide(score), 'block');
   assert.ok(reasons.some((r) => r.includes('Structuring alert')));
+});
+
+// ---- Section 15.16, Feature 16/17: critical-severity floor + explainability fields ----
+
+test('scoring: a Critical-severity flag forces block regardless of its own weight', () => {
+  // A moderate weight (50) that alone would only reach step-up, but Critical severity forces
+  // the CRITICAL_SEVERITY_FLOOR regardless.
+  const ruleResults = [ruleResult(true, 50, 'Receiver is a Suspected Mule Account', 'Critical', 'mule_receiver_risk')];
+  const { score } = computeFraudScore(ruleResults, { active: false, alert: null }, 0);
+
+  assert.ok(score >= computeFraudScore.CRITICAL_SEVERITY_FLOOR, `expected the critical floor, got ${score}`);
+  assert.equal(decide(score), 'block');
+});
+
+test('scoring: riskBreakdown carries type/reason/weight/severity for every contributing signal', () => {
+  const ruleResults = [ruleResult(true, 35, 'velocity flag', 'Medium', 'velocity')];
+  const structuringLookup = { active: true, alert: { reason: 'known ring' } };
+  const { riskBreakdown } = computeFraudScore(ruleResults, structuringLookup, 0);
+
+  assert.equal(riskBreakdown.length, 2);
+  assert.deepEqual(riskBreakdown[0], { type: 'velocity', reason: 'velocity flag', weight: 35, severity: 'Medium' });
+  assert.equal(riskBreakdown[1].type, 'structuring_alert');
+  assert.equal(riskBreakdown[1].severity, 'Critical');
+});
+
+test('scoring: severity reflects the highest-ranked contributing signal', () => {
+  const ruleResults = [
+    ruleResult(true, 20, 'low signal', 'Low', 'device_mismatch'),
+    ruleResult(true, 45, 'high signal', 'High', 'outbound_fan_out_burst'),
+  ];
+  const { severity } = computeFraudScore(ruleResults, { active: false, alert: null }, 0);
+
+  assert.equal(severity, 'High');
+});
+
+test('scoring: severity is None when nothing is flagged', () => {
+  const { severity, riskBreakdown } = computeFraudScore([ruleResult(false, 0)], { active: false, alert: null }, 0);
+
+  assert.equal(severity, 'None');
+  assert.equal(riskBreakdown.length, 0);
+});
+
+// ---- Section 16 (Categories 19/21): fraud_lists precedence ----
+
+test('scoring: a blacklisted account forces block regardless of an otherwise clean score', () => {
+  const { score, reasons } = computeFraudScore([], { active: false, alert: null }, 0, {
+    blacklisted: true,
+    whitelisted: false,
+    watchlisted: false,
+    blacklistEntries: [{ reason: 'confirmed chargeback fraud ring' }],
+  });
+
+  assert.ok(score >= computeFraudScore.BLACKLIST_FLOOR);
+  assert.equal(decide(score), 'block');
+  assert.ok(reasons.some((r) => r.includes('fraud blacklist') && r.includes('confirmed chargeback fraud ring')));
+});
+
+test('scoring: a whitelisted account caps an otherwise moderate score', () => {
+  const ruleResults = [ruleResult(true, 45, 'amount anomaly', 'Medium', 'amount_anomaly')];
+  const { score } = computeFraudScore(ruleResults, { active: false, alert: null }, 0, {
+    blacklisted: false,
+    whitelisted: true,
+    watchlisted: false,
+  });
+
+  assert.ok(score <= computeFraudScore.WHITELIST_CEILING);
+  assert.equal(decide(score), 'allow');
+});
+
+test('scoring: blacklist takes precedence over whitelist if an account is somehow on both', () => {
+  const { score } = computeFraudScore([], { active: false, alert: null }, 0, {
+    blacklisted: true,
+    whitelisted: true,
+    watchlisted: false,
+    blacklistEntries: [{ reason: null }],
+  });
+
+  assert.ok(score >= computeFraudScore.BLACKLIST_FLOOR);
+});
+
+test('scoring: an active structuring alert overrides a whitelist entry', () => {
+  const { score } = computeFraudScore([], { active: true, alert: { reason: 'known ring' } }, 0, {
+    blacklisted: false,
+    whitelisted: true,
+    watchlisted: false,
+  });
+
+  assert.equal(decide(score), 'block');
+});
+
+test('scoring: whitelist does not suppress a Critical-severity rule flag', () => {
+  const ruleResults = [ruleResult(true, 50, 'Suspected Mule Account', 'Critical', 'mule_receiver_risk')];
+  const { score } = computeFraudScore(ruleResults, { active: false, alert: null }, 0, {
+    blacklisted: false,
+    whitelisted: true,
+    watchlisted: false,
+  });
+
+  assert.ok(score >= computeFraudScore.CRITICAL_SEVERITY_FLOOR, 'a Critical rule flag must not be washed out by whitelisting');
+});
+
+test('scoring: a watchlisted account gets a moderate nudge, not a forced outcome', () => {
+  const clean = computeFraudScore([], { active: false, alert: null }, 0, { blacklisted: false, whitelisted: false, watchlisted: false });
+  const watchlisted = computeFraudScore([], { active: false, alert: null }, 0, { blacklisted: false, whitelisted: false, watchlisted: true });
+
+  assert.equal(watchlisted.score, clean.score + computeFraudScore.WATCHLIST_WEIGHT);
+  assert.ok(watchlisted.reasons.some((r) => r.includes('fraud watchlist')));
+});
+
+test('scoring: no fraudListCheck argument behaves exactly as before (backward compatible)', () => {
+  const ruleResults = [ruleResult(true, 20, 'device mismatch', 'Low', 'device_mismatch')];
+  const { score, severity } = computeFraudScore(ruleResults, { active: false, alert: null }, 0);
+
+  assert.equal(score, 20);
+  assert.equal(severity, 'Low');
+});
+
+// ---- Section 16, Category 13: confidence score ----
+
+test('scoring: a direct blacklist/structuring match has near-certain confidence', () => {
+  const blacklisted = computeFraudScore([], { active: false, alert: null }, 0, { blacklisted: true, blacklistEntries: [{}] });
+  const structuring = computeFraudScore([], { active: true, alert: { reason: 'known ring' } }, 0, undefined);
+
+  assert.equal(blacklisted.confidence, 99);
+  assert.equal(structuring.confidence, 99);
+});
+
+test('scoring: confidence rises with more independently agreeing detectors', () => {
+  const one = computeFraudScore([ruleResult(true, 20, 'a', 'Low', 'rule_a')], { active: false, alert: null }, 0);
+  const three = computeFraudScore(
+    [
+      ruleResult(true, 20, 'a', 'Low', 'rule_a'),
+      ruleResult(true, 20, 'b', 'Low', 'rule_b'),
+      ruleResult(true, 20, 'c', 'Low', 'rule_c'),
+    ],
+    { active: false, alert: null },
+    0
+  );
+
+  assert.ok(three.confidence > one.confidence);
+});
+
+test('scoring: a clean transaction with low ML probability has high confidence in being clean', () => {
+  const { confidence } = computeFraudScore([], { active: false, alert: null }, 0.05);
+
+  assert.ok(confidence >= 80);
+});
+
+test('scoring: an unconfirmed ML-only signal with no rule agreement has lower confidence than a rule-backed one', () => {
+  const mlOnly = computeFraudScore([], { active: false, alert: null }, 0.7);
+  const ruleBacked = computeFraudScore([ruleResult(true, 45, 'amount anomaly', 'Medium', 'amount_anomaly')], { active: false, alert: null }, 0.7);
+
+  assert.ok(ruleBacked.confidence > mlOnly.confidence);
 });
 
 test('decision: threshold boundaries are exact', () => {

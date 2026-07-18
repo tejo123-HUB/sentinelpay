@@ -13,12 +13,12 @@ const MIN_OUTBOUND_HISTORY_FOR_CHECK = 3; // no baseline of "known receivers" ye
 function payoutToNewReceiver(transaction, outboundContext) {
   const purpose = (transaction.purpose || '').toLowerCase();
   if (purpose.includes('refund')) {
-    return { flagged: false, reason: null, weight: 0 };
+    return { flagged: false, reason: null, weight: 0, severity: null };
   }
 
   const priorOutboundCount = (outboundContext && outboundContext.priorOutboundCount) || 0;
   if (priorOutboundCount < MIN_OUTBOUND_HISTORY_FOR_CHECK) {
-    return { flagged: false, reason: null, weight: 0 };
+    return { flagged: false, reason: null, weight: 0, severity: null };
   }
 
   const knownReceiverIds = (outboundContext && outboundContext.knownOutboundReceiverIds) || [];
@@ -27,10 +27,11 @@ function payoutToNewReceiver(transaction, outboundContext) {
       flagged: true,
       reason: 'Payout to a receiver this business account has never paid before',
       weight: PAYOUT_NEW_RECEIVER_WEIGHT,
+      severity: 'Low', // Section 15.16, Feature 17: severity backfilled for uniform explainability
     };
   }
 
-  return { flagged: false, reason: null, weight: 0 };
+  return { flagged: false, reason: null, weight: 0, severity: null };
 }
 
 payoutToNewReceiver.PAYOUT_NEW_RECEIVER_WEIGHT = PAYOUT_NEW_RECEIVER_WEIGHT;

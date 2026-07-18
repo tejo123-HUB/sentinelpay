@@ -1,5 +1,6 @@
 // Reads/writes user profile + recent-history data for the scoring pipeline. Impure (talks to
 // the DB directly) by design — the pure rule/ML/structuring functions consume its output.
+const { getBaseline, updateBaseline } = require('./adaptiveBaseline');
 const MIN_HISTORY_FOR_ACTIVE_HOURS = 5; // don't lock in a typical-hours baseline until this many transactions exist
 const RECENT_TRANSACTIONS_LOOKBACK_MS = 24 * 60 * 60 * 1000; // window fetched for rule/ML feature computation
 const RECENT_TRANSACTIONS_LIMIT = 200; // bound on rows fetched per request, keeps the synchronous path fast
@@ -51,10 +52,15 @@ function ensureUserExists(db, userId, timestampIso) {
  * @param {import('node:sqlite').DatabaseSync} db
  * @param {string} senderId
  * @param {number} nowMs
- * @returns {{ user: object|null, transactionCount: number, recentTransactions: object[], knownDeviceIds: string[] }}
+ * @returns {{ user: object|null, transactionCount: number, recentTransactions: object[], knownDeviceIds: string[], intervalBaseline: {count:number,mean:number,m2:number}, amountBaseline: {count:number,mean:number,m2:number} }}
  */
 function getUserHistory(db, senderId, nowMs) {
   const userRow = db.prepare('SELECT * FROM users WHERE user_id = ?').get(senderId) || null;
+  // Dynamic Risk Engine: this sender's own learned pace/spend baselines (server/adaptiveBaseline.js)
+  // -- consumed by velocity.js and amountAnomaly.js instead of a fixed count/multiplier that's
+  // identical for every account regardless of its own history.
+  const intervalBaseline = getBaseline(db, senderId, 'interval');
+  const amountBaseline = getBaseline(db, senderId, 'amount');
 
   const transactionCount = db
     .prepare('SELECT COUNT(*) AS n FROM transactions WHERE sender_id = ?')
@@ -92,7 +98,7 @@ function getUserHistory(db, senderId, nowMs) {
     };
   }
 
-  return { user, transactionCount, recentTransactions, knownDeviceIds };
+  return { user, transactionCount, recentTransactions, knownDeviceIds, intervalBaseline, amountBaseline };
 }
 
 // Contiguous [minHour, maxHour+1) range covering every hour the sender has transacted in within
@@ -137,6 +143,28 @@ function updateUserAfterTransaction(db, senderId, transaction) {
   db.prepare(
     'UPDATE users SET avg_transaction_amount = avg_transaction_amount + (? - avg_transaction_amount) / ? WHERE user_id = ?'
   ).run(transaction.amount, currentCount, senderId);
+
+  // Dynamic Risk Engine: this sender's own amount baseline (mean + variance, not just the mean
+  // avg_transaction_amount already tracks above) — amountAnomaly.js needs the variance too, to
+  // flag by real standard deviations rather than a fixed multiplier of the mean alone.
+  updateBaseline(db, senderId, 'amount', transaction.amount, transaction.timestamp);
+
+  // Dynamic Risk Engine: this sender's own pace baseline (time between consecutive transactions)
+  // — velocity.js needs this to judge a burst against what's actually *unusual for this sender*,
+  // not a fixed transaction count that's identical for a low-activity and a high-activity account.
+  // rowid (SQLite's implicit, monotonically-increasing insertion order) rather than timestamp
+  // picks out "the transaction just inserted" and "the one immediately before it" exactly even
+  // when two transactions share the same millisecond timestamp — same tie-breaking reasoning
+  // already used elsewhere in this codebase (e.g. outboundContext.js's takeoverRisk lookup).
+  const lastTwo = db
+    .prepare('SELECT timestamp FROM transactions WHERE sender_id = ? ORDER BY rowid DESC LIMIT 2')
+    .all(senderId);
+  if (lastTwo.length === 2) {
+    const intervalMs = new Date(lastTwo[0].timestamp).getTime() - new Date(lastTwo[1].timestamp).getTime();
+    if (intervalMs >= 0) {
+      updateBaseline(db, senderId, 'interval', intervalMs, transaction.timestamp);
+    }
+  }
 
   const existing = db.prepare('SELECT * FROM users WHERE user_id = ?').get(senderId);
 

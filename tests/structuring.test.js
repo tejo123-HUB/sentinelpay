@@ -277,6 +277,31 @@ test('backgroundJob.runScanCycle: DoD scenario produces exactly one persisted al
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM structuring_alerts').get().n, 1);
 });
 
+test('backgroundJob.runScanCycle: a persisted structuring alert auto-blacklists its origin (FA198)', () => {
+  const db = buildTestDb();
+  const { transactions, nowMs } = buildStructuringScenario();
+
+  for (const userId of ['A', 'B', 'C', 'D', 'external']) insertUser(db, userId, iso(-3600000));
+  for (const t of transactions) insertTransaction(db, t);
+
+  const { checkFraudLists } = require('../server/fraudLists');
+  assert.equal(checkFraudLists(db, 'A', 'A').blacklisted, false);
+
+  runScanCycle(db, nowMs);
+
+  const afterFirst = checkFraudLists(db, 'A', 'A');
+  assert.equal(afterFirst.blacklisted, true);
+  assert.match(afterFirst.blacklistEntries[0].reason, /Auto-blacklisted: structuring alert/);
+
+  const auditRows = db.prepare("SELECT * FROM admin_audit_log WHERE target_id = 'A' AND action = 'auto-create'").all();
+  assert.equal(auditRows.length, 1);
+  assert.equal(auditRows[0].actor_ip, 'system');
+
+  // A second scan cycle (already-alerted account) must not spam a duplicate blacklist entry.
+  runScanCycle(db, nowMs + 5000);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM fraud_lists WHERE account_id = 'A'").get().n, 1);
+});
+
 test('backgroundJob.runScanCycle: a genuine long-term contact outside the recent-transactions lookback is not misclassified as a new fan-out receiver (regression)', () => {
   // Regression test: the fan-out "no prior history" check used to be derived from the same
   // LOOKBACK_MS-bounded (~45 min) transaction set fetched for split-detection, so a receiver
@@ -369,4 +394,194 @@ test('alertLookup.findActiveAlert: fast per-transaction lookup finds sender and 
 
   const noHit = findActiveAlert(db, 'unrelated_1', 'unrelated_2', nowMs);
   assert.equal(noHit.active, false);
+});
+
+// ---- detectCircularFlow (Section 15.16, Feature 6) ----
+
+const detectCircularFlow = require('../server/structuring/circularFlow');
+
+test('detectCircularFlow: detects a direct Merchant -> A -> Merchant cycle', () => {
+  const transactions = [
+    { sender_id: 'M', receiver_id: 'A', amount: 1000, timestamp: iso(-3000) },
+    { sender_id: 'A', receiver_id: 'M', amount: 900, timestamp: iso(-1000) },
+  ];
+
+  const cycles = detectCircularFlow(transactions, ['M']);
+
+  assert.equal(cycles.length, 1);
+  assert.deepEqual(cycles[0].path, ['M', 'A', 'M']);
+  assert.equal(cycles[0].originId, 'M');
+  assert.equal(cycles[0].totalAmount, 1900);
+});
+
+test('detectCircularFlow: detects a Merchant -> A -> B -> Merchant cycle', () => {
+  const transactions = [
+    { sender_id: 'M', receiver_id: 'A', amount: 500, timestamp: iso(-5000) },
+    { sender_id: 'A', receiver_id: 'B', amount: 480, timestamp: iso(-3000) },
+    { sender_id: 'B', receiver_id: 'M', amount: 460, timestamp: iso(-1000) },
+  ];
+
+  const cycles = detectCircularFlow(transactions, ['M']);
+
+  assert.equal(cycles.length, 1);
+  assert.deepEqual(cycles[0].path, ['M', 'A', 'B', 'M']);
+});
+
+test('detectCircularFlow: detects a Merchant -> A -> B -> C -> Merchant cycle', () => {
+  const transactions = [
+    { sender_id: 'M', receiver_id: 'A', amount: 500, timestamp: iso(-7000) },
+    { sender_id: 'A', receiver_id: 'B', amount: 480, timestamp: iso(-5000) },
+    { sender_id: 'B', receiver_id: 'C', amount: 460, timestamp: iso(-3000) },
+    { sender_id: 'C', receiver_id: 'M', amount: 440, timestamp: iso(-1000) },
+  ];
+
+  const cycles = detectCircularFlow(transactions, ['M']);
+
+  assert.equal(cycles.length, 1);
+  assert.deepEqual(cycles[0].path, ['M', 'A', 'B', 'C', 'M']);
+});
+
+test('detectCircularFlow: does not flag a straight-line payout with no path back to the origin', () => {
+  const transactions = [
+    { sender_id: 'M', receiver_id: 'A', amount: 500, timestamp: iso(-3000) },
+    { sender_id: 'A', receiver_id: 'B', amount: 480, timestamp: iso(-1000) },
+  ];
+
+  const cycles = detectCircularFlow(transactions, ['M']);
+
+  assert.equal(cycles.length, 0);
+});
+
+test('detectCircularFlow: does not flag a cycle exceeding the configured max hops', () => {
+  const config = require('../server/config');
+  // One more intermediate hop than MAX_CYCLE_HOPS allows.
+  const chain = ['M', 'A', 'B', 'C', 'D', 'M'].slice(0, config.CIRCULAR_FLOW.MAX_CYCLE_HOPS + 3);
+  const transactions = [];
+  for (let i = 0; i < chain.length - 1; i += 1) {
+    transactions.push({ sender_id: chain[i], receiver_id: chain[i + 1], amount: 100, timestamp: iso(-1000 * (chain.length - i)) });
+  }
+
+  const cycles = detectCircularFlow(transactions, ['M']);
+
+  assert.equal(cycles.length, 0);
+});
+
+test('detectCircularFlow: does not flag a path that merely passes through another of the business\'s own registered accounts (regression)', () => {
+  // Found live seeding a multi-store demo: Store1 -> customer -> Store2 -> customer -> Store1 is
+  // two stores sharing a customer base -- ordinary multi-store commerce, not the
+  // layering-through-unrelated-accounts pattern this detector exists to catch. Without excluding
+  // other origins as intermediate hops, this was detected as a genuine circular-flow cycle, and
+  // both stores' entire future transaction stream got treated as involving an active alert.
+  const transactions = [
+    { sender_id: 'Store1', receiver_id: 'u_shared_customer_a', amount: 500, timestamp: iso(-5000) },
+    { sender_id: 'u_shared_customer_a', receiver_id: 'Store2', amount: 480, timestamp: iso(-3000) },
+    { sender_id: 'Store2', receiver_id: 'u_shared_customer_b', amount: 460, timestamp: iso(-2000) },
+    { sender_id: 'u_shared_customer_b', receiver_id: 'Store1', amount: 440, timestamp: iso(-1000) },
+  ];
+
+  const cycles = detectCircularFlow(transactions, ['Store1', 'Store2']);
+
+  assert.equal(cycles.length, 0);
+});
+
+test('detectCircularFlow: a genuine cycle through non-business accounts is still detected even when another business account is also active nearby', () => {
+  // The exclusion above must not blind the detector to real circular flow -- only OTHER origins
+  // are excluded as intermediate hops; ordinary non-business accounts (the real suspects) are
+  // still fully tracked.
+  const transactions = [
+    { sender_id: 'Store1', receiver_id: 'A', amount: 500, timestamp: iso(-5000) },
+    { sender_id: 'A', receiver_id: 'B', amount: 480, timestamp: iso(-3000) },
+    { sender_id: 'B', receiver_id: 'Store1', amount: 460, timestamp: iso(-1000) },
+    // Unrelated ordinary traffic to Store2 in the same window -- must not interfere.
+    { sender_id: 'u_other_customer', receiver_id: 'Store2', amount: 50, timestamp: iso(-2000) },
+  ];
+
+  const cycles = detectCircularFlow(transactions, ['Store1', 'Store2']);
+
+  assert.equal(cycles.length, 1);
+  assert.equal(cycles[0].originId, 'Store1');
+  assert.deepEqual(cycles[0].path, ['Store1', 'A', 'B', 'Store1']);
+});
+
+test('backgroundJob.runScanCycle: a circular-flow cycle is persisted as a structuring_alerts row and picked up by the fast lookup', () => {
+  const db = buildTestDb();
+  const nowMs = BASE_TIME;
+  db.prepare('INSERT INTO business_accounts (account_id, created_at) VALUES (?, ?)').run('m_circular', iso(-3600000));
+
+  for (const userId of ['m_circular', 'circ_a', 'circ_b']) insertUser(db, userId, iso(-3600000));
+  insertTransaction(db, { sender_id: 'm_circular', receiver_id: 'circ_a', amount: 5000, timestamp: iso(-3000), transaction_type: 'transfer' });
+  insertTransaction(db, { sender_id: 'circ_a', receiver_id: 'circ_b', amount: 4800, timestamp: iso(-2000), transaction_type: 'transfer' });
+  insertTransaction(db, { sender_id: 'circ_b', receiver_id: 'm_circular', amount: 4600, timestamp: iso(-1000), transaction_type: 'transfer' });
+
+  const created = runScanCycle(db, nowMs);
+  const circularAlert = created.find((a) => a.reason.startsWith('Circular transaction pattern detected.'));
+  assert.ok(circularAlert, 'expected a circular-flow alert to be created');
+  assert.equal(circularAlert.sender_id, 'm_circular');
+  assert.deepEqual(JSON.parse(circularAlert.receiver_ids), ['circ_a', 'circ_b']);
+
+  const lookup = findActiveAlert(db, 'circ_a', 'someone_else', nowMs);
+  assert.equal(lookup.active, true, 'an account in the cycle should be caught by the existing fast lookup with no changes to it');
+});
+
+test('backgroundJob.runScanCycle: a circular-flow alert does NOT auto-blacklist the business account that is its origin (regression)', () => {
+  // A circular-flow alert's sender_id is always one of the business's own registered accounts
+  // (detectCircularFlow's originIds come from business_accounts) -- auto-blacklisting FA198 must
+  // only ever apply to genuine structuring alerts, where sender_id is the actual suspected
+  // launderer, or it would force-block every future transaction touching the business's own
+  // account (blacklist floors the score regardless of direction) the moment its own money
+  // legitimately cycles back through a vendor/refund relationship.
+  const db = buildTestDb();
+  const nowMs = BASE_TIME;
+  db.prepare('INSERT INTO business_accounts (account_id, created_at) VALUES (?, ?)').run('m_circular_no_blacklist', iso(-3600000));
+
+  for (const userId of ['m_circular_no_blacklist', 'circ_x', 'circ_y']) insertUser(db, userId, iso(-3600000));
+  insertTransaction(db, { sender_id: 'm_circular_no_blacklist', receiver_id: 'circ_x', amount: 5000, timestamp: iso(-3000), transaction_type: 'transfer' });
+  insertTransaction(db, { sender_id: 'circ_x', receiver_id: 'circ_y', amount: 4800, timestamp: iso(-2000), transaction_type: 'transfer' });
+  insertTransaction(db, { sender_id: 'circ_y', receiver_id: 'm_circular_no_blacklist', amount: 4600, timestamp: iso(-1000), transaction_type: 'transfer' });
+
+  const created = runScanCycle(db, nowMs);
+  assert.ok(created.some((a) => a.reason.startsWith('Circular transaction pattern detected.')), 'expected a circular-flow alert to be created');
+
+  const { checkFraudLists } = require('../server/fraudLists');
+  assert.equal(
+    checkFraudLists(db, 'm_circular_no_blacklist', 'm_circular_no_blacklist').blacklisted,
+    false,
+    'the business account must not be auto-blacklisted just for being a circular-flow origin'
+  );
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM fraud_lists WHERE account_id = 'm_circular_no_blacklist'").get().n, 0);
+});
+
+test('alertLookup.findActiveAlert: an ordinary customer paying a business with an active circular-flow alert is NOT treated as an active-alert hit (regression)', () => {
+  // Found live via demo seed data: circular-flow alerts record the business's own account as
+  // sender_id (the detection origin -- see backgroundJob.js), but findActiveAlert previously
+  // treated "receiver_id matches some alert's stored sender_id" as proof of an active bad actor
+  // regardless of alert type. Once a business had ever been the origin of a circular-flow alert,
+  // every ordinary customer paying that business for the next 24h hit this same false match and
+  // force-blocked at STRUCTURING_ALERT_FLOOR -- reproduced against real seeded data where every
+  // demo store ended up with its own circular-flow alert and every subsequent purchase blocked.
+  const db = buildTestDb();
+  const nowMs = BASE_TIME;
+  db.prepare('INSERT INTO business_accounts (account_id, created_at) VALUES (?, ?)').run('m_circular_alertlookup', iso(-3600000));
+
+  for (const userId of ['m_circular_alertlookup', 'circ_p', 'circ_q']) insertUser(db, userId, iso(-3600000));
+  insertTransaction(db, { sender_id: 'm_circular_alertlookup', receiver_id: 'circ_p', amount: 5000, timestamp: iso(-3000), transaction_type: 'transfer' });
+  insertTransaction(db, { sender_id: 'circ_p', receiver_id: 'circ_q', amount: 4800, timestamp: iso(-2000), transaction_type: 'transfer' });
+  insertTransaction(db, { sender_id: 'circ_q', receiver_id: 'm_circular_alertlookup', amount: 4600, timestamp: iso(-1000), transaction_type: 'transfer' });
+
+  const created = runScanCycle(db, nowMs);
+  assert.ok(created.some((a) => a.reason.startsWith('Circular transaction pattern detected.')), 'expected a circular-flow alert to be created');
+
+  // A brand-new customer who has never touched this alert, paying the business.
+  const ordinaryPurchase = findActiveAlert(db, 'u_brand_new_customer', 'm_circular_alertlookup', nowMs);
+  assert.equal(ordinaryPurchase.active, false, 'an ordinary customer paying a business must not be blocked just because that business was once a circular-flow origin');
+
+  // The business making another ordinary outbound payment (e.g. a refund) must also not be
+  // treated as "the sender of an active alert" just because it's the circular-flow origin.
+  const ordinaryOutbound = findActiveAlert(db, 'm_circular_alertlookup', 'u_another_customer', nowMs);
+  assert.equal(ordinaryOutbound.active, false);
+
+  // The actual suspicious intermediate accounts (the cycle's real participants, in receiver_ids)
+  // must still be caught -- this fix must not blind the lookup to genuine circular-flow suspects.
+  const realSuspect = findActiveAlert(db, 'circ_p', 'someone_else', nowMs);
+  assert.equal(realSuspect.active, true);
 });

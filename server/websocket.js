@@ -1,7 +1,7 @@
 // Broadcasts every scored transaction and every new structuring alert to connected dashboard
 // clients, per the WebSocket /ws contract in architecture.md Section 7.
 const { WebSocketServer } = require('ws');
-const { timingSafeStringEqual, API_KEY } = require('./middleware/apiKeyAuth');
+const { resolveRole } = require('./middleware/apiKeyAuth');
 const rateLimit = require('./middleware/rateLimit');
 
 // This server never expects meaningful data *from* a WS client (there's no `ws.on('message', ...)`
@@ -64,7 +64,9 @@ function attachWebSocketServer(server) {
 
     const url = new URL(info.req.url, 'http://localhost');
     const provided = url.searchParams.get('apiKey');
-    if (!provided || !timingSafeStringEqual(provided, API_KEY)) {
+    // Any recognized key connects (viewer and above) -- the live feed is read-only broadcast,
+    // same reasoning as requireApiKey's plain (non-role-gated) checks on GET routes.
+    if (!provided || !resolveRole(provided)) {
       return callback(false, 401, 'Unauthorized');
     }
     callback(true);

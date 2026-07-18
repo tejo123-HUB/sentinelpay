@@ -6,6 +6,11 @@ node_modules/
 *.db-wal
 ml/model_export/*.pkl
 ml/model_export/*.joblib
+# Continuous Learning Extension: ml/train_model_gpu.py's versioned exports + hot-swap pointer are
+# generated artifacts (like the .pkl/.joblib lines above), not source -- ml/model_export/model.json
+# (the original, committed logistic model) stays tracked as the shipped default.
+ml/model_export/model_v*.json
+ml/model_export/current.json
 ml/.venv/
 ml/__pycache__/
 __pycache__/

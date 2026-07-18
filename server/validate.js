@@ -7,6 +7,9 @@ const MAX_PURPOSE_LENGTH = 256; // freeform note text, longer than an id but sti
 // examples top out around ₹80,000 for a whole structuring burst) so it never interferes with
 // real traffic, single-transaction or structuring.
 const MAX_AMOUNT = 10_000_000;
+const MAX_COUNTRY_LENGTH = 8; // ISO 3166-1 alpha-2/alpha-3 codes fit comfortably; generous bound, not a strict enum
+const MAX_USER_AGENT_LENGTH = 512; // real browser/mobile UA strings run 100-300 chars; generous headroom, not a strict format
+const MAX_LOCATION_NAME_LENGTH = 64; // state/city names -- generous bound, not a strict format (Section 16, Category 12)
 
 /**
  * Validates and normalizes a POST /transaction request body.
@@ -17,7 +20,27 @@ function validateTransactionInput(body) {
     return { valid: false, error: 'Request body must be a JSON object' };
   }
 
-  const { sender_id, receiver_id, amount, timestamp, location, device_id, merchant_id, purpose, transaction_type } = body;
+  const {
+    sender_id,
+    receiver_id,
+    amount,
+    timestamp,
+    location,
+    device_id,
+    merchant_id,
+    purpose,
+    transaction_type,
+    reference_transaction_id,
+    employee_id,
+    country,
+    ip_address,
+    phone,
+    email,
+    identity_hash,
+    user_agent,
+    state,
+    city,
+  } = body;
 
   if (typeof sender_id !== 'string' || sender_id.trim() === '' || sender_id.length > MAX_ID_LENGTH) {
     return { valid: false, error: `sender_id is required and must be a non-empty string of at most ${MAX_ID_LENGTH} characters` };
@@ -71,6 +94,41 @@ function validateTransactionInput(body) {
   if (typeof purpose === 'string' && purpose.length > MAX_PURPOSE_LENGTH) {
     return { valid: false, error: `purpose must be at most ${MAX_PURPOSE_LENGTH} characters` };
   }
+  if (typeof reference_transaction_id === 'string' && reference_transaction_id.length > MAX_ID_LENGTH) {
+    return { valid: false, error: `reference_transaction_id must be at most ${MAX_ID_LENGTH} characters` };
+  }
+  if (typeof employee_id === 'string' && employee_id.length > MAX_ID_LENGTH) {
+    return { valid: false, error: `employee_id must be at most ${MAX_ID_LENGTH} characters` };
+  }
+  if (typeof country === 'string' && country.length > MAX_COUNTRY_LENGTH) {
+    return { valid: false, error: `country must be at most ${MAX_COUNTRY_LENGTH} characters` };
+  }
+  if (typeof ip_address === 'string' && ip_address.length > MAX_ID_LENGTH) {
+    return { valid: false, error: `ip_address must be at most ${MAX_ID_LENGTH} characters` };
+  }
+  if (typeof phone === 'string' && phone.length > MAX_ID_LENGTH) {
+    return { valid: false, error: `phone must be at most ${MAX_ID_LENGTH} characters` };
+  }
+  if (typeof email === 'string' && email.length > MAX_ID_LENGTH) {
+    return { valid: false, error: `email must be at most ${MAX_ID_LENGTH} characters` };
+  }
+  // identity_hash: this system never receives or validates a raw PAN/Aadhaar/government ID
+  // number -- the caller computes a hash of it themselves and sends only the opaque token, so
+  // shared-identity-document detection works without this system ever holding the PII itself
+  // (Section 16, Category 11). Bounded generously enough for a SHA-256 hex digest (64 chars) or
+  // similar, with headroom.
+  if (typeof identity_hash === 'string' && identity_hash.length > MAX_ID_LENGTH) {
+    return { valid: false, error: `identity_hash must be at most ${MAX_ID_LENGTH} characters` };
+  }
+  if (typeof user_agent === 'string' && user_agent.length > MAX_USER_AGENT_LENGTH) {
+    return { valid: false, error: `user_agent must be at most ${MAX_USER_AGENT_LENGTH} characters` };
+  }
+  if (typeof state === 'string' && state.length > MAX_LOCATION_NAME_LENGTH) {
+    return { valid: false, error: `state must be at most ${MAX_LOCATION_NAME_LENGTH} characters` };
+  }
+  if (typeof city === 'string' && city.length > MAX_LOCATION_NAME_LENGTH) {
+    return { valid: false, error: `city must be at most ${MAX_LOCATION_NAME_LENGTH} characters` };
+  }
 
   return {
     valid: true,
@@ -84,8 +142,18 @@ function validateTransactionInput(body) {
       merchant_id: typeof merchant_id === 'string' ? merchant_id : null,
       purpose: typeof purpose === 'string' ? purpose : null,
       transaction_type,
+      reference_transaction_id: typeof reference_transaction_id === 'string' ? reference_transaction_id : null,
+      employee_id: typeof employee_id === 'string' ? employee_id : null,
+      country: typeof country === 'string' ? country : null,
+      ip_address: typeof ip_address === 'string' ? ip_address : null,
+      phone: typeof phone === 'string' ? phone : null,
+      email: typeof email === 'string' ? email : null,
+      identity_hash: typeof identity_hash === 'string' ? identity_hash : null,
+      user_agent: typeof user_agent === 'string' ? user_agent : null,
+      state: typeof state === 'string' ? state : null,
+      city: typeof city === 'string' ? city : null,
     },
   };
 }
 
-module.exports = { validateTransactionInput, VALID_TRANSACTION_TYPES, MAX_AMOUNT, MAX_PURPOSE_LENGTH, MAX_ID_LENGTH };
+module.exports = { validateTransactionInput, VALID_TRANSACTION_TYPES, MAX_AMOUNT, MAX_PURPOSE_LENGTH, MAX_ID_LENGTH, MAX_COUNTRY_LENGTH, MAX_USER_AGENT_LENGTH, MAX_LOCATION_NAME_LENGTH };
