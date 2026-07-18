@@ -1209,6 +1209,32 @@ tr.decision-step_up {
   min-width: 16rem;
 }
 
+.btn-block-tree {
+  background: var(--block);
+  color: #fff;
+  border: 1px solid var(--block-text);
+  border-bottom: 3px solid var(--block-text);
+  border-radius: var(--radius-sm);
+  padding: 0.45rem 0.95rem;
+  font-size: 0.79rem;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: var(--shadow-3d-btn);
+  transition: transform 0.1s var(--ease), border-bottom-width 0.1s var(--ease), box-shadow 0.1s var(--ease);
+  transform: translateY(-2px);
+}
+
+.btn-block-tree:hover {
+  transform: translateY(-3px);
+  border-bottom-width: 4px;
+  background: var(--block-text);
+}
+
+.btn-block-tree:active {
+  transform: translateY(1px);
+  border-bottom-width: 1px;
+}
+
 .graph-hint {
   color: var(--text-faint);
   font-size: 0.85rem;
