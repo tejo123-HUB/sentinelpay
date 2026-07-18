@@ -24,65 +24,65 @@
    ========================================================================== */
 
 :root {
-  /* Premium 3D Slate & Indigo White Theme */
-  --bg: #f1f5f9;            /* Slate-100: clean, professional background */
-  --surface: #ffffff;       /* Pure white surfaces */
-  --surface-sunken: #f8fafc; /* Slate-50: sunken well for tables, code blocks */
-  --surface-strong: #ffffff; /* Elevated card faces */
+  /* Gen Z Modern Glassmorphic / Bento Theme */
+  --bg: #f8f9fa;            /* Very light base, mesh gradient will overlay on body */
+  --surface: rgba(255, 255, 255, 0.75);       /* Translucent glass surfaces */
+  --surface-sunken: rgba(248, 250, 252, 0.4); /* Glass well for tables */
+  --surface-strong: rgba(255, 255, 255, 0.95); /* Elevated card faces */
 
-  --border: #e2e8f0;        /* Slate-200 for clean subtle borders */
-  --border-strong: #cbd5e1; /* Slate-300 */
-  --border-3d: #cbd5e1;     /* Color representing the physical 3D block thickness */
-  --border-3d-active: #94a3b8;
+  --border: rgba(255, 255, 255, 1);          /* White glossy borders for inner glass edge */
+  --border-strong: rgba(255, 255, 255, 1);
+  --border-3d: rgba(0, 0, 0, 0.05);          
+  --border-3d-active: rgba(0, 0, 0, 0.1);
 
-  --text: #0f172a;          /* Slate-900: extremely rich dark slate for text */
-  --text-dim: #334155;      /* Slate-700 */
-  --text-faint: #64748b;    /* Slate-500 */
-  --gridline: #e2e8f0;      /* Slate-200 */
+  --text: #1e1b4b;          /* Very deep purple-navy for premium contrast */
+  --text-dim: #475569;      
+  --text-faint: #94a3b8;    
+  --gridline: rgba(226, 232, 240, 0.5);      
 
-  /* Status palette — mark step (canonical hue) + text step (darkened for
-     4.5:1+ on white). See file header. */
-  --allow: #10b981;         /* Emerald-500 */
-  --allow-text: #047857;    /* Emerald-700 */
-  --allow-wash: #ecfdf5;    /* Emerald-50 */
-  --stepup: #f59e0b;        /* Amber-500 */
-  --stepup-text: #b45309;   /* Amber-700 */
-  --stepup-wash: #fffbeb;   /* Amber-50 */
-  --block: #ef4444;         /* Rose-500 */
-  --block-text: #b91c1c;    /* Rose-700 */
-  --block-wash: #fff1f2;    /* Rose-50 */
-  --struct: #6366f1;        /* Indigo-500 */
-  --struct-text: #4338ca;   /* Indigo-700 */
-  --struct-wash: #e0e7ff;   /* Indigo-100 */
+  /* Gen Z Neon/Vibrant Palette */
+  --allow: #10b981;         
+  --allow-text: #047857;    
+  --allow-wash: rgba(16, 185, 129, 0.15);    
+  --stepup: #f59e0b;        
+  --stepup-text: #b45309;   
+  --stepup-wash: rgba(245, 158, 11, 0.15);   
+  --block: #ec4899;         /* Hot Pink for blocked! */
+  --block-text: #be185d;    
+  --block-wash: rgba(236, 72, 153, 0.15);    
+  --struct: #8b5cf6;        /* Electric Violet for structuring alerts! */
+  --struct-text: #6d28d9;   
+  --struct-wash: rgba(139, 92, 246, 0.15);   
 
-  --accent: #4f46e5;        /* Indigo-600 */
-  --accent-strong: #3730a3; /* Indigo-800 */
-  --accent-wash: #e0e7ff;   /* Indigo-100 */
+  --accent: #8b5cf6;        /* Electric Violet */
+  --accent-strong: #7c3aed; 
+  --accent-wash: rgba(139, 92, 246, 0.15);   
 
-  --radius-lg: 12px;
-  --radius-md: 8px;
-  --radius-sm: 6px;
+  /* Extra large corner radii for Bento Box look */
+  --radius-lg: 24px;
+  --radius-md: 16px;
+  --radius-sm: 12px;
+  --radius-pill: 9999px;
 
-  /* Volumetric 3D shadows & bevel offsets */
-  --shadow-3d: 0 4px 0 0 var(--border-3d), 0 8px 16px rgba(15, 23, 42, 0.06);
-  --shadow-3d-hover: 0 6px 0 0 var(--border-3d), 0 12px 24px rgba(15, 23, 42, 0.1);
-  --shadow-3d-btn: 0 4px 0 0 var(--accent-strong), 0 6px 12px rgba(79, 70, 229, 0.15);
-  --shadow-3d-btn-hover: 0 5px 0 0 var(--accent-strong), 0 8px 16px rgba(79, 70, 229, 0.2);
-  --shadow-3d-btn-active: 0 1px 0 0 var(--accent-strong), 0 2px 4px rgba(79, 70, 229, 0.1);
+  /* Claymorphism/Soft 3D Shadows */
+  --shadow-3d: 0 20px 40px -10px rgba(0, 0, 0, 0.05), inset 0 2px 4px rgba(255, 255, 255, 0.9), inset 0 0 0 1px rgba(255, 255, 255, 0.6);
+  --shadow-3d-hover: 0 30px 60px -15px rgba(139, 92, 246, 0.15), inset 0 2px 6px rgba(255, 255, 255, 1), inset 0 0 0 1px rgba(255, 255, 255, 0.9);
+  --shadow-3d-btn: 0 8px 20px -6px var(--accent-wash), inset 0 1px 2px rgba(255, 255, 255, 0.5);
+  --shadow-3d-btn-hover: 0 12px 28px -6px var(--accent-wash), inset 0 1px 2px rgba(255, 255, 255, 0.8);
+  --shadow-3d-btn-active: 0 2px 8px -2px var(--accent-wash), inset 0 1px 1px rgba(255, 255, 255, 0.3);
 
-  --shadow-xs: 0 1px 2px rgba(15, 23, 42, 0.04);
-  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.04), 0 1px 1px rgba(15, 23, 42, 0.03);
-  --shadow-md: 0 4px 10px -4px rgba(15, 23, 42, 0.1), 0 2px 4px -2px rgba(15, 23, 42, 0.06);
-  --shadow-lg: 0 16px 32px -12px rgba(15, 23, 42, 0.16), 0 4px 10px -4px rgba(15, 23, 42, 0.08);
+  --shadow-xs: 0 2px 4px rgba(0,0,0,0.02);
+  --shadow-sm: 0 4px 12px rgba(0,0,0,0.03);
+  --shadow-md: 0 12px 32px rgba(0,0,0,0.05);
+  --shadow-lg: 0 24px 48px rgba(0,0,0,0.08);
 
-  /* IBM Plex Sans/Mono, loaded via pinned+SRI'd jsdelivr links in index.html's <head> — the
-     system stack after them is a graceful-degradation fallback (matches this file's existing
-     "CDN might not load" posture for Chart.js/Leaflet), not the primary choice. */
-  --font-sans: 'IBM Plex Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
-    Oxygen, Ubuntu, Cantarell, 'Helvetica Neue', sans-serif;
-  --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', 'Cascadia Code', 'Roboto Mono', Consolas,
-    monospace;
-  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  /* Modern geometric fonts */
+  --font-sans: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', 'IBM Plex Mono', ui-monospace, monospace;
+  
+  /* Bouncy spring animations */
+  --ease: cubic-bezier(0.175, 0.885, 0.32, 1.15);
+  --ease-spring: cubic-bezier(0.175, 0.885, 0.32, 1.275);
 }
 
 * {
@@ -123,7 +123,16 @@ body {
   min-height: 100vh;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
-  background: var(--bg);
+  background-color: var(--bg);
+  background-image:
+    radial-gradient(at 40% 20%, hsla(28, 100%, 74%, 0.15) 0px, transparent 50%),
+    radial-gradient(at 80% 0%, hsla(189, 100%, 56%, 0.15) 0px, transparent 50%),
+    radial-gradient(at 0% 50%, hsla(355, 100%, 93%, 0.4) 0px, transparent 50%),
+    radial-gradient(at 80% 50%, hsla(340, 100%, 76%, 0.15) 0px, transparent 50%),
+    radial-gradient(at 0% 100%, hsla(22, 100%, 77%, 0.15) 0px, transparent 50%),
+    radial-gradient(at 80% 100%, hsla(242, 100%, 70%, 0.15) 0px, transparent 50%),
+    radial-gradient(at 0% 0%, hsla(343, 100%, 76%, 0.15) 0px, transparent 50%);
+  background-attachment: fixed;
 }
 
 /* ---- Topbar ---- */
@@ -134,9 +143,9 @@ body {
   justify-content: space-between;
   padding: 1.1rem 2rem;
   border-bottom: 1px solid var(--border);
-  background: rgba(249, 249, 247, 0.86);
-  backdrop-filter: blur(10px) saturate(1.1);
-  -webkit-backdrop-filter: blur(10px) saturate(1.1);
+  background: rgba(255, 255, 255, 0.4);
+  backdrop-filter: blur(24px) saturate(1.5);
+  -webkit-backdrop-filter: blur(24px) saturate(1.5);
   position: sticky;
   top: 0;
   z-index: 20;
@@ -235,19 +244,19 @@ body {
 
 .stat-card {
   position: relative;
-  background: var(--surface-strong);
+  background: var(--surface);
+  backdrop-filter: blur(20px) saturate(1.5);
+  -webkit-backdrop-filter: blur(20px) saturate(1.5);
   border: 1px solid var(--border);
-  border-bottom: 4px solid var(--border-3d);
   border-radius: var(--radius-lg);
   padding: 1.1rem 1.25rem 1.25rem;
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
   overflow: hidden;
-  box-shadow: 0 4px 6px -1px rgba(15, 23, 42, 0.05), 0 2px 4px -1px rgba(15, 23, 42, 0.03);
-  transition: transform 0.25s var(--ease), box-shadow 0.25s var(--ease), border-color 0.25s var(--ease), border-bottom-width 0.25s var(--ease);
+  box-shadow: var(--shadow-3d);
+  transition: transform 0.4s var(--ease-spring), box-shadow 0.4s var(--ease-spring), border-color 0.4s var(--ease-spring);
   transform-style: preserve-3d;
-  transform: translateY(-2px);
 }
 
 .stat-card::before {
@@ -257,13 +266,12 @@ body {
   left: 0;
   right: 0;
   height: 4px;
-  background: var(--accent);
+  background: linear-gradient(90deg, var(--accent), var(--accent-strong));
   opacity: 0.95;
 }
 
 .stat-card:hover {
-  transform: perspective(800px) rotateX(1.5deg) translateY(-4px);
-  border-bottom-width: 6px;
+  transform: translateY(-4px) scale(1.02);
   border-color: var(--border-strong);
   box-shadow: var(--shadow-3d-hover);
 }
@@ -499,20 +507,19 @@ body {
 }
 
 .panel {
-  background: var(--surface-strong);
+  background: var(--surface);
+  backdrop-filter: blur(20px) saturate(1.5);
+  -webkit-backdrop-filter: blur(20px) saturate(1.5);
   border: 1px solid var(--border);
-  border-bottom: 5px solid var(--border-3d);
   border-radius: var(--radius-lg);
   overflow: hidden;
-  box-shadow: 0 4px 6px -1px rgba(15, 23, 42, 0.05), 0 2px 4px -1px rgba(15, 23, 42, 0.03);
-  transition: transform 0.25s var(--ease), box-shadow 0.25s var(--ease), border-color 0.25s var(--ease), border-bottom-width 0.25s var(--ease);
+  box-shadow: var(--shadow-3d);
+  transition: transform 0.4s var(--ease-spring), box-shadow 0.4s var(--ease-spring), border-color 0.4s var(--ease-spring);
   transform-style: preserve-3d;
-  transform: translateY(-2px);
 }
 
 .panel:hover {
-  transform: perspective(1000px) rotateX(1.2deg) translateY(-4px);
-  border-bottom-width: 7px;
+  transform: translateY(-4px) scale(1.01);
   box-shadow: var(--shadow-3d-hover);
   border-color: var(--border-strong);
 }
@@ -1415,17 +1422,16 @@ tr.decision-step_up {
 .ai-widget-panel {
   width: min(390px, calc(100vw - 2rem));
   height: min(550px, calc(100vh - 8rem));
-  background: rgba(255, 255, 255, 0.88);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
+  background: var(--surface);
+  backdrop-filter: blur(24px) saturate(1.5);
+  -webkit-backdrop-filter: blur(24px) saturate(1.5);
   border: 1px solid var(--border);
-  border-bottom: 6px solid var(--border-3d);
   border-radius: var(--radius-lg);
-  box-shadow: 0 20px 40px rgba(15, 23, 42, 0.12);
+  box-shadow: var(--shadow-lg), var(--shadow-3d);
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  animation: ai-panel-in 0.3s var(--ease);
+  animation: ai-panel-in 0.4s var(--ease-spring);
 }
 
 @keyframes ai-panel-in {
@@ -1456,29 +1462,33 @@ tr.decision-step_up {
 }
 
 .ai-status-orb {
-  width: 9px;
-  height: 9px;
+  width: 12px;
+  height: 12px;
   border-radius: 50%;
-  background: #10b981;
-  box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.2);
-  transition: all 0.3s ease;
+  background: var(--allow);
+  box-shadow: 0 0 0 4px var(--allow-wash);
+  transition: all 0.3s var(--ease);
 }
 
 .ai-status-orb.thinking {
-  background: #f59e0b;
-  box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.3);
-  animation: pulse-thinking 1.2s ease-in-out infinite;
+  background: conic-gradient(from 0deg, var(--accent), var(--block), var(--stepup), var(--accent));
+  box-shadow: 0 0 12px var(--accent-wash);
+  animation: spin-thinking 1s linear infinite;
 }
 
 .ai-status-orb.answering {
-  background: #4f46e5;
-  box-shadow: 0 0 0 4px rgba(79, 70, 229, 0.3);
-  animation: pulse-thinking 0.6s ease-in-out infinite;
+  background: var(--accent);
+  box-shadow: 0 0 0 6px var(--accent-wash);
+  animation: pulse-answering 0.8s var(--ease-spring) infinite alternate;
 }
 
-@keyframes pulse-thinking {
-  0%, 100% { opacity: 0.6; transform: scale(0.9); }
-  50% { opacity: 1; transform: scale(1.15); }
+@keyframes spin-thinking {
+  100% { transform: rotate(360deg); }
+}
+
+@keyframes pulse-answering {
+  0% { transform: scale(1); box-shadow: 0 0 0 4px var(--accent-wash); }
+  100% { transform: scale(1.1); box-shadow: 0 0 0 8px var(--accent-wash); }
 }
 
 .ai-widget-header-text h2 {
