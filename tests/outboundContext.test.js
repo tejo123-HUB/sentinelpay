@@ -23,14 +23,14 @@ function insertUser(db, userId) {
   );
 }
 
-function insertTransaction(db, { senderId, receiverId, amount, msAgo, purpose = null, merchantId = null, referenceTransactionId = null, transactionId }) {
+function insertTransaction(db, { senderId, receiverId, amount, msAgo, purpose = null, merchantId = null, referenceTransactionId = null, transactionId, deviceId = null, decision = 'allow' }) {
   insertUser(db, senderId);
   insertUser(db, receiverId);
   const id = transactionId || `t_${Math.random().toString(36).slice(2)}`;
   db.prepare(
     `INSERT INTO transactions
-      (transaction_id, sender_id, receiver_id, amount, timestamp, transaction_type, fraud_score, decision, purpose, merchant_id, reference_transaction_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      (transaction_id, sender_id, receiver_id, amount, timestamp, transaction_type, fraud_score, decision, purpose, merchant_id, reference_transaction_id, device_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     id,
     senderId,
@@ -39,10 +39,11 @@ function insertTransaction(db, { senderId, receiverId, amount, msAgo, purpose = 
     new Date(NOW_MS - msAgo).toISOString(),
     'transfer',
     0,
-    'allow',
+    decision,
     purpose,
     merchantId,
-    referenceTransactionId
+    referenceTransactionId,
+    deviceId
   );
   return id;
 }
@@ -468,4 +469,44 @@ test('applyOutboundRestrictors: leaves score/reasons untouched below the review 
 
   assert.equal(score, 5);
   assert.deepEqual(reasons, ['existing reason']);
+});
+
+// ---- devicePriorFlagCount / suspiciousUserAgent (Section 16, Category 10) ----
+
+test('getOutboundContext: devicePriorFlagCount counts prior step_up/block transactions on this device, from any sender', () => {
+  const db = buildTestDb();
+  insertTransaction(db, { senderId: 'u_other', receiverId: 'u_x', amount: 10, msAgo: 60 * 60 * 1000, deviceId: 'd_bad', decision: 'block' });
+  insertTransaction(db, { senderId: 'u_other2', receiverId: 'u_x', amount: 10, msAgo: 30 * 60 * 1000, deviceId: 'd_bad', decision: 'step_up' });
+  insertTransaction(db, { senderId: 'u_other3', receiverId: 'u_x', amount: 10, msAgo: 30 * 60 * 1000, deviceId: 'd_bad', decision: 'allow' });
+
+  const context = getOutboundContext(db, { sender_id: 'm_biz', receiver_id: 'u_1', device_id: 'd_bad', timestamp: new Date(NOW_MS).toISOString() }, NOW_MS);
+
+  assert.equal(context.devicePriorFlagCount, 2);
+});
+
+test('getOutboundContext: devicePriorFlagCount ignores flags outside the lookback window', () => {
+  const db = buildTestDb();
+  insertTransaction(db, { senderId: 'u_other', receiverId: 'u_x', amount: 10, msAgo: 200 * 24 * 60 * 60 * 1000, deviceId: 'd_old_bad', decision: 'block' });
+
+  const context = getOutboundContext(db, { sender_id: 'm_biz', receiver_id: 'u_1', device_id: 'd_old_bad', timestamp: new Date(NOW_MS).toISOString() }, NOW_MS);
+
+  assert.equal(context.devicePriorFlagCount, 0);
+});
+
+test('getOutboundContext: devicePriorFlagCount is 0 with no device_id on this transaction', () => {
+  const db = buildTestDb();
+  const context = getOutboundContext(db, { sender_id: 'm_biz', receiver_id: 'u_1', device_id: null, timestamp: new Date(NOW_MS).toISOString() }, NOW_MS);
+
+  assert.equal(context.devicePriorFlagCount, 0);
+});
+
+test('getOutboundContext: suspiciousUserAgent is true for a known automation signature, false for a real browser UA', () => {
+  const db = buildTestDb();
+  const scripted = getOutboundContext(db, { sender_id: 'm_biz', receiver_id: 'u_1', user_agent: 'python-requests/2.31.0', timestamp: new Date(NOW_MS).toISOString() }, NOW_MS);
+  const browser = getOutboundContext(db, { sender_id: 'm_biz', receiver_id: 'u_1', user_agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', timestamp: new Date(NOW_MS).toISOString() }, NOW_MS);
+  const none = getOutboundContext(db, { sender_id: 'm_biz', receiver_id: 'u_1', timestamp: new Date(NOW_MS).toISOString() }, NOW_MS);
+
+  assert.equal(scripted.suspiciousUserAgent, true);
+  assert.equal(browser.suspiciousUserAgent, false);
+  assert.equal(none.suspiciousUserAgent, false);
 });

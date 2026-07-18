@@ -12,8 +12,10 @@ every payment gateway the business uses (Stripe, Razorpay, PayPal, etc.), giving
 view across gateways that no single gateway's own dashboard can show.
 
 See **`architecture.md`** for the full technical spec (schema, API contract, build plan,
-final thresholds, and every documented deviation from the original plan) and
-**`user-manual.md`** for a plain-language walkthrough with worked examples.
+final thresholds, and every documented deviation from the original plan),
+**`user-manual.md`** for a plain-language walkthrough with worked examples, and
+**`deployment-guide.md`** for running this somewhere beyond localhost (env vars, the PROD/DEMO
+stand-in map, Cloud Run/Spanner/Vertex AI migration path).
 
 ## Requirements
 

@@ -277,6 +277,31 @@ test('backgroundJob.runScanCycle: DoD scenario produces exactly one persisted al
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM structuring_alerts').get().n, 1);
 });
 
+test('backgroundJob.runScanCycle: a persisted structuring alert auto-blacklists its origin (FA198)', () => {
+  const db = buildTestDb();
+  const { transactions, nowMs } = buildStructuringScenario();
+
+  for (const userId of ['A', 'B', 'C', 'D', 'external']) insertUser(db, userId, iso(-3600000));
+  for (const t of transactions) insertTransaction(db, t);
+
+  const { checkFraudLists } = require('../server/fraudLists');
+  assert.equal(checkFraudLists(db, 'A', 'A').blacklisted, false);
+
+  runScanCycle(db, nowMs);
+
+  const afterFirst = checkFraudLists(db, 'A', 'A');
+  assert.equal(afterFirst.blacklisted, true);
+  assert.match(afterFirst.blacklistEntries[0].reason, /Auto-blacklisted: structuring alert/);
+
+  const auditRows = db.prepare("SELECT * FROM admin_audit_log WHERE target_id = 'A' AND action = 'auto-create'").all();
+  assert.equal(auditRows.length, 1);
+  assert.equal(auditRows[0].actor_ip, 'system');
+
+  // A second scan cycle (already-alerted account) must not spam a duplicate blacklist entry.
+  runScanCycle(db, nowMs + 5000);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM fraud_lists WHERE account_id = 'A'").get().n, 1);
+});
+
 test('backgroundJob.runScanCycle: a genuine long-term contact outside the recent-transactions lookback is not misclassified as a new fan-out receiver (regression)', () => {
   // Regression test: the fan-out "no prior history" check used to be derived from the same
   // LOOKBACK_MS-bounded (~45 min) transaction set fetched for split-detection, so a receiver
@@ -459,4 +484,32 @@ test('backgroundJob.runScanCycle: a circular-flow cycle is persisted as a struct
 
   const lookup = findActiveAlert(db, 'circ_a', 'someone_else', nowMs);
   assert.equal(lookup.active, true, 'an account in the cycle should be caught by the existing fast lookup with no changes to it');
+});
+
+test('backgroundJob.runScanCycle: a circular-flow alert does NOT auto-blacklist the business account that is its origin (regression)', () => {
+  // A circular-flow alert's sender_id is always one of the business's own registered accounts
+  // (detectCircularFlow's originIds come from business_accounts) -- auto-blacklisting FA198 must
+  // only ever apply to genuine structuring alerts, where sender_id is the actual suspected
+  // launderer, or it would force-block every future transaction touching the business's own
+  // account (blacklist floors the score regardless of direction) the moment its own money
+  // legitimately cycles back through a vendor/refund relationship.
+  const db = buildTestDb();
+  const nowMs = BASE_TIME;
+  db.prepare('INSERT INTO business_accounts (account_id, created_at) VALUES (?, ?)').run('m_circular_no_blacklist', iso(-3600000));
+
+  for (const userId of ['m_circular_no_blacklist', 'circ_x', 'circ_y']) insertUser(db, userId, iso(-3600000));
+  insertTransaction(db, { sender_id: 'm_circular_no_blacklist', receiver_id: 'circ_x', amount: 5000, timestamp: iso(-3000), transaction_type: 'transfer' });
+  insertTransaction(db, { sender_id: 'circ_x', receiver_id: 'circ_y', amount: 4800, timestamp: iso(-2000), transaction_type: 'transfer' });
+  insertTransaction(db, { sender_id: 'circ_y', receiver_id: 'm_circular_no_blacklist', amount: 4600, timestamp: iso(-1000), transaction_type: 'transfer' });
+
+  const created = runScanCycle(db, nowMs);
+  assert.ok(created.some((a) => a.reason.startsWith('Circular transaction pattern detected.')), 'expected a circular-flow alert to be created');
+
+  const { checkFraudLists } = require('../server/fraudLists');
+  assert.equal(
+    checkFraudLists(db, 'm_circular_no_blacklist', 'm_circular_no_blacklist').blacklisted,
+    false,
+    'the business account must not be auto-blacklisted just for being a circular-flow origin'
+  );
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM fraud_lists WHERE account_id = 'm_circular_no_blacklist'").get().n, 0);
 });

@@ -47,4 +47,31 @@ function computeMuleScore(db, accountId, nowMs) {
   };
 }
 
-module.exports = { computeMuleScore };
+// Section 17 (FA217, "Known Mule Database"): persists a confirmed mule to a standing record,
+// distinct from computeMuleScore's on-demand scoring above -- called once per outbound
+// transaction whose receiver is confirmed a mule (server/routes/transactions.js), not on every
+// score computation, so an account that stops qualifying later doesn't silently vanish from the
+// record the way a purely live-computed view would.
+/**
+ * @param {import('node:sqlite').DatabaseSync} db
+ * @param {string} accountId
+ * @param {number} qualifyingCycles
+ * @param {number} nowMs
+ */
+function recordConfirmedMule(db, accountId, qualifyingCycles, nowMs) {
+  const nowIso = new Date(nowMs).toISOString();
+  const existing = db.prepare('SELECT account_id FROM mule_accounts WHERE account_id = ?').get(accountId);
+  if (existing) {
+    db.prepare('UPDATE mule_accounts SET qualifying_cycles = ?, last_seen_at = ? WHERE account_id = ?').run(
+      qualifyingCycles,
+      nowIso,
+      accountId
+    );
+  } else {
+    db.prepare(
+      'INSERT INTO mule_accounts (account_id, qualifying_cycles, first_confirmed_at, last_seen_at) VALUES (?, ?, ?, ?)'
+    ).run(accountId, qualifyingCycles, nowIso, nowIso);
+  }
+}
+
+module.exports = { computeMuleScore, recordConfirmedMule };

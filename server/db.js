@@ -39,12 +39,20 @@ CREATE TABLE IF NOT EXISTS transactions (
   phone TEXT, -- optional, for shared-phone detection (Section 16, Category 11)
   email TEXT, -- optional, for shared-email detection (Section 16, Category 11)
   identity_hash TEXT, -- optional, caller-computed hash of a government ID (PAN/Aadhaar/etc) -- this system never receives or stores the raw document number, only an opaque token, so shared-identity-document detection works without collecting the PII itself (Section 16, Category 11)
+  user_agent TEXT, -- optional, self-reported HTTP client identifier, for device-reputation scoring (Section 16, Category 10); not PII, just a client string
+  state TEXT, -- optional, self-reported region/state, for High-Risk State Detection (Section 16, Category 12)
+  city TEXT, -- optional, self-reported city, for High-Risk City Detection (Section 16, Category 12)
   FOREIGN KEY (sender_id) REFERENCES users(user_id),
   FOREIGN KEY (receiver_id) REFERENCES users(user_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_transactions_sender ON transactions(sender_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_transactions_receiver ON transactions(receiver_id, timestamp);
+-- Section 17 (Category 10, Device Reputation Engine): outboundContext.js's devicePriorFlagCount
+-- query filters on device_id on every outbound transaction (the synchronous scoring hot path) --
+-- same "new hot-path query needs a supporting index" reasoning as idx_transactions_sender/receiver
+-- above, and idx_flags_transaction/idx_structuring_alerts_created_at before that.
+CREATE INDEX IF NOT EXISTS idx_transactions_device ON transactions(device_id, timestamp);
 
 CREATE TABLE IF NOT EXISTS flags (
   flag_id TEXT PRIMARY KEY,
@@ -225,6 +233,18 @@ CREATE TABLE IF NOT EXISTS scheduled_reports (
 );
 
 CREATE INDEX IF NOT EXISTS idx_scheduled_reports_type_period ON scheduled_reports(report_type, period_end);
+
+-- Section 17 (FA217, "Known Mule Database"): a real persisted registry of confirmed mule
+-- accounts, distinct from computeMuleScore's on-demand live scoring (server/muleScore.js) --
+-- populated by server/routes/transactions.js the moment an outbound transaction's receiver is
+-- confirmed a mule (isMule per MULE_DETECTION config), so a once-confirmed mule stays a matter of
+-- record even if it goes quiet, not just "currently scoring high."
+CREATE TABLE IF NOT EXISTS mule_accounts (
+  account_id TEXT PRIMARY KEY,
+  qualifying_cycles INTEGER NOT NULL,
+  first_confirmed_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL
+);
 `;
 
 function initDb(dbPath) {

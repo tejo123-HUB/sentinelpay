@@ -333,6 +333,134 @@ test('POST /transaction: a shared identity_hash is Critical severity (weight esc
   }
 });
 
+// ---- Device Reputation Engine (Section 16, Category 10) ----
+
+test('POST /transaction: a device with a prior flagged transaction is flagged on the next outbound payment', async () => {
+  const { server } = await freshServer();
+  try {
+    await request(server, 'POST', '/business-accounts', { account_id: 'm_device_reputation_e2e' });
+    // Also a business account: only outbound (business-initiated) transactions run rule scoring
+    // at all, so the "prior flagged transaction" this test relies on must itself be outbound.
+    await request(server, 'POST', '/business-accounts', { account_id: 'm_bad_device_owner' });
+
+    // Force a step_up/block on the first transaction via a huge amount (outboundRestrictor.js's
+    // review-threshold floor), so this device_id genuinely has a prior flagged decision recorded
+    // against it before the outbound payout below runs.
+    const flagged = await request(server, 'POST', '/transaction', validTransaction({
+      sender_id: 'm_bad_device_owner',
+      receiver_id: 'u_someone',
+      device_id: 'd_reputation_test',
+      amount: 9_999_999,
+    }));
+    assert.notEqual(flagged.body.decision, 'allow');
+
+    const payout = await request(
+      server,
+      'POST',
+      '/transaction',
+      validTransaction({
+        sender_id: 'm_device_reputation_e2e',
+        receiver_id: 'u_payout_target_device',
+        device_id: 'd_reputation_test',
+      })
+    );
+
+    assert.equal(payout.status, 201);
+    assert.ok(payout.body.reasons.some((r) => r.includes('previously associated with')));
+  } finally {
+    server.close();
+  }
+});
+
+test('POST /transaction: a scripted-client user_agent is flagged as a suspicious device signal', async () => {
+  const { server } = await freshServer();
+  try {
+    await request(server, 'POST', '/business-accounts', { account_id: 'm_ua_e2e' });
+
+    const payout = await request(
+      server,
+      'POST',
+      '/transaction',
+      validTransaction({
+        sender_id: 'm_ua_e2e',
+        receiver_id: 'u_payout_target_ua',
+        device_id: 'd_ua_test',
+        user_agent: 'curl/8.4.0',
+      })
+    );
+
+    assert.equal(payout.status, 201);
+    assert.ok(payout.body.reasons.some((r) => r.includes('automation/scripting signature')));
+  } finally {
+    server.close();
+  }
+});
+
+// ---- High-Risk State/City Detection (Section 16, Category 12) ----
+
+test('POST /transaction: a payout from a configured high-risk state is flagged', async () => {
+  const { server } = await freshServer();
+  try {
+    await request(server, 'POST', '/business-accounts', { account_id: 'm_state_risk_e2e' });
+
+    const payout = await request(
+      server,
+      'POST',
+      '/transaction',
+      validTransaction({ sender_id: 'm_state_risk_e2e', receiver_id: 'u_state_risk_target', state: 'XX-EXAMPLE-STATE' })
+    );
+
+    assert.equal(payout.status, 201);
+    assert.ok(payout.body.reasons.some((r) => r.includes('high-risk state/region')));
+  } finally {
+    server.close();
+  }
+});
+
+test('POST /transaction: a payout from a configured high-risk city is flagged, and state/city round-trip through GET /transactions', async () => {
+  const { server } = await freshServer();
+  try {
+    await request(server, 'POST', '/business-accounts', { account_id: 'm_city_risk_e2e' });
+
+    const payout = await request(
+      server,
+      'POST',
+      '/transaction',
+      validTransaction({ sender_id: 'm_city_risk_e2e', receiver_id: 'u_city_risk_target', city: 'Example Risk City' })
+    );
+
+    assert.equal(payout.status, 201);
+    assert.ok(payout.body.reasons.some((r) => r.includes('high-risk city')));
+
+    const listed = await request(server, 'GET', '/transactions?limit=5');
+    const match = listed.body.find((t) => t.transaction_id === payout.body.transaction_id);
+    assert.equal(match.city, 'Example Risk City');
+  } finally {
+    server.close();
+  }
+});
+
+test('POST /transaction: user_agent is accepted but not echoed back in the response or GET /transactions', async () => {
+  const { server } = await freshServer();
+  try {
+    const posted = await request(
+      server,
+      'POST',
+      '/transaction',
+      validTransaction({ sender_id: 'u_ua_privacy_1', receiver_id: 'u_ua_privacy_2', user_agent: 'Mozilla/5.0 test-browser' })
+    );
+    assert.equal(posted.status, 201);
+    assert.equal(posted.body.user_agent, undefined);
+
+    const listed = await request(server, 'GET', '/transactions?limit=5');
+    const match = listed.body.find((t) => t.transaction_id === posted.body.transaction_id);
+    assert.ok(match);
+    assert.equal(match.user_agent, undefined);
+  } finally {
+    server.close();
+  }
+});
+
 test('POST /transaction: a repeat-dispute customer elevates a refund\'s risk (Section 15.16, Feature 8)', async () => {
   const { server } = await freshServer();
   try {

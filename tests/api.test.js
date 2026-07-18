@@ -422,6 +422,30 @@ test('GET /health: does not require an API key (liveness check stays open)', asy
   }
 });
 
+test('GET /health/metrics: requires an API key and reports real request/error counts (Section 17, FA234)', async () => {
+  const { server } = await freshServer();
+  try {
+    const unauthed = await request(server, 'GET', '/health/metrics', null, { 'X-API-Key': undefined });
+    assert.equal(unauthed.status, 401);
+
+    // A couple of ordinary requests first, so requests.total is genuinely > 0 by the time we ask.
+    await request(server, 'GET', '/health');
+    await request(server, 'GET', '/transactions');
+
+    const res = await request(server, 'GET', '/health/metrics');
+    assert.equal(res.status, 200);
+    assert.equal(res.body.status, 'ok');
+    assert.ok(res.body.uptime_seconds >= 0);
+    assert.ok(res.body.requests.total >= 3, 'should count at least the two priming requests plus this one');
+    assert.equal(res.body.requests.errors, 0);
+    assert.equal(res.body.requests.error_rate_percent, 0);
+    assert.ok(res.body.memory.heap_used_mb > 0);
+    assert.ok(res.body.process.pid > 0);
+  } finally {
+    server.close();
+  }
+});
+
 test('every response carries the standard security headers (regression)', async () => {
   const { server } = await freshServer();
   try {

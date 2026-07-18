@@ -8,6 +8,8 @@ const MAX_PURPOSE_LENGTH = 256; // freeform note text, longer than an id but sti
 // real traffic, single-transaction or structuring.
 const MAX_AMOUNT = 10_000_000;
 const MAX_COUNTRY_LENGTH = 8; // ISO 3166-1 alpha-2/alpha-3 codes fit comfortably; generous bound, not a strict enum
+const MAX_USER_AGENT_LENGTH = 512; // real browser/mobile UA strings run 100-300 chars; generous headroom, not a strict format
+const MAX_LOCATION_NAME_LENGTH = 64; // state/city names -- generous bound, not a strict format (Section 16, Category 12)
 
 /**
  * Validates and normalizes a POST /transaction request body.
@@ -35,6 +37,9 @@ function validateTransactionInput(body) {
     phone,
     email,
     identity_hash,
+    user_agent,
+    state,
+    city,
   } = body;
 
   if (typeof sender_id !== 'string' || sender_id.trim() === '' || sender_id.length > MAX_ID_LENGTH) {
@@ -115,6 +120,15 @@ function validateTransactionInput(body) {
   if (typeof identity_hash === 'string' && identity_hash.length > MAX_ID_LENGTH) {
     return { valid: false, error: `identity_hash must be at most ${MAX_ID_LENGTH} characters` };
   }
+  if (typeof user_agent === 'string' && user_agent.length > MAX_USER_AGENT_LENGTH) {
+    return { valid: false, error: `user_agent must be at most ${MAX_USER_AGENT_LENGTH} characters` };
+  }
+  if (typeof state === 'string' && state.length > MAX_LOCATION_NAME_LENGTH) {
+    return { valid: false, error: `state must be at most ${MAX_LOCATION_NAME_LENGTH} characters` };
+  }
+  if (typeof city === 'string' && city.length > MAX_LOCATION_NAME_LENGTH) {
+    return { valid: false, error: `city must be at most ${MAX_LOCATION_NAME_LENGTH} characters` };
+  }
 
   return {
     valid: true,
@@ -135,8 +149,11 @@ function validateTransactionInput(body) {
       phone: typeof phone === 'string' ? phone : null,
       email: typeof email === 'string' ? email : null,
       identity_hash: typeof identity_hash === 'string' ? identity_hash : null,
+      user_agent: typeof user_agent === 'string' ? user_agent : null,
+      state: typeof state === 'string' ? state : null,
+      city: typeof city === 'string' ? city : null,
     },
   };
 }
 
-module.exports = { validateTransactionInput, VALID_TRANSACTION_TYPES, MAX_AMOUNT, MAX_PURPOSE_LENGTH, MAX_ID_LENGTH, MAX_COUNTRY_LENGTH };
+module.exports = { validateTransactionInput, VALID_TRANSACTION_TYPES, MAX_AMOUNT, MAX_PURPOSE_LENGTH, MAX_ID_LENGTH, MAX_COUNTRY_LENGTH, MAX_USER_AGENT_LENGTH, MAX_LOCATION_NAME_LENGTH };
