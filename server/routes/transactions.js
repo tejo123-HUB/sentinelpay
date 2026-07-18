@@ -28,6 +28,8 @@ const applyOutboundRestrictors = require('../outboundRestrictor');
 const { checkFraudLists } = require('../fraudLists');
 const { dispatchCriticalAlert } = require('../notifications');
 const { evaluateCustomRules } = require('../customRules');
+const { recordConfirmedMule } = require('../muleScore');
+const { autoWatchlistConfirmedMule } = require('../autoFraudListing');
 
 const velocity = require('../rules/velocity');
 const impossibleTravel = require('../rules/impossibleTravel');
@@ -52,6 +54,7 @@ const employeeFraud = require('../rules/employeeFraud');
 const crossGatewayStructuring = require('../rules/crossGatewayStructuring');
 const duplicateTransaction = require('../rules/duplicateTransaction');
 const sharedIdentifierRisk = require('../rules/sharedIdentifierRisk');
+const deviceFingerprintRisk = require('../rules/deviceFingerprintRisk');
 
 const RULE_DETECTORS = [
   { type: 'velocity', check: velocity },
@@ -83,6 +86,7 @@ const OUTBOUND_RULE_DETECTORS = [
   { type: 'cross_gateway_structuring', check: crossGatewayStructuring },
   { type: 'duplicate_transaction', check: duplicateTransaction },
   { type: 'shared_identifier_risk', check: sharedIdentifierRisk },
+  { type: 'device_fingerprint_risk', check: deviceFingerprintRisk },
 ];
 
 const DEFAULT_LIST_LIMIT = 50;
@@ -161,6 +165,14 @@ router.post('/transaction', requireApiKey, requireRole('analyst'), async (req, r
       const userHistory = getUserHistory(db, input.sender_id, nowMs);
       const outboundContext = getOutboundContext(db, input, nowMs);
 
+      // FA217/FA199: the moment this transaction's receiver is confirmed a mule (real-time, not
+      // a batch job), persist it to the standing mule_accounts record and auto-watchlist it --
+      // see server/muleScore.js's recordConfirmedMule and server/autoFraudListing.js for why.
+      if (outboundContext.receiverMuleScore && outboundContext.receiverMuleScore.isMule) {
+        recordConfirmedMule(db, input.receiver_id, outboundContext.receiverMuleScore.qualifyingCycles, nowMs);
+        autoWatchlistConfirmedMule(db, input.receiver_id, outboundContext.receiverMuleScore.qualifyingCycles);
+      }
+
       // Section 16, Category 19: custom rules are DB rows, not files, so they're fetched fresh
       // per request (not statically imported like RULE_DETECTORS/OUTBOUND_RULE_DETECTORS) --
       // this is what makes them editable via the API without a redeploy. Only enabled rules are
@@ -196,8 +208,8 @@ router.post('/transaction', requireApiKey, requireRole('analyst'), async (req, r
 
     db.prepare(
       `INSERT INTO transactions
-        (transaction_id, sender_id, receiver_id, amount, timestamp, location_lat, location_lng, device_id, merchant_id, purpose, transaction_type, fraud_score, decision, reference_transaction_id, employee_id, country, ip_address, latency_ms, confidence, phone, email, identity_hash)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        (transaction_id, sender_id, receiver_id, amount, timestamp, location_lat, location_lng, device_id, merchant_id, purpose, transaction_type, fraud_score, decision, reference_transaction_id, employee_id, country, ip_address, latency_ms, confidence, phone, email, identity_hash, user_agent, state, city)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       transactionId,
       input.sender_id,
@@ -220,7 +232,10 @@ router.post('/transaction', requireApiKey, requireRole('analyst'), async (req, r
       confidence,
       input.phone,
       input.email,
-      input.identity_hash
+      input.identity_hash,
+      input.user_agent,
+      input.state,
+      input.city
     );
 
     const flagInsert = db.prepare(
@@ -276,6 +291,8 @@ router.post('/transaction', requireApiKey, requireRole('analyst'), async (req, r
         employee_id: input.employee_id,
         country: input.country,
         ip_address: input.ip_address,
+        state: input.state,
+        city: input.city,
       });
     }
 
@@ -370,6 +387,8 @@ router.get('/transactions', requireApiKey, (req, res) => {
       employee_id: row.employee_id,
       country: row.country,
       ip_address: row.ip_address,
+      state: row.state,
+      city: row.city,
       reasons: reasonsByTransaction.get(row.transaction_id) || [],
       risk_breakdown: breakdownByTransaction.get(row.transaction_id) || [],
       severity: overallSeverity(breakdownByTransaction.get(row.transaction_id) || []),

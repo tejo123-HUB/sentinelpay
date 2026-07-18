@@ -92,6 +92,54 @@ test('GET /analytics/top-frauds: counts flag types across transactions', async (
   }
 });
 
+// ---- GET /analytics/fraud-signatures (Section 17, FA216) ----
+
+test('GET /analytics/fraud-signatures: returns the full catalog, including signatures that have never fired', async () => {
+  const { server } = await freshServer();
+  try {
+    const res = await request(server, 'GET', '/analytics/fraud-signatures');
+    assert.equal(res.status, 200);
+    assert.ok(res.body.length >= 27, `expected at least 27 catalog entries, got ${res.body.length}`);
+
+    const velocity = res.body.find((s) => s.flag_type === 'velocity');
+    assert.ok(velocity);
+    assert.equal(velocity.occurrences, 0);
+    assert.ok(velocity.description.length > 0);
+    assert.ok(velocity.category.length > 0);
+  } finally {
+    server.close();
+  }
+});
+
+test('GET /analytics/fraud-signatures: occurrences reflect real flags table counts', async () => {
+  const { server } = await freshServer();
+  try {
+    await request(server, 'POST', '/business-accounts', { account_id: 'm_signatures_test' });
+    // A large payout to a receiver never paid before -- deterministically triggers
+    // payout_new_receiver at MIN_OUTBOUND_HISTORY_FOR_CHECK=3, so prime that history first.
+    for (let i = 0; i < 3; i += 1) {
+      await request(server, 'POST', '/transaction', validTransaction({ sender_id: 'm_signatures_test', receiver_id: `u_sig_known_${i}`, amount: 50 }));
+    }
+    await request(server, 'POST', '/transaction', validTransaction({ sender_id: 'm_signatures_test', receiver_id: 'u_sig_new', amount: 100 }));
+
+    const res = await request(server, 'GET', '/analytics/fraud-signatures');
+    const payoutSig = res.body.find((s) => s.flag_type === 'payout_new_receiver');
+    assert.ok(payoutSig.occurrences >= 1);
+  } finally {
+    server.close();
+  }
+});
+
+test('GET /analytics/fraud-signatures requires an API key', async () => {
+  const { server } = await freshServer();
+  try {
+    const res = await request(server, 'GET', '/analytics/fraud-signatures', null, { 'X-API-Key': undefined });
+    assert.equal(res.status, 401);
+  } finally {
+    server.close();
+  }
+});
+
 test('GET /analytics/top-risky: rejects an invalid dimension and accepts a valid one', async () => {
   const { server } = await freshServer();
   try {
@@ -142,6 +190,56 @@ test('GET /analytics/mule-accounts: excludes the business\'s own registered acco
     const res = await request(server, 'GET', '/analytics/mule-accounts');
     assert.equal(res.status, 200);
     assert.ok(!res.body.some((r) => r.account_id === 'm_mule_exclude_test'));
+  } finally {
+    server.close();
+  }
+});
+
+// ---- GET /analytics/known-mules + auto-watchlist (Section 17, FA198/FA217) ----
+
+test('POST /transaction: a confirmed mule receiver is auto-watchlisted and persisted to the known-mules registry on its next receipt', async () => {
+  const { server } = await freshServer();
+  try {
+    await request(server, 'POST', '/business-accounts', { account_id: 'm_mule_hook_a' });
+    await request(server, 'POST', '/business-accounts', { account_id: 'm_mule_hook_b' });
+    await request(server, 'POST', '/business-accounts', { account_id: 'm_mule_hook_c' });
+
+    // Two full receive-then-quickly-drain cycles complete the MULE_MIN_QUALIFYING_CYCLES (2)
+    // threshold. isMule is only evaluated at the moment of a *receipt* (outboundContext is only
+    // computed for outbound transactions, and only the receiving side is scored here) -- so a
+    // third, later receipt is what actually observes the now-qualified mule status and fires the
+    // auto-watchlist/persist hook, not the withdrawal legs themselves (u_mule_hook isn't a
+    // registered business account, so its own outbound withdrawals are never scored).
+    await request(server, 'POST', '/transaction', validTransaction({ sender_id: 'm_mule_hook_a', receiver_id: 'u_mule_hook', amount: 1000, timestamp: '2026-07-18T09:00:00Z' }));
+    await request(server, 'POST', '/transaction', validTransaction({ sender_id: 'u_mule_hook', receiver_id: 'u_downstream_a', amount: 900, timestamp: '2026-07-18T09:05:00Z' }));
+    await request(server, 'POST', '/transaction', validTransaction({ sender_id: 'm_mule_hook_b', receiver_id: 'u_mule_hook', amount: 1000, timestamp: '2026-07-18T09:10:00Z' }));
+    await request(server, 'POST', '/transaction', validTransaction({ sender_id: 'u_mule_hook', receiver_id: 'u_downstream_b', amount: 950, timestamp: '2026-07-18T09:15:00Z' }));
+
+    const beforeThirdReceipt = await request(server, 'GET', '/analytics/known-mules');
+    assert.ok(!beforeThirdReceipt.body.some((r) => r.account_id === 'u_mule_hook'));
+
+    await request(server, 'POST', '/transaction', validTransaction({ sender_id: 'm_mule_hook_c', receiver_id: 'u_mule_hook', amount: 500, timestamp: '2026-07-18T09:20:00Z' }));
+
+    const known = await request(server, 'GET', '/analytics/known-mules');
+    assert.equal(known.status, 200);
+    const entry = known.body.find((r) => r.account_id === 'u_mule_hook');
+    assert.ok(entry, 'expected u_mule_hook in the persisted known-mules registry');
+    assert.ok(entry.qualifying_cycles >= 2);
+
+    const fraudLists = await request(server, 'GET', '/fraud-lists?list_type=watchlist');
+    const watchlistEntry = fraudLists.body.find((r) => r.account_id === 'u_mule_hook');
+    assert.ok(watchlistEntry, 'expected u_mule_hook to be auto-watchlisted');
+    assert.match(watchlistEntry.reason, /Auto-watchlisted: confirmed mule account/);
+  } finally {
+    server.close();
+  }
+});
+
+test('GET /analytics/known-mules requires an API key', async () => {
+  const { server } = await freshServer();
+  try {
+    const res = await request(server, 'GET', '/analytics/known-mules', null, { 'X-API-Key': undefined });
+    assert.equal(res.status, 401);
   } finally {
     server.close();
   }
@@ -222,6 +320,80 @@ test('analytics routes require an API key', async () => {
   const { server } = await freshServer();
   try {
     const res = await request(server, 'GET', '/analytics/summary', null, { 'X-API-Key': undefined });
+    assert.equal(res.status, 401);
+  } finally {
+    server.close();
+  }
+});
+
+// ---- GET /analytics/risk-profile (Section 16, Categories 6/7/8) ----
+
+test('GET /analytics/risk-profile: rejects an invalid dimension or a missing id', async () => {
+  const { server } = await freshServer();
+  try {
+    const badDimension = await request(server, 'GET', '/analytics/risk-profile?dimension=not_real&id=x');
+    assert.equal(badDimension.status, 400);
+
+    const missingId = await request(server, 'GET', '/analytics/risk-profile?dimension=merchants');
+    assert.equal(missingId.status, 400);
+  } finally {
+    server.close();
+  }
+});
+
+test('GET /analytics/risk-profile: an entity with no transaction history gets a neutral 100 health score', async () => {
+  const { server } = await freshServer();
+  try {
+    const res = await request(server, 'GET', '/analytics/risk-profile?dimension=merchants&id=m_never_seen');
+    assert.equal(res.status, 200);
+    assert.equal(res.body.health_score, 100);
+    assert.equal(res.body.total_transactions, 0);
+    assert.equal(res.body.risk_tier, 'Low');
+    assert.deepEqual(res.body.recent_transactions, []);
+  } finally {
+    server.close();
+  }
+});
+
+test('GET /analytics/risk-profile: a merchant with a flagged payout gets a lowered health score and traceable flag detail', async () => {
+  const { server } = await freshServer();
+  try {
+    await request(server, 'POST', '/business-accounts', { account_id: 'm_profile_test' });
+    // newVendorRisk.js only activates once this business account has at least
+    // MIN_OUTBOUND_HISTORY_FOR_CHECK (3) prior outbound payments -- otherwise every business's
+    // very first payout would be a guaranteed false positive. Prime that history first.
+    for (let i = 0; i < 3; i += 1) {
+      await request(server, 'POST', '/transaction', validTransaction({ sender_id: 'm_profile_test', receiver_id: `u_known_vendor_${i}`, amount: 100 }));
+    }
+    // A large payout to a receiver this merchant has never paid before triggers new_vendor_risk
+    // (payoutToNewReceiver.js) at step-up-or-above severity -- a real flags-table row, not just an
+    // outboundRestrictor reason, so flagged_transactions/top_flag_types have something to count.
+    const posted = await request(
+      server,
+      'POST',
+      '/transaction',
+      validTransaction({ sender_id: 'm_profile_test', receiver_id: 'u_new_vendor_profile', amount: 60000 })
+    );
+    assert.notEqual(posted.body.decision, 'allow');
+
+    const profile = await request(server, 'GET', '/analytics/risk-profile?dimension=merchants&id=m_profile_test');
+    assert.equal(profile.status, 200);
+    assert.equal(profile.body.total_transactions, 4);
+    assert.ok(profile.body.flagged_transactions >= 1);
+    assert.ok(profile.body.health_score < 100);
+    assert.notEqual(profile.body.risk_tier, undefined);
+    assert.ok(profile.body.top_flag_types.some((f) => f.flag_type === 'new_vendor_risk'));
+    assert.equal(profile.body.recent_transactions.length, 4);
+    assert.equal(profile.body.recent_transactions[0].transaction_id, posted.body.transaction_id);
+  } finally {
+    server.close();
+  }
+});
+
+test('GET /analytics/risk-profile requires an API key', async () => {
+  const { server } = await freshServer();
+  try {
+    const res = await request(server, 'GET', '/analytics/risk-profile?dimension=merchants&id=x', null, { 'X-API-Key': undefined });
     assert.equal(res.status, 401);
   } finally {
     server.close();

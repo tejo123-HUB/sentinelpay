@@ -35,6 +35,7 @@ const casesRouter = require('./routes/cases');
 const notificationsRouter = require('./routes/notifications');
 const customRulesRouter = require('./routes/customRules');
 const scheduledReportsRouter = require('./routes/scheduledReports');
+const graphRouter = require('./routes/graph');
 const { startScheduledReportsJob } = require('./scheduledReports');
 const { attachWebSocketServer } = require('./websocket');
 const { startStructuringJob } = require('./structuring/backgroundJob');
@@ -59,8 +60,47 @@ app.use(express.json());
 
 app.locals.db = db;
 
+// Section 17 (FA234, Health Monitoring): a real aggregated metrics view, beyond the plain
+// liveness check below. Counted in-process (no new dependency, no new table) -- resets on
+// restart, same as any other in-memory counter this project already relies on (e.g.
+// rateLimit.js's per-IP window). Middleware runs early (right after the request enters the app)
+// so every request is counted, not just ones that reach a specific router.
+const metrics = { requestCount: 0, errorCount: 0, startedAtMs: Date.now() };
+app.use((req, res, next) => {
+  metrics.requestCount += 1;
+  res.on('finish', () => {
+    if (res.statusCode >= 500) metrics.errorCount += 1;
+  });
+  next();
+});
+
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok' });
+});
+
+// GET /health/metrics -- requires an API key (unlike the plain liveness check above): request
+// volume and error-rate figures are internal operational detail, not something an unauthenticated
+// prober needs, consistent with this project's existing security posture (everything but the
+// static /health body sits behind requireApiKey). Deliberately not exempt from rate limiting
+// either (unlike /health) since, unlike that endpoint, this one is not a static, zero-cost body.
+app.get('/health/metrics', require('./middleware/apiKeyAuth').requireApiKey, (req, res) => {
+  const uptimeSeconds = (Date.now() - metrics.startedAtMs) / 1000;
+  const mem = process.memoryUsage();
+  res.status(200).json({
+    status: 'ok',
+    uptime_seconds: Number(uptimeSeconds.toFixed(1)),
+    process: { node_version: process.version, pid: process.pid },
+    memory: {
+      rss_mb: Number((mem.rss / 1024 / 1024).toFixed(1)),
+      heap_used_mb: Number((mem.heapUsed / 1024 / 1024).toFixed(1)),
+      heap_total_mb: Number((mem.heapTotal / 1024 / 1024).toFixed(1)),
+    },
+    requests: {
+      total: metrics.requestCount,
+      errors: metrics.errorCount,
+      error_rate_percent: metrics.requestCount > 0 ? Number(((metrics.errorCount / metrics.requestCount) * 100).toFixed(2)) : 0,
+    },
+  });
 });
 
 const dashboardDir = path.join(__dirname, '..', 'dashboard');
@@ -120,6 +160,7 @@ app.use('/', casesRouter);
 app.use('/', notificationsRouter);
 app.use('/', customRulesRouter);
 app.use('/', scheduledReportsRouter);
+app.use('/', graphRouter);
 app.use(express.static(dashboardDir));
 
 // Malformed JSON body -> 400 with a clear message, instead of falling through to the

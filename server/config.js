@@ -51,7 +51,10 @@ const GEO_RISK = {
   // Feature 14: configurable high-risk geography. Country codes are illustrative examples, not
   // a real risk assessment -- an operator would tune this list to their own compliance guidance.
   HIGH_RISK_COUNTRIES: ['KP', 'IR', 'SY'],
-  HIGH_RISK_STATES: [],
+  // Section 16, Category 12: illustrative examples only, same as HIGH_RISK_COUNTRIES above -- an
+  // operator would tune these to their own compliance guidance, not this hackathon demo's list.
+  HIGH_RISK_STATES: ['XX-EXAMPLE-STATE'],
+  HIGH_RISK_CITIES: ['Example Risk City'],
   // IP address prefixes (simple startsWith match -- no real GeoIP/CIDR library dependency,
   // consistent with this project's dependency-light conventions).
   HIGH_RISK_IP_PREFIXES: ['198.51.100.'],
@@ -102,6 +105,27 @@ const SHARED_IDENTIFIER_RISK = {
   SHARED_IDENTIFIER_LOOKBACK_MS: 30 * 24 * 60 * 60 * 1000, // 30 days
 };
 
+const DEVICE_FINGERPRINT_RISK = {
+  // Section 16, Category 10: device_id is self-reported by the calling gateway (same convention
+  // as ip_address/country), not attested by a native OS -- so this can score reputation and
+  // automation signals visible in that report, but it cannot detect rooting/emulation, which
+  // needs real device attestation only a native mobile SDK can provide (out of scope, see
+  // architecture.md Section 16 Category 10).
+  //
+  // How far back to look for *other* transactions -- from any sender, any device -- that used
+  // this same device_id and were themselves flagged (step_up/block). A device genuinely
+  // associated with prior fraud is a stronger signal than "device is merely shared" (that's
+  // sharedIdentifierRisk.js's job) -- this is "shared AND that other usage was itself bad."
+  DEVICE_PRIOR_FLAG_LOOKBACK_MS: 90 * 24 * 60 * 60 * 1000, // 90 days
+  DEVICE_PRIOR_FLAG_THRESHOLD: 1, // at least one prior flagged/blocked transaction on this device
+  DEVICE_PRIOR_FLAG_WEIGHT: 45,
+  // Self-reported user_agent strings identifying scripted/automated clients rather than a real
+  // browser or mobile app -- a weaker, heuristic signal (an automation tool can lie about its UA
+  // just as easily as a real one), so it's scored lower than the prior-fraud-history signal above.
+  SUSPICIOUS_UA_PATTERN: /bot|curl|wget|python-requests|headless|phantomjs|selenium|scrapy/i,
+  SUSPICIOUS_UA_WEIGHT: 20,
+};
+
 const FRAUD_LISTS = {
   // Section 16, Categories 19/21: an active blacklist entry floors the score here (above the
   // block threshold), regardless of direction or what rule/ML scoring alone would have produced
@@ -135,5 +159,6 @@ module.exports = {
   CIRCULAR_FLOW,
   DUPLICATE_DETECTION,
   SHARED_IDENTIFIER_RISK,
+  DEVICE_FINGERPRINT_RISK,
   FRAUD_LISTS,
 };

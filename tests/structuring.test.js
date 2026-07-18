@@ -277,6 +277,31 @@ test('backgroundJob.runScanCycle: DoD scenario produces exactly one persisted al
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM structuring_alerts').get().n, 1);
 });
 
+test('backgroundJob.runScanCycle: a persisted structuring alert auto-blacklists its origin (FA198)', () => {
+  const db = buildTestDb();
+  const { transactions, nowMs } = buildStructuringScenario();
+
+  for (const userId of ['A', 'B', 'C', 'D', 'external']) insertUser(db, userId, iso(-3600000));
+  for (const t of transactions) insertTransaction(db, t);
+
+  const { checkFraudLists } = require('../server/fraudLists');
+  assert.equal(checkFraudLists(db, 'A', 'A').blacklisted, false);
+
+  runScanCycle(db, nowMs);
+
+  const afterFirst = checkFraudLists(db, 'A', 'A');
+  assert.equal(afterFirst.blacklisted, true);
+  assert.match(afterFirst.blacklistEntries[0].reason, /Auto-blacklisted: structuring alert/);
+
+  const auditRows = db.prepare("SELECT * FROM admin_audit_log WHERE target_id = 'A' AND action = 'auto-create'").all();
+  assert.equal(auditRows.length, 1);
+  assert.equal(auditRows[0].actor_ip, 'system');
+
+  // A second scan cycle (already-alerted account) must not spam a duplicate blacklist entry.
+  runScanCycle(db, nowMs + 5000);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM fraud_lists WHERE account_id = 'A'").get().n, 1);
+});
+
 test('backgroundJob.runScanCycle: a genuine long-term contact outside the recent-transactions lookback is not misclassified as a new fan-out receiver (regression)', () => {
   // Regression test: the fan-out "no prior history" check used to be derived from the same
   // LOOKBACK_MS-bounded (~45 min) transaction set fetched for split-detection, so a receiver

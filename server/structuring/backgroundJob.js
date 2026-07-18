@@ -8,6 +8,7 @@ const detectSplits = require('./splitDetection');
 const correlateWithdrawal = require('./withdrawalCorrelation');
 const detectCircularFlow = require('./circularFlow');
 const { CIRCULAR_FLOW } = require('../config');
+const { autoBlacklistStructuringOrigin } = require('../autoFraudListing');
 
 const DEFAULT_INTERVAL_MS = Number(process.env.STRUCTURING_JOB_INTERVAL_MS) || 7000;
 // Only need to look as far back as the longest window any detector cares about, plus a buffer.
@@ -124,6 +125,10 @@ function runScanCycle(db, nowMs = Date.now()) {
         alert.reason,
         alert.created_at
       );
+      // FA198: a confirmed structuring/circular-flow pattern auto-blacklists its origin -- see
+      // autoFraudListing.js for why this is the real "Auto Blacklisting" trigger, not just the
+      // operator-driven POST /fraud-lists.
+      autoBlacklistStructuringOrigin(db, alert);
     }
   }
 

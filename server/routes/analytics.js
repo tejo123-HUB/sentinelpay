@@ -9,6 +9,7 @@ const router = express.Router();
 const { requireApiKey } = require('../middleware/apiKeyAuth');
 const { computeMuleScore } = require('../muleScore');
 const { buildXlsxWorkbook } = require('../xlsxWriter');
+const { FRAUD_SIGNATURES } = require('../fraudSignatures');
 
 const DEFAULT_TOP_LIMIT = 10;
 const MAX_TOP_LIMIT = 100;
@@ -84,6 +85,25 @@ router.get('/analytics/top-frauds', requireApiKey, (req, res) => {
   res.json(rows.map((r) => ({ flag_type: r.flag_type, count: r.count, avg_weight: Number(r.avg_weight.toFixed(2)) })));
 });
 
+// GET /analytics/fraud-signatures -- Section 17 (FA216, "Fraud Signature Database"): the full
+// catalog of every flag_type this system can produce (server/fraudSignatures.js), each with a
+// human-readable description and its live occurrence count -- unlike top-frauds below, a
+// signature that has never fired still appears here with occurrences: 0, since this is a
+// database of *known signatures*, not a ranking of *observed* ones.
+router.get('/analytics/fraud-signatures', requireApiKey, (req, res) => {
+  const db = req.app.locals.db;
+
+  const countRows = db.prepare('SELECT flag_type, COUNT(*) AS n FROM flags GROUP BY flag_type').all();
+  const countsByType = new Map(countRows.map((r) => [r.flag_type, r.n]));
+
+  res.json(
+    FRAUD_SIGNATURES.map((sig) => ({
+      ...sig,
+      occurrences: countsByType.get(sig.flag_type) || 0,
+    }))
+  );
+});
+
 // GET /analytics/top-risky?dimension=customers|merchants|employees|vendors|devices|ips|countries&limit=10
 // One generic endpoint instead of eight near-identical ones (Feature 15's "top risky
 // customers/merchants/employees/vendors/devices/IPs/countries" panels) -- avoids duplicating the
@@ -118,6 +138,102 @@ router.get('/analytics/top-risky', requireApiKey, (req, res) => {
   res.json(rows.map((r) => ({ key: r.key, flagged_count: r.flagged_count, total_amount: Number(r.total_amount.toFixed(2)) })));
 });
 
+// GET /analytics/risk-profile?dimension=customers|merchants|vendors|employees|devices&id=...
+// Section 16, Categories 6/7/8 (Customer/Merchant/Vendor Intelligence): a dedicated per-entity
+// risk profile -- "Customer Risk Score/Profile", "Merchant Health Score", "Vendor Trust Score" --
+// beyond the ranked top-risky list (which only ever answers "who's riskiest right now", not "how
+// risky is this specific ID"). Reuses the exact same dimension/column/purpose-filter convention as
+// GET /analytics/top-risky (`vendors`/`customers` both key off receiver_id, split by refund
+// purpose, same as that handler) -- no new tables, same "reuse existing database" reasoning as the
+// rest of Feature 18/19.
+router.get('/analytics/risk-profile', requireApiKey, (req, res) => {
+  const db = req.app.locals.db;
+  const dimension = req.query.dimension;
+  const id = req.query.id;
+  if (!VALID_DIMENSIONS.includes(dimension)) {
+    return res.status(400).json({ error: `dimension must be one of: ${VALID_DIMENSIONS.join(', ')}` });
+  }
+  if (typeof id !== 'string' || id.trim() === '') {
+    return res.status(400).json({ error: 'id is required' });
+  }
+  const column = DIMENSION_COLUMN[dimension];
+
+  let purposeClause = '';
+  if (dimension === 'customers') purposeClause = "AND LOWER(purpose) LIKE '%refund%'";
+  if (dimension === 'vendors') purposeClause = "AND (purpose IS NULL OR LOWER(purpose) NOT LIKE '%refund%')";
+
+  const totals = db
+    .prepare(
+      `SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN decision = 'block' THEN 1 ELSE 0 END) AS blocked,
+        SUM(CASE WHEN decision = 'step_up' THEN 1 ELSE 0 END) AS step_up,
+        COALESCE(SUM(amount), 0) AS total_amount,
+        COALESCE(AVG(fraud_score), 0) AS avg_fraud_score,
+        MAX(timestamp) AS last_activity
+       FROM transactions
+       WHERE ${column} = ? ${purposeClause}`
+    )
+    .get(id);
+
+  const total = totals.total || 0;
+  const flaggedRow = db
+    .prepare(
+      `SELECT COUNT(DISTINCT f.transaction_id) AS n
+       FROM flags f JOIN transactions t ON t.transaction_id = f.transaction_id
+       WHERE t.${column} = ? ${purposeClause}`
+    )
+    .get(id);
+  const flaggedCount = flaggedRow.n || 0;
+
+  const topFlagTypes = db
+    .prepare(
+      `SELECT f.flag_type, COUNT(*) AS count
+       FROM flags f JOIN transactions t ON t.transaction_id = f.transaction_id
+       WHERE t.${column} = ? ${purposeClause}
+       GROUP BY f.flag_type ORDER BY count DESC LIMIT 5`
+    )
+    .all(id);
+
+  const recentTransactions = db
+    .prepare(
+      `SELECT transaction_id, amount, timestamp, decision, fraud_score
+       FROM transactions WHERE ${column} = ? ${purposeClause}
+       ORDER BY timestamp DESC LIMIT 10`
+    )
+    .all(id);
+
+  // Explainability (CLAUDE.md hard rule: every score needs a human-readable reason, not just a
+  // number): health_score is the inverse of average fraud_score across this entity's own
+  // transaction history -- a plain, directly-traceable formula, not a black box. An entity with
+  // no transaction history gets a neutral 100 (no evidence either way), same "innocent until a
+  // signal says otherwise" default this project already uses for new vendors/receivers elsewhere.
+  const healthScore = total > 0 ? Math.round(Math.max(0, Math.min(100, 100 - totals.avg_fraud_score))) : 100;
+  let riskTier = 'Low';
+  if (total > 0) {
+    const flaggedRatio = flaggedCount / total;
+    if (flaggedRatio >= 0.5 || healthScore < 40) riskTier = 'High';
+    else if (flaggedRatio >= 0.2 || healthScore < 70) riskTier = 'Medium';
+  }
+
+  res.json({
+    dimension,
+    id,
+    health_score: healthScore,
+    risk_tier: riskTier,
+    total_transactions: total,
+    flagged_transactions: flaggedCount,
+    flagged_ratio: total > 0 ? Number((flaggedCount / total).toFixed(4)) : 0,
+    blocked: totals.blocked || 0,
+    step_up: totals.step_up || 0,
+    total_amount: Number((totals.total_amount || 0).toFixed(2)),
+    avg_fraud_score: Number((totals.avg_fraud_score || 0).toFixed(2)),
+    last_activity: totals.last_activity || null,
+    top_flag_types: topFlagTypes.map((r) => ({ flag_type: r.flag_type, count: r.count })),
+    recent_transactions: recentTransactions,
+  });
+});
+
 // GET /analytics/mule-accounts?limit=10 — top suspected mule accounts (Feature 13's dashboard
 // consumer), computed over the most-active recent receivers rather than every account ever seen.
 router.get('/analytics/mule-accounts', requireApiKey, (req, res) => {
@@ -142,6 +258,22 @@ router.get('/analytics/mule-accounts', requireApiKey, (req, res) => {
     .slice(0, limit);
 
   res.json(scored);
+});
+
+// GET /analytics/known-mules?limit=10 -- Section 17 (FA217, "Known Mule Database"): the persisted
+// registry (mule_accounts table), populated in real time by POST /transaction the moment a
+// receiver is confirmed a mule -- distinct from GET /analytics/mule-accounts above, which
+// re-scores a bounded scan of recent receivers live, on every call. This is what makes it a real
+// "database" (a standing record of accounts) rather than an on-demand computation.
+router.get('/analytics/known-mules', requireApiKey, (req, res) => {
+  const db = req.app.locals.db;
+  const limit = clampLimit(req.query.limit);
+
+  const rows = db
+    .prepare('SELECT account_id, qualifying_cycles, first_confirmed_at, last_seen_at FROM mule_accounts ORDER BY qualifying_cycles DESC, last_seen_at DESC LIMIT ?')
+    .all(limit);
+
+  res.json(rows);
 });
 
 // GET /analytics/gateway-comparison — per-merchant_id (gateway) volume/fraud comparison, for the

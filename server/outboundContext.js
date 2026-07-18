@@ -26,7 +26,7 @@ const OUTBOUND_MIN_PURCHASE_AGE_MS = 5 * 60 * 1000;
 // Section 15.16 (Features 1/2/3/7/9): refund-integrity fields, computed alongside the fields
 // above so every outbound detector shares one context object and one calling convention
 // (check(transaction, outboundContext)) rather than each rule querying the DB independently.
-const { REFUND_INTEGRITY, MERCHANT_TAKEOVER, FRIENDLY_FRAUD, EMPLOYEE_FRAUD, CROSS_GATEWAY, DUPLICATE_DETECTION, SHARED_IDENTIFIER_RISK } = require('./config');
+const { REFUND_INTEGRITY, MERCHANT_TAKEOVER, FRIENDLY_FRAUD, EMPLOYEE_FRAUD, CROSS_GATEWAY, DUPLICATE_DETECTION, SHARED_IDENTIFIER_RISK, DEVICE_FINGERPRINT_RISK } = require('./config');
 const { computeMuleScore } = require('./muleScore');
 const { isBusinessAccount } = require('./businessAccounts');
 
@@ -286,6 +286,29 @@ function getOutboundContext(db, transaction, nowMs) {
   const sharedEmailAccountIds = findSharedAccountIds('email', transaction.email);
   const sharedIdentityHashAccountIds = findSharedAccountIds('identity_hash', transaction.identity_hash);
 
+  // Section 16, Category 10: Device Reputation Engine. device_id is self-reported by the calling
+  // gateway (same trust level as ip_address/country elsewhere in this file), so this can't detect
+  // rooting/emulation -- but it can score two real, observable signals: has this exact device_id
+  // been attached to a prior flagged (step_up/block) transaction, from *any* sender, recently? A
+  // device genuinely tied to prior fraud is a materially stronger signal than "device is merely
+  // shared" (sharedIdentifierRisk.js's job, above) -- this is "shared AND that other usage was
+  // itself bad." No age gate beyond the lookback window: unlike the refund-credit fields above,
+  // there's no forgery incentive here (an attacker can't retroactively un-flag a past transaction).
+  const devicePriorFlagSince = new Date(nowMs - DEVICE_FINGERPRINT_RISK.DEVICE_PRIOR_FLAG_LOOKBACK_MS).toISOString();
+  const devicePriorFlagCount = transaction.device_id
+    ? db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM transactions WHERE device_id = ? AND decision IN ('step_up', 'block') AND timestamp >= ? AND timestamp <= ?"
+        )
+        .get(transaction.device_id, devicePriorFlagSince, transaction.timestamp).n
+    : 0;
+
+  // Self-reported user_agent matching a known automation/scripting signature -- a weaker,
+  // heuristic signal (an automation tool can lie about its UA just as easily as a real one), so
+  // it's scored lower than devicePriorFlagCount above.
+  const suspiciousUserAgent =
+    typeof transaction.user_agent === 'string' && DEVICE_FINGERPRINT_RISK.SUSPICIOUS_UA_PATTERN.test(transaction.user_agent);
+
   return {
     priorPurchaseTotal: priorPurchase.total,
     priorRefundTotal: priorRefund.total,
@@ -314,6 +337,8 @@ function getOutboundContext(db, transaction, nowMs) {
     sharedPhoneAccountIds,
     sharedEmailAccountIds,
     sharedIdentityHashAccountIds,
+    devicePriorFlagCount,
+    suspiciousUserAgent,
   };
 }
 
