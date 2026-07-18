@@ -1,11 +1,15 @@
 // Section 17 (FA041/FA043/FA044/FA045/FA053): a real graph-data endpoint, closing the "the data
 // model supports the query, no dedicated endpoint" gap the Section 17 verification pass found for
 // Relationship Graph / Transaction Graph / Graph-Based AML / Suspicious Network / Network Risk
-// Scoring. Returns a plain {nodes, edges} JSON structure an investigator (or a future frontend
-// graph widget) can render -- not a graph database, not a clustering algorithm, and not a UI
-// library (Community Detection/Graph Clustering/Interactive Graph Visualization remain explicitly
-// out of scope, Section 16 Category 4), just the SQL self-joins this project already uses
+// Scoring. Returns a plain {nodes, edges} JSON structure an investigator (or the dashboard's Graph
+// tab, dashboard/graph.js) can render, reusing the SQL self-joins this project already uses
 // elsewhere (structuring, sharedIdentifierRisk) reshaped into a graph-shaped response.
+//
+// Community Detection/Graph Clustering (originally out of scope here) is now real, via the
+// Continuous Learning Extension's server/graphIntelligence.js union-find pass over the persisted
+// graph_edges table -- see enrichNodesWithGraphIntelligence below and GET /graph/clusters.
+// Interactive Graph Visualization (also originally out of scope) is now real too, via
+// dashboard/graph.js's canvas force-directed layout consuming this endpoint -- see the Graph tab.
 const express = require('express');
 const router = express.Router();
 
@@ -50,12 +54,13 @@ function fetchTransactionCounterparties(db, accountId) {
 // reassignment should stop mattering.
 function fetchSharedIdentifierLinks(db, accountId) {
   const ownValues = db
-    .prepare('SELECT DISTINCT device_id, ip_address, identity_hash FROM transactions WHERE sender_id = ?')
+    .prepare('SELECT DISTINCT device_id, ip_address, identity_hash, bank_account_hash FROM transactions WHERE sender_id = ?')
     .all(accountId);
 
   const deviceIds = [...new Set(ownValues.map((r) => r.device_id).filter(Boolean))];
   const ipAddresses = [...new Set(ownValues.map((r) => r.ip_address).filter(Boolean))];
   const identityHashes = [...new Set(ownValues.map((r) => r.identity_hash).filter(Boolean))];
+  const bankAccountHashes = [...new Set(ownValues.map((r) => r.bank_account_hash).filter(Boolean))];
 
   const links = [];
   function findLinked(column, values, edgeType) {
@@ -74,6 +79,7 @@ function fetchSharedIdentifierLinks(db, accountId) {
   findLinked('device_id', deviceIds, 'shared_device');
   findLinked('ip_address', ipAddresses, 'shared_ip');
   findLinked('identity_hash', identityHashes, 'shared_identity_hash');
+  findLinked('bank_account_hash', bankAccountHashes, 'shared_bank_account');
 
   return links;
 }

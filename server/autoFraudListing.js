@@ -8,6 +8,7 @@
 const crypto = require('node:crypto');
 const { checkFraudLists } = require('./fraudLists');
 const { recordAdminAction } = require('./adminAuditLog');
+const { AUTO_WHITELIST } = require('./config');
 
 /**
  * Auto-blacklists a structuring/circular-flow alert's origin the moment the background job
@@ -75,4 +76,40 @@ function autoWatchlistConfirmedMule(db, accountId, qualifyingCycles) {
   });
 }
 
-module.exports = { autoBlacklistStructuringOrigin, autoWatchlistConfirmedMule };
+/**
+ * Auto-whitelists an account with enough clean transaction volume and a low enough composite
+ * reputation risk score (server/reputation.js) -- the real "Auto Whitelisting" trigger the prior
+ * autoWatchlistConfirmedMule name suggested but never actually did (it auto-*watchlists* mules,
+ * the opposite end of the trust spectrum). Idempotent and audit-logged, same pattern as the two
+ * functions above.
+ * @param {import('node:sqlite').DatabaseSync} db
+ * @param {string} accountId
+ * @param {number} txnCount
+ * @param {number} reputationScore - 0 (clean) to 100 (risky)
+ */
+function autoWhitelistTrustedAccount(db, accountId, txnCount, reputationScore) {
+  if (txnCount < AUTO_WHITELIST.MIN_TXN_COUNT || reputationScore > AUTO_WHITELIST.MAX_REPUTATION_SCORE) return;
+
+  const existing = checkFraudLists(db, accountId, accountId);
+  if (existing.blacklisted || existing.whitelisted) return; // already whitelisted, or a confirmed bad actor shouldn't be auto-whitelisted regardless of a since-diluted score
+
+  const entryId = `fl_${crypto.randomUUID()}`;
+  const nowIso = new Date().toISOString();
+  const reason = `Auto-whitelisted: ${txnCount} clean transactions, reputation risk score ${Math.round(reputationScore)}/100`;
+  db.prepare('INSERT INTO fraud_lists (entry_id, list_type, account_id, reason, created_at) VALUES (?, ?, ?, ?, ?)').run(
+    entryId,
+    'whitelist',
+    accountId,
+    reason,
+    nowIso
+  );
+  recordAdminAction(db, {
+    action: 'auto-create',
+    targetType: 'fraud_list:whitelist',
+    targetId: accountId,
+    detail: reason,
+    actorIp: 'system',
+  });
+}
+
+module.exports = { autoBlacklistStructuringOrigin, autoWatchlistConfirmedMule, autoWhitelistTrustedAccount };

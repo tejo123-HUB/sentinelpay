@@ -26,7 +26,7 @@ const OUTBOUND_MIN_PURCHASE_AGE_MS = 5 * 60 * 1000;
 // Section 15.16 (Features 1/2/3/7/9): refund-integrity fields, computed alongside the fields
 // above so every outbound detector shares one context object and one calling convention
 // (check(transaction, outboundContext)) rather than each rule querying the DB independently.
-const { REFUND_INTEGRITY, MERCHANT_TAKEOVER, FRIENDLY_FRAUD, EMPLOYEE_FRAUD, CROSS_GATEWAY, DUPLICATE_DETECTION, SHARED_IDENTIFIER_RISK, DEVICE_FINGERPRINT_RISK } = require('./config');
+const { REFUND_INTEGRITY, MERCHANT_TAKEOVER, FRIENDLY_FRAUD, EMPLOYEE_FRAUD, CROSS_GATEWAY, DUPLICATE_DETECTION, SHARED_IDENTIFIER_RISK, DEVICE_FINGERPRINT_RISK, SYNTHETIC_IDENTITY } = require('./config');
 const { computeMuleScore } = require('./muleScore');
 const { isBusinessAccount } = require('./businessAccounts');
 const { getBaseline } = require('./adaptiveBaseline');
@@ -307,6 +307,26 @@ function getOutboundContext(db, transaction, nowMs) {
   const sharedPhoneAccountIds = findSharedAccountIds('phone', transaction.phone);
   const sharedEmailAccountIds = findSharedAccountIds('email', transaction.email);
   const sharedIdentityHashAccountIds = findSharedAccountIds('identity_hash', transaction.identity_hash);
+  // Partial-Feature Completion Pass (Graph Intelligence): same shared-identifier reduction as the
+  // four fields above, for a caller-computed bank account hash -- never the raw account number.
+  const sharedBankAccountAccountIds = findSharedAccountIds('bank_account_hash', transaction.bank_account_hash);
+
+  // Partial-Feature Completion Pass (Identity Intelligence): how many *distinct* (phone, email,
+  // identity_hash) identity combinations this transaction's device_id has been associated with
+  // recently -- server/rules/syntheticIdentityRisk.js's synthetic-identity-mill signal. Computed
+  // before this transaction's own row is inserted, so it reflects prior activity only.
+  let deviceDistinctIdentityCount = 0;
+  if (transaction.device_id) {
+    const syntheticIdentitySince = new Date(nowMs - SYNTHETIC_IDENTITY.WINDOW_MS).toISOString();
+    deviceDistinctIdentityCount = db
+      .prepare(
+        `SELECT DISTINCT COALESCE(phone, ''), COALESCE(email, ''), COALESCE(identity_hash, '')
+         FROM transactions
+         WHERE device_id = ? AND (phone IS NOT NULL OR email IS NOT NULL OR identity_hash IS NOT NULL)
+           AND timestamp >= ? AND timestamp <= ?`
+      )
+      .all(transaction.device_id, syntheticIdentitySince, transaction.timestamp).length;
+  }
 
   // Section 16, Category 10: Device Reputation Engine. device_id is self-reported by the calling
   // gateway (same trust level as ip_address/country elsewhere in this file), so this can't detect
@@ -359,6 +379,8 @@ function getOutboundContext(db, transaction, nowMs) {
     sharedPhoneAccountIds,
     sharedEmailAccountIds,
     sharedIdentityHashAccountIds,
+    sharedBankAccountAccountIds,
+    deviceDistinctIdentityCount,
     devicePriorFlagCount,
     suspiciousUserAgent,
     lastRefundToCustomerAt,

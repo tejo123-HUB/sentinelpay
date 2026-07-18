@@ -6,13 +6,13 @@
 // never being configured -- this mirrors the existing per-client error isolation in
 // websocket.js's broadcast(), just for notification channels instead of WebSocket clients.
 //
-// Web Push Notifications are the one item in this category NOT implemented here: it needs a
-// browser-side service worker, a real subscribed browser, and per-subscription VAPID/ECDH
-// encryption -- a fundamentally different kind of feature (a client-side subscription flow, not
-// a server-side webhook POST) than the other six, and this project has no dashboard-side push
-// subscription UI to drive it. Documented as a real, specific gap in architecture.md Section 16,
-// not silently omitted.
+// Web Push Notifications (Partial-Feature Completion Pass): now implemented in server/webPush.js
+// (VAPID request auth + aes128gcm encryption, RFC 8291/8292, no `web-push` dependency), wired into
+// dispatchCriticalAlert below alongside the other six channels. dashboard/app.js's
+// initPushNotifications() + dashboard/sw.js provide the browser-side subscription flow and service
+// worker this previously had no UI to drive.
 const NOTIFICATION_TIMEOUT_MS = 3000; // generous relative to a webhook POST, but bounded so a slow/unreachable service never blocks the caller for long
+const { dispatchWebPushToAllSubscriptions } = require('./webPush');
 
 async function postJson(url, body, extraHeaders = {}) {
   const res = await fetch(url, {
@@ -155,7 +155,10 @@ const CHANNEL_SENDERS = {
 // same reasoning as websocket.js's per-client try/catch in broadcast(). Never throws; the caller
 // (POST /transaction) fires this after responding to the gateway, so a slow/broken notification
 // channel never adds latency to the scoring decision itself.
-async function dispatchCriticalAlert(message) {
+// `db`, if provided, also dispatches to every stored Web Push subscription -- optional (not every
+// caller has a db handle in scope, and unconfigured VAPID keys make it a no-op anyway) rather than
+// widening every existing caller's signature by requiring it.
+async function dispatchCriticalAlert(message, db) {
   const results = {};
   await Promise.all(
     Object.entries(CHANNEL_SENDERS).map(async ([channel, send]) => {
@@ -166,6 +169,17 @@ async function dispatchCriticalAlert(message) {
       }
     })
   );
+  if (db) {
+    try {
+      // dashboard/sw.js's 'push' handler expects JSON ({title, body}) so it can render a proper
+      // native notification, unlike the other channels above which all take a plain message string.
+      const pushPayload = JSON.stringify({ title: 'SentinelPay Critical Fraud Alert', body: message });
+      const pushResult = await dispatchWebPushToAllSubscriptions(db, pushPayload);
+      results.web_push = { sent: pushResult.sent > 0, count: pushResult.sent };
+    } catch (err) {
+      results.web_push = { sent: false, reason: err.message };
+    }
+  }
   return results;
 }
 

@@ -29,7 +29,8 @@ const { checkFraudLists } = require('../fraudLists');
 const { dispatchCriticalAlert } = require('../notifications');
 const { evaluateCustomRules } = require('../customRules');
 const { recordConfirmedMule } = require('../muleScore');
-const { autoWatchlistConfirmedMule } = require('../autoFraudListing');
+const { autoWatchlistConfirmedMule, autoWhitelistTrustedAccount } = require('../autoFraudListing');
+const { applyRuleWeightMultipliers } = require('../adaptiveRuleWeights');
 const { updateBaseline } = require('../adaptiveBaseline');
 const { computeFeatureVector, updateEntityBaselinesAfterTransaction } = require('../featureStore');
 const { computeReputationScore, updateReputationAfterTransaction } = require('../reputation');
@@ -60,6 +61,8 @@ const duplicateTransaction = require('../rules/duplicateTransaction');
 const sharedIdentifierRisk = require('../rules/sharedIdentifierRisk');
 const deviceFingerprintRisk = require('../rules/deviceFingerprintRisk');
 const entityReputationRisk = require('../rules/entityReputationRisk');
+const deviceIntegrityRisk = require('../rules/deviceIntegrityRisk');
+const syntheticIdentityRisk = require('../rules/syntheticIdentityRisk');
 
 const RULE_DETECTORS = [
   { type: 'velocity', check: velocity },
@@ -93,6 +96,12 @@ const OUTBOUND_RULE_DETECTORS = [
   { type: 'shared_identifier_risk', check: sharedIdentifierRisk },
   { type: 'device_fingerprint_risk', check: deviceFingerprintRisk },
   { type: 'entity_reputation_risk', check: entityReputationRisk },
+  { type: 'device_integrity_risk', check: deviceIntegrityRisk },
+  // synthetic_identity_risk needs outboundContext.deviceDistinctIdentityCount, so it belongs in
+  // this list (whose callers pass outboundContext as the second check() argument), not
+  // RULE_DETECTORS above (whose callers pass userHistory, which has no such field -- placing it
+  // there would have made it silently never fire).
+  { type: 'synthetic_identity_risk', check: syntheticIdentityRisk },
 ];
 
 const DEFAULT_LIST_LIMIT = 50;
@@ -220,6 +229,11 @@ router.post('/transaction', requireApiKey, requireRole('analyst'), async (req, r
         ...evaluateCustomRules(input, enabledCustomRules),
       ];
       mlProbability = await getFraudProbability(input, userHistory, db);
+      // Automation (Adaptive Rule Learning): scales each flagged detector's weight by its
+      // learned multiplier (server/adaptiveRuleWeights.js), recomputed periodically from real
+      // analyst verdicts -- a no-op (multiplier 1) for any flag_type with no stored adjustment
+      // yet, so this is purely additive over the fixed per-detector weights already computed above.
+      ruleResults = applyRuleWeightMultipliers(db, ruleResults);
     }
 
     let { score, reasons, riskBreakdown, severity, confidence } = computeFraudScore(ruleResults, structuringLookup, mlProbability, fraudListCheck);
@@ -243,8 +257,8 @@ router.post('/transaction', requireApiKey, requireRole('analyst'), async (req, r
 
     db.prepare(
       `INSERT INTO transactions
-        (transaction_id, sender_id, receiver_id, amount, timestamp, location_lat, location_lng, device_id, merchant_id, purpose, transaction_type, fraud_score, decision, reference_transaction_id, employee_id, country, ip_address, latency_ms, confidence, phone, email, identity_hash, user_agent, state, city)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        (transaction_id, sender_id, receiver_id, amount, timestamp, location_lat, location_lng, device_id, merchant_id, purpose, transaction_type, fraud_score, decision, reference_transaction_id, employee_id, country, ip_address, latency_ms, confidence, phone, email, identity_hash, user_agent, state, city, bank_account_hash)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       transactionId,
       input.sender_id,
@@ -270,7 +284,8 @@ router.post('/transaction', requireApiKey, requireRole('analyst'), async (req, r
       input.identity_hash,
       input.user_agent,
       input.state,
-      input.city
+      input.city,
+      input.bank_account_hash
     );
 
     const flagInsert = db.prepare(
@@ -312,6 +327,21 @@ router.post('/transaction', requireApiKey, requireRole('analyst'), async (req, r
     // flagged" for reputation purposes rather than an error.
     updateReputationAfterTransaction(db, { ...input, transaction_id: transactionId }, ruleResults);
 
+    // Automation (real Auto Whitelisting -- see autoFraudListing.js's autoWhitelistTrustedAccount
+    // header comment for why the prior "auto-whitelist" function never actually did this), using
+    // the reputation score just bumped above. Scoped to outbound transactions only, same as every
+    // other scoring-related mechanism in this pipeline (WHITELIST_CEILING only meaningfully
+    // changes an outcome for outbound-scored transactions -- an inbound transaction never runs
+    // rules/ML in the first place, so whitelisting it has no real scoring effect) -- checking it
+    // unconditionally would add two extra reputation reads to every single inbound "auto-allow"
+    // request, the cheapest and most frequent path in this pipeline, for no behavioral benefit.
+    if (outbound) {
+      for (const accountId of [input.sender_id, input.receiver_id]) {
+        const reputation = computeReputationScore(db, accountId, 'user');
+        autoWhitelistTrustedAccount(db, accountId, reputation.txnCount, reputation.score);
+      }
+    }
+
     // Continuous Learning Extension: the persisted graph store (server/graphIntelligence.js),
     // replacing GET /graph/relationships' live self-joins for the edges a transaction actually
     // produces. The transaction edge runs for every transaction; the shared-identifier edges only
@@ -323,6 +353,7 @@ router.post('/transaction', requireApiKey, requireRole('analyst'), async (req, r
       for (const otherId of oc.sharedDeviceAccountIds) upsertEdge(db, input.sender_id, otherId, 'shared_device', 0, input.timestamp);
       for (const otherId of oc.sharedIpAccountIds) upsertEdge(db, input.sender_id, otherId, 'shared_ip', 0, input.timestamp);
       for (const otherId of oc.sharedIdentityHashAccountIds) upsertEdge(db, input.sender_id, otherId, 'shared_identity_hash', 0, input.timestamp);
+      for (const otherId of oc.sharedBankAccountAccountIds) upsertEdge(db, input.sender_id, otherId, 'shared_bank_account', 0, input.timestamp);
     }
 
     // Section 15.16, Feature 17: every response includes fraud_score, decision, severity,
@@ -380,7 +411,7 @@ router.post('/transaction', requireApiKey, requireRole('analyst'), async (req, r
     // .catch is kept as a defensive backstop against an unexpected synchronous throw.
     if (severity === 'Critical') {
       const alertMessage = `[SentinelPay] Critical fraud alert: ${transactionId} (${input.sender_id} -> ${input.receiver_id}, ${input.amount}) blocked at score ${score}. ${reasons.join('; ')}`;
-      dispatchCriticalAlert(alertMessage).catch(() => {});
+      dispatchCriticalAlert(alertMessage, db).catch(() => {});
     }
 
     res.status(201).json(responseBody);

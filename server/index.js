@@ -36,6 +36,9 @@ const notificationsRouter = require('./routes/notifications');
 const customRulesRouter = require('./routes/customRules');
 const scheduledReportsRouter = require('./routes/scheduledReports');
 const graphRouter = require('./routes/graph');
+const entityIntelligenceRouter = require('./routes/entityIntelligence');
+const caseEvidenceRouter = require('./routes/caseEvidence');
+const aiRouter = require('./routes/ai');
 const { startScheduledReportsJob } = require('./scheduledReports');
 const { attachWebSocketServer } = require('./websocket');
 const { startStructuringJob } = require('./structuring/backgroundJob');
@@ -161,6 +164,9 @@ app.use('/', notificationsRouter);
 app.use('/', customRulesRouter);
 app.use('/', scheduledReportsRouter);
 app.use('/', graphRouter);
+app.use('/', entityIntelligenceRouter);
+app.use('/', caseEvidenceRouter);
+app.use('/', aiRouter);
 app.use(express.static(dashboardDir));
 
 // Malformed JSON body -> 400 with a clear message, instead of falling through to the

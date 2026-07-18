@@ -68,6 +68,39 @@ test('GET /graph/relationships: rejects a missing account_id', async () => {
   }
 });
 
+test('GET /graph/relationships: surfaces a shared_bank_account link (Partial-Feature Completion Pass)', async () => {
+  const { server } = await freshServer();
+  try {
+    await request(server, 'POST', '/business-accounts', { account_id: 'm_bank_biz' });
+    await request(
+      server,
+      'POST',
+      '/transaction',
+      validTransaction({ sender_id: 'm_bank_biz', receiver_id: 'u_vendor_1', amount: 500, timestamp: '2026-07-18T09:00:00Z', bank_account_hash: 'hash_shared_1' })
+    );
+    await request(
+      server,
+      'POST',
+      '/transaction',
+      validTransaction({ sender_id: 'u_other_account', receiver_id: 'u_someone_else', amount: 20, timestamp: '2026-07-18T09:01:00Z', bank_account_hash: 'hash_shared_1' })
+    );
+    await request(
+      server,
+      'POST',
+      '/transaction',
+      validTransaction({ sender_id: 'm_bank_biz', receiver_id: 'u_vendor_2', amount: 30, timestamp: '2026-07-18T09:02:00Z', bank_account_hash: 'hash_shared_1' })
+    );
+
+    const res = await request(server, 'GET', '/graph/relationships?account_id=m_bank_biz');
+    assert.equal(res.status, 200);
+    const bankLink = res.body.edges.find((e) => e.type === 'shared_bank_account');
+    assert.ok(bankLink, 'expected a shared_bank_account edge');
+    assert.equal(bankLink.target, 'u_other_account');
+  } finally {
+    server.close();
+  }
+});
+
 test('GET /graph/relationships requires an API key', async () => {
   const { server } = await freshServer();
   try {
