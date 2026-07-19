@@ -1246,9 +1246,28 @@ tr.decision-step_up {
   width: 100%;
   height: 480px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--surface-sunken);
+  border-radius: var(--radius-lg);
+  background:
+    radial-gradient(ellipse at 50% 0%, rgba(139, 92, 246, 0.08), transparent 60%),
+    var(--surface-sunken);
   overflow: hidden;
+  box-shadow: var(--shadow-3d);
+  /* Perspective depth for the tilted stage inside -- the further along z an element sits, the
+     more a rotateX reads as "receding floor" rather than a flat skew. */
+  perspective: 1400px;
+}
+
+/* The stage is the element that actually tilts (driven by --tilt-x/--tilt-y, updated on
+   pointer-move in graph.js for a subtle parallax "look into the scene" effect). Kept separate
+   from graph-canvas-wrap so the wrap's overflow:hidden/border-radius aren't fighting a
+   transformed child's own stacking context. */
+.graph-canvas-stage {
+  width: 100%;
+  height: 100%;
+  transform-style: preserve-3d;
+  transform: rotateX(calc(6deg + var(--tilt-x, 0deg))) rotateY(var(--tilt-y, 0deg));
+  transition: transform 0.4s var(--ease);
+  will-change: transform;
 }
 
 .graph-canvas-wrap canvas {
@@ -1258,12 +1277,93 @@ tr.decision-step_up {
   cursor: grab;
 }
 
+.graph-canvas-wrap canvas:active {
+  cursor: grabbing;
+}
+
 .graph-canvas-wrap .empty-state {
   position: absolute;
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
   margin: 0;
+  z-index: 2;
+}
+
+.graph-legend {
+  position: absolute;
+  left: 1rem;
+  bottom: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.55rem 0.75rem;
+  background: var(--surface-strong);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-sm);
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  pointer-events: none;
+  z-index: 3;
+}
+
+.graph-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  white-space: nowrap;
+}
+
+.graph-legend-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  box-shadow: inset 0 -1px 1px rgba(0, 0, 0, 0.25), 0 0 0 2px rgba(255, 255, 255, 0.6);
+  flex-shrink: 0;
+}
+
+.graph-zoom-controls {
+  position: absolute;
+  right: 1rem;
+  bottom: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  z-index: 3;
+}
+
+.graph-zoom-controls button {
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  background: var(--surface-strong);
+  border: 1px solid var(--border);
+  border-bottom: 2px solid var(--border-3d);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font-size: 0.95rem;
+  font-weight: 700;
+  line-height: 1;
+  box-shadow: var(--shadow-xs);
+  transition: all 0.12s var(--ease);
+}
+
+.graph-zoom-controls button:hover {
+  transform: translateY(-1px);
+  border-bottom-width: 3px;
+  background: var(--accent-wash);
+  color: var(--accent-strong);
+  border-color: var(--accent-strong);
+}
+
+.graph-zoom-controls button:active {
+  transform: translateY(1px);
+  border-bottom-width: 1px;
 }
 
 .graph-status {
@@ -1587,6 +1687,18 @@ tr.decision-step_up {
   align-items: flex-end;
   gap: 0.5rem;
   max-width: 100%;
+  animation: ai-msg-in 0.32s var(--ease-spring);
+}
+
+@keyframes ai-msg-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 .ai-msg-user {
@@ -1611,6 +1723,7 @@ tr.decision-step_up {
   background: linear-gradient(145deg, var(--accent), var(--accent-strong));
   color: #fff;
   font-size: 0.85rem;
+  box-shadow: 0 0 0 3px var(--accent-wash), 0 2px 6px rgba(0, 0, 0, 0.15);
 }
 
 .ai-msg-user .ai-avatar {
@@ -1884,6 +1997,15 @@ tr.decision-step_up {
 
   .ai-widget-fab:hover,
   .ai-widget-fab.ai-widget-fab-active {
+    transform: none;
+  }
+
+  .ai-msg {
+    animation: none;
+  }
+
+  .graph-canvas-stage {
+    transition: none;
     transform: none;
   }
 }

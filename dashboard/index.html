@@ -355,10 +355,22 @@
           <button type="button" id="graph-blocked-tree-btn" class="btn-block-tree">Show Blocked Tree</button>
         </form>
       </div>
-      <p class="graph-hint">Double-click a node to re-center the graph on it. Drag nodes to rearrange. Colors mark discovered risky clusters.</p>
+      <p class="graph-hint">Double-click a node to re-center the graph on it. Drag nodes to rearrange, scroll to zoom, drag empty space to pan. Colors mark discovered risky clusters.</p>
       <div class="graph-canvas-wrap" id="graph-canvas-wrap">
-        <canvas id="graph-canvas"></canvas>
+        <div class="graph-canvas-stage" id="graph-canvas-stage">
+          <canvas id="graph-canvas"></canvas>
+        </div>
         <p class="empty-state">Search an account ID above to explore its relationship graph.</p>
+        <div class="graph-legend" id="graph-legend">
+          <span class="graph-legend-item"><i class="graph-legend-dot" style="background:#d03b3b"></i>Root account</span>
+          <span class="graph-legend-item"><i class="graph-legend-dot" style="background:#ec4899"></i>Blocked payment</span>
+          <span class="graph-legend-item"><i class="graph-legend-dot" style="background:#2a78d6"></i>Risky cluster</span>
+        </div>
+        <div class="graph-zoom-controls" id="graph-zoom-controls">
+          <button type="button" id="graph-zoom-in" title="Zoom in">+</button>
+          <button type="button" id="graph-zoom-out" title="Zoom out">−</button>
+          <button type="button" id="graph-zoom-reset" title="Reset view">⤢</button>
+        </div>
       </div>
       <p class="graph-status" id="graph-status"></p>
     </section>
