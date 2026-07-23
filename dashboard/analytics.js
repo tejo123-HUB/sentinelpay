@@ -325,46 +325,20 @@ async function refreshAiInsights() {
   }
 }
 
-function appendChatMessage(role, text) {
-  const log = document.getElementById('ai-chat-log');
-  if (!log) return;
-  const emptyState = log.querySelector('.empty-state');
-  if (emptyState) emptyState.remove();
-  const entry = document.createElement('p');
-  entry.className = `ai-chat-entry ai-chat-${role}`;
-  entry.innerHTML = `<strong>${role === 'user' ? 'You' : 'Assistant'}:</strong> ${escapeHtml(text)}`;
-  log.appendChild(entry);
-  log.scrollTop = log.scrollHeight;
-}
-
-function initAiChat() {
-  const form = document.getElementById('ai-chat-form');
-  const input = document.getElementById('ai-chat-input');
-  if (!form || !input) return;
-
-  form.addEventListener('submit', async (event) => {
-    event.preventDefault();
-    const message = input.value.trim();
-    if (!message) return;
-    appendChatMessage('user', message);
-    input.value = '';
-
-    try {
-      const res = await window.sentinelpayAuthFetch('/ai/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message }),
-      });
-      const data = await res.json();
-      appendChatMessage('assistant', res.ok ? data.reply : data.error || 'Something went wrong.');
-    } catch (err) {
-      console.error('AI chat request failed:', err);
-      appendChatMessage('assistant', 'Failed to reach the assistant.');
-    }
-  });
-
+// The interactive chat assistant itself now lives in dashboard/aiAssistant.js as a persistent,
+// dashboard-wide floating widget (previously buried here as a small panel only reachable from
+// this one tab) -- this file keeps only the read-only insights list, which is genuinely
+// Analytics-specific (a snapshot of this period's own numbers, not a conversation).
+function initAiInsightsPanel() {
   const refreshBtn = document.getElementById('ai-insights-refresh');
   if (refreshBtn) refreshBtn.addEventListener('click', refreshAiInsights);
+
+  const openAssistantBtn = document.getElementById('ai-insights-open-assistant');
+  if (openAssistantBtn) {
+    openAssistantBtn.addEventListener('click', () => {
+      document.dispatchEvent(new CustomEvent('sentinelpay:open-ai-assistant'));
+    });
+  }
 }
 
 async function downloadCsvExport() {
@@ -413,7 +387,7 @@ function initAnalyticsView() {
   const pdfBtn = document.getElementById('analytics-export-pdf');
   if (pdfBtn) pdfBtn.addEventListener('click', triggerPdfExport);
 
-  initAiChat();
+  initAiInsightsPanel();
 }
 
 document.addEventListener('sentinelpay:view-shown', (event) => {

@@ -32,11 +32,15 @@ const findActiveAlert = require('../server/structuring/alertLookup');
 const computeFraudScore = require('../server/scoring');
 const decide = require('../server/decision');
 const { getFraudProbability } = require('../server/ml/mlClient');
-const { runScanCycle } = require('../server/structuring/backgroundJob');
+const { runScanCycle, runGraphClusterScan } = require('../server/structuring/backgroundJob');
 const { DEMO_CITY_HUBS, MERCHANT_RECEIVER_POOL, GATEWAY_POOL } = require('../simulator/simulate_transactions');
 const { isBusinessAccount } = require('../server/businessAccounts');
 const getOutboundContext = require('../server/outboundContext');
 const applyOutboundRestrictors = require('../server/outboundRestrictor');
+const { updateReputationAfterTransaction } = require('../server/reputation');
+const { upsertEdge } = require('../server/graphIntelligence');
+const { recordConfirmedMule } = require('../server/muleScore');
+const { autoWatchlistConfirmedMule } = require('../server/autoFraudListing');
 
 const velocity = require('../server/rules/velocity');
 const impossibleTravel = require('../server/rules/impossibleTravel');
@@ -168,15 +172,26 @@ async function insertTransaction(db, input) {
 
   let ruleResults = [];
   let mlProbability = 0;
+  // Hoisted out of the `if (outbound)` block (mirrors routes/transactions.js's
+  // outboundContextForGraph) so the graph-edge/mule-detection writes below can reuse it after
+  // scoring instead of recomputing.
+  let outboundContext = null;
   if (outbound) {
     const userHistory = getUserHistory(db, input.sender_id, nowMs);
-    const outboundContext = getOutboundContext(db, input, nowMs);
+    outboundContext = getOutboundContext(db, input, nowMs);
 
     ruleResults = [
       ...RULE_DETECTORS.map(({ type, check }) => ({ type, ...check(input, userHistory) })),
       ...OUTBOUND_RULE_DETECTORS.map(({ type, check }) => ({ type, ...check(input, outboundContext) })),
     ];
     mlProbability = await getFraudProbability(input, userHistory);
+
+    // Mirrors routes/transactions.js: the moment this transaction's receiver is confirmed a mule
+    // (real-time, not a batch job), persist it -- see server/muleScore.js/autoFraudListing.js.
+    if (outboundContext.receiverMuleScore && outboundContext.receiverMuleScore.isMule) {
+      recordConfirmedMule(db, input.receiver_id, outboundContext.receiverMuleScore.qualifyingCycles, nowMs);
+      autoWatchlistConfirmedMule(db, input.receiver_id, outboundContext.receiverMuleScore.qualifyingCycles);
+    }
   }
 
   let { score, reasons } = computeFraudScore(ruleResults, structuringLookup, mlProbability);
@@ -213,6 +228,24 @@ async function insertTransaction(db, input) {
     if (r.flagged) {
       flagInsert.run(`fl_${crypto.randomUUID()}`, transactionId, r.type, r.reason, r.weight, input.timestamp);
     }
+  }
+
+  // Mirrors routes/transactions.js: composite reputation (server/reputation.js) only moves for
+  // outbound-scored transactions, and the persisted graph store (server/graphIntelligence.js) is
+  // seeded from every transaction plus outbound's shared-identifier edges. Without these two, the
+  // dashboard's Graph tab has relationships to draw (from live GET /graph/relationships self-joins)
+  // but "Discovered Risky Clusters" -- which reads the persisted graph_clusters table, populated by
+  // a periodic union-find pass over graph_edges scored against entity_reputation -- stays
+  // permanently empty for seeded history, since neither table was ever written.
+  if (outbound) {
+    updateReputationAfterTransaction(db, { ...input, transaction_id: transactionId }, ruleResults);
+  }
+  upsertEdge(db, input.sender_id, input.receiver_id, 'transaction', input.amount, input.timestamp);
+  if (outbound && outboundContext) {
+    for (const otherId of outboundContext.sharedDeviceAccountIds) upsertEdge(db, input.sender_id, otherId, 'shared_device', 0, input.timestamp);
+    for (const otherId of outboundContext.sharedIpAccountIds) upsertEdge(db, input.sender_id, otherId, 'shared_ip', 0, input.timestamp);
+    for (const otherId of outboundContext.sharedIdentityHashAccountIds) upsertEdge(db, input.sender_id, otherId, 'shared_identity_hash', 0, input.timestamp);
+    for (const otherId of outboundContext.sharedBankAccountAccountIds) upsertEdge(db, input.sender_id, otherId, 'shared_bank_account', 0, input.timestamp);
   }
 
   updateUserAfterTransaction(db, input.sender_id, input);
@@ -379,6 +412,20 @@ function haversine(lat1, lng1, lat2, lng2) {
 async function runStructuringEvent(db, startMs) {
   const hub = DEMO_CITY_HUBS[Math.floor(Math.random() * DEMO_CITY_HUBS.length)];
   const sender = randomId('u_struct_hist');
+  // Registered as a business account only for the duration of this event (unregistered again
+  // below) so these 6 transfers actually run through real outbound rule/reputation scoring
+  // instead of being silently auto-allowed -- a non-business sender never triggers
+  // outbound_fan_out_burst/payout_new_receiver or the reputation/graph_edges writes
+  // insertTransaction now does for outbound transactions, which is what lets
+  // graphIntelligence.discoverClusters find this ring risky enough (avg member reputation >=
+  // GRAPH_INTELLIGENCE.CLUSTER_RISK_THRESHOLD) to ever surface on the Graph tab's "Discovered
+  // Risky Clusters" panel. Deliberately temporary, unlike MERCHANT_RECEIVER_POOL's real
+  // registrations in main(): this is a synthetic structuring *origin* being run through the same
+  // scoring path a compromised/complicit business account would be, not an actual account of the
+  // demo's own business -- GET /business-accounts (the dashboard's "Business Accounts" panel) is
+  // a curated registry of the latter, and this id has no business appearing in it once seeding
+  // is done scoring it.
+  db.prepare('INSERT OR IGNORE INTO business_accounts (account_id, created_at) VALUES (?, ?)').run(sender, isoAt(startMs));
   const receivers = [randomId('u_vendor_shell_hist'), randomId('u_vendor_shell_hist'), randomId('u_vendor_shell_hist')];
 
   let t = startMs;
@@ -415,6 +462,12 @@ async function runStructuringEvent(db, startMs) {
   });
 
   const alerts = runScanCycle(db, t + 2000);
+
+  // Un-register: this id was only ever a scoring-path device (see the comment above), not a real
+  // account of the demo's own business -- it must not linger in GET /business-accounts/the
+  // dashboard's "Business Accounts" panel after the fact.
+  db.prepare('DELETE FROM business_accounts WHERE account_id = ?').run(sender);
+
   return alerts.find((a) => a.sender_id === sender) || null;
 }
 
@@ -561,12 +614,23 @@ async function main() {
     }
   }
 
+  // Same reasoning as runStructuringEvent's own direct runScanCycle call: this seed script never
+  // runs alongside a live server, so nothing would otherwise ever run graphIntelligence's periodic
+  // union-find cluster scan (normally server/structuring/backgroundJob.js's 7s interval) against
+  // the graph_edges just written above -- do it once, now, so "Discovered Risky Clusters" has
+  // real content the instant the dashboard opens, not just once a server has been running for a
+  // while. Idempotent (persistDiscoveredClusters upserts by deterministic cluster_id), so running
+  // this again after a live server's own scans have already run is harmless.
+  const newClusters = runGraphClusterScan(db, Date.now());
+
   const alertCount = db.prepare('SELECT COUNT(*) AS n FROM structuring_alerts').get().n;
+  const clusterCount = db.prepare('SELECT COUNT(*) AS n FROM graph_clusters').get().n;
   const totalRows = db.prepare('SELECT COUNT(*) AS n FROM transactions').get().n;
 
   console.log(
     `[seed] done. ${totalRows} transactions written -- allow=${TALLY.allow} step_up=${TALLY.step_up} ` +
-      `block=${TALLY.block}; ${alertCount} structuring alerts created` +
+      `block=${TALLY.block}; ${alertCount} structuring alerts created; ${clusterCount} risky cluster(s) discovered ` +
+      `(${newClusters.length} new this run)` +
       (skippedAnomalies > 0 ? `; ${skippedAnomalies} anomaly event(s) skipped (no sender had enough history yet)` : '')
   );
   console.log(`[seed] hubs used: ${DEMO_CITY_HUBS.map((h) => h.name).join(', ')}`);
