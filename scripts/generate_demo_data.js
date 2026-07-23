@@ -145,6 +145,62 @@ function pickCustomer() {
   return SEED_CUSTOMER_POOL[Math.floor(Math.random() * POOL_SIZE)];
 }
 
+// Regression (mirrors the fix in simulator/simulate_transactions.js's generateNormalTransaction,
+// found by inspecting what --scenario=normal actually flagged against a live server): refund
+// events used to pick a uniformly random customer with no regard for whether that customer had
+// ever actually bought from that merchant, tripping refund_without_purchase.js on seeded "normal"
+// history. purchaseLedger tracks real purchase records per (merchant, customer) pair -- events
+// here run in strict chronological order (main()'s events.sort), so building it up incrementally
+// as runNormalEvent's own purchases/deposits are generated stays consistent with what the real
+// refundWithoutPurchase.js rule will see when insertTransaction scores each event. Also respects
+// OUTBOUND_MIN_PURCHASE_AGE_MS, same anti-forgery age gate the real rule enforces: a purchase
+// isn't usable as refund credit until it's old enough.
+const OUTBOUND_MIN_PURCHASE_AGE_MS = getOutboundContext.OUTBOUND_MIN_PURCHASE_AGE_MS;
+const purchaseLedger = new Map(); // merchantAccount -> Map(customerId -> Array<{ amountRemaining, atMs }>)
+const MIN_REFUND_CREDIT = 10; // matches the Math.max(10, ...) floor used for every generated amount
+
+function recordPurchaseCredit(merchantAccount, customerId, amount, atMs) {
+  let merchantLedger = purchaseLedger.get(merchantAccount);
+  if (!merchantLedger) {
+    merchantLedger = new Map();
+    purchaseLedger.set(merchantAccount, merchantLedger);
+  }
+  let entries = merchantLedger.get(customerId);
+  if (!entries) {
+    entries = [];
+    merchantLedger.set(customerId, entries);
+  }
+  entries.push({ amountRemaining: amount, atMs });
+}
+
+function pickRefundableCustomer(merchantAccount, nowMs) {
+  const merchantLedger = purchaseLedger.get(merchantAccount);
+  if (!merchantLedger) return null;
+  const eligible = [];
+  for (const [customerId, entries] of merchantLedger.entries()) {
+    const credit = entries
+      .filter((e) => nowMs - e.atMs >= OUTBOUND_MIN_PURCHASE_AGE_MS)
+      .reduce((sum, e) => sum + e.amountRemaining, 0);
+    if (credit >= MIN_REFUND_CREDIT) eligible.push([customerId, credit]);
+  }
+  if (eligible.length === 0) return null;
+  return eligible[Math.floor(Math.random() * eligible.length)];
+}
+
+// Consumes refund credit oldest-purchase-first, matching how a real customer's actual purchase
+// history would be drawn down.
+function consumeRefundCredit(merchantAccount, customerId, amount, nowMs) {
+  const entries = purchaseLedger.get(merchantAccount).get(customerId);
+  let remaining = amount;
+  for (const entry of entries) {
+    if (remaining <= 0) break;
+    if (nowMs - entry.atMs < OUTBOUND_MIN_PURCHASE_AGE_MS) continue;
+    const take = Math.min(entry.amountRemaining, remaining);
+    entry.amountRemaining -= take;
+    remaining -= take;
+  }
+}
+
 // Mirrors the pipeline in server/routes/transactions.js exactly (same modules, same order),
 // except `input.timestamp` is trusted as given instead of being overwritten with real "now" --
 // safe here because this script never receives input from an untrusted client, only from the
@@ -254,6 +310,21 @@ async function insertTransaction(db, input) {
   return { decision, reasons };
 }
 
+function insertOrdinaryPurchase(db, customer, merchantAccount, gateway, customerLocation, transactionType, atMs) {
+  const amount = Math.max(10, jitter(customer.typicalAmount, customer.typicalAmount * 0.3));
+  recordPurchaseCredit(merchantAccount, customer.id, amount, atMs);
+  return insertTransaction(db, {
+    sender_id: customer.id,
+    receiver_id: merchantAccount,
+    amount: Math.round(amount * 100) / 100,
+    timestamp: isoAt(atMs),
+    location: customerLocation,
+    device_id: customer.device,
+    merchant_id: gateway,
+    transaction_type: transactionType,
+  });
+}
+
 // Mirrors simulator/simulate_transactions.js's generateNormalTransaction: mostly customer ->
 // merchant purchases, with a smaller share of merchant-initiated refunds/settlement payouts
 // (the cases `purpose` is for) so seeded history matches the shape live traffic produces.
@@ -265,26 +336,25 @@ async function runNormalEvent(db, atMs) {
   const roll = Math.random();
 
   if (roll < 0.86) {
-    const amount = Math.max(10, jitter(customer.typicalAmount, customer.typicalAmount * 0.3));
-    return insertTransaction(db, {
-      sender_id: customer.id,
-      receiver_id: merchantAccount,
-      amount: Math.round(amount * 100) / 100,
-      timestamp: isoAt(atMs),
-      location: customerLocation,
-      device_id: customer.device,
-      merchant_id: gateway,
-      transaction_type: 'transfer',
-    });
+    return insertOrdinaryPurchase(db, customer, merchantAccount, gateway, customerLocation, 'transfer', atMs);
   }
 
   if (roll < 0.92) {
     // No device_id -- a business-initiated payout, not something the customer's own device
-    // touched (see the matching comment in simulator/simulate_transactions.js).
-    const amount = Math.max(10, jitter(customer.typicalAmount, customer.typicalAmount * 0.2));
+    // touched (see the matching comment in simulator/simulate_transactions.js). Only refund a
+    // customer with real, aged-enough purchase credit at this merchant (purchaseLedger) --
+    // refunding whoever the random roll landed on regardless of purchase history is exactly the
+    // refund_without_purchase pattern this system exists to catch, not "normal" seeded history.
+    const refundable = pickRefundableCustomer(merchantAccount, atMs);
+    if (!refundable) {
+      return insertOrdinaryPurchase(db, customer, merchantAccount, gateway, customerLocation, 'transfer', atMs);
+    }
+    const [refundCustomerId, credit] = refundable;
+    const amount = Math.min(credit, Math.max(10, jitter(credit * 0.6, credit * 0.2)));
+    consumeRefundCredit(merchantAccount, refundCustomerId, amount, atMs);
     return insertTransaction(db, {
       sender_id: merchantAccount,
-      receiver_id: customer.id,
+      receiver_id: refundCustomerId,
       amount: Math.round(amount * 100) / 100,
       timestamp: isoAt(atMs),
       merchant_id: gateway,
@@ -294,17 +364,7 @@ async function runNormalEvent(db, atMs) {
   }
 
   if (roll < 0.98) {
-    const amount = Math.max(10, jitter(customer.typicalAmount, customer.typicalAmount * 0.3));
-    return insertTransaction(db, {
-      sender_id: customer.id,
-      receiver_id: merchantAccount,
-      amount: Math.round(amount * 100) / 100,
-      timestamp: isoAt(atMs),
-      location: customerLocation,
-      device_id: customer.device,
-      merchant_id: gateway,
-      transaction_type: 'deposit',
-    });
+    return insertOrdinaryPurchase(db, customer, merchantAccount, gateway, customerLocation, 'deposit', atMs);
   }
 
   return insertTransaction(db, {

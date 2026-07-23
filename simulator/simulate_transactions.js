@@ -5,7 +5,9 @@
 // Section 10, Task 4). Fraud/AML rule+ML scoring is outbound-only (money leaving the business —
 // see architecture.md Section 4.1): --scenario=fraud/odd-hour are inbound and kept only for
 // reference/comparison (no longer expected to block); --scenario=outbound-fraud/refund-fraud are
-// the scenarios this system actually catches.
+// the scenarios this system actually catches. --scenario=normal periodically injects a genuine
+// account-takeover burst (see NORMAL_STREAM_RISK_INJECTION_INTERVAL below) so a live demo feed
+// shows real detections, not just an unbroken stream of "allow".
 //
 // Usage:
 //   node simulator/simulate_transactions.js --scenario=normal --count=100 --rate=150
@@ -23,6 +25,7 @@ require('dotenv').config();
 const { DatabaseSync } = require('node:sqlite');
 const path = require('node:path');
 const { API_KEY, DEFAULT_DEV_API_KEY } = require('../server/middleware/apiKeyAuth');
+const getOutboundContext = require('../server/outboundContext');
 
 const BASE_URL = process.env.SIMULATOR_BASE_URL || 'http://127.0.0.1:3000';
 
@@ -95,6 +98,86 @@ const MERCHANT_RECEIVER_POOL = [
 // dashboard's "Gateway" column visibly shows several real gateways, not a fresh random value
 // every transaction.
 const GATEWAY_POOL = ['stripe_acct_primary', 'razorpay_acct_intl', 'paypal_acct_eu', 'stripe_acct_backup'];
+
+// Regression (found by actually running --scenario=normal against a live server and inspecting
+// the flags it produced): "normal" traffic was tripping refund_without_purchase and the adaptive
+// velocity rule on a meaningful share of transactions, which is not realistic input for a stream
+// meant to read as clean. Two root causes, both fixed by the state below:
+//
+// 1. Refunds picked a uniformly random customer with no regard for whether that customer had
+//    ever actually bought from that merchant account -- purchaseLedger tracks real purchase
+//    records per (merchant, customer) pair so a refund can only be generated against genuine
+//    prior purchase history, capped at what's actually left to refund, exactly like a real
+//    business. It also respects server/outboundContext.js's OUTBOUND_MIN_PURCHASE_AGE_MS: the
+//    real refundWithoutPurchase.js rule only counts a purchase as refundable once it's at least
+//    that old (an anti-forgery guard against fabricate-then-immediately-refund), so a purchase
+//    this ledger just recorded isn't actually usable as refund credit yet either -- ignoring that
+//    would just trade one false flag for another.
+// 2. server/rules/velocity.js is adaptive: it z-scores this burst's spacing against the sender's
+//    *own* learned baseline (server/adaptiveBaseline.js), defaulting to a 5-minute assumed
+//    interval (ADAPTIVE_BASELINE.VELOCITY_DEFAULT_INTERVAL_MS) until a merchant account has
+//    established one. Refunds/settlements are rare (~8% of traffic) but purely random timing
+//    occasionally clustered 3+ of them from the same low-frequency merchant account within the
+//    60-second velocity window -- exactly the "burst against your own normal pace" signal the
+//    rule is designed to catch, just triggered by simulator bad luck instead of a real burst.
+//    lastMerchantOutboundEventMs enforces real spacing between a merchant account's own
+//    refund/settlement events so they never cluster like that.
+const OUTBOUND_MIN_PURCHASE_AGE_MS = getOutboundContext.OUTBOUND_MIN_PURCHASE_AGE_MS;
+const purchaseLedger = new Map(); // merchantAccount -> Map(customerId -> Array<{ amountRemaining, atMs }>)
+const lastMerchantOutboundEventMs = new Map(); // merchantAccount -> timestamp of its last refund/settlement
+const MIN_MERCHANT_OUTBOUND_INTERVAL_MS = 90 * 1000; // comfortably above the 60s velocity window
+const MIN_REFUND_CREDIT = 10; // matches the Math.max(10, ...) floor used for every generated amount
+
+function recordPurchaseCredit(merchantAccount, customerId, amount, atMs) {
+  let merchantLedger = purchaseLedger.get(merchantAccount);
+  if (!merchantLedger) {
+    merchantLedger = new Map();
+    purchaseLedger.set(merchantAccount, merchantLedger);
+  }
+  let entries = merchantLedger.get(customerId);
+  if (!entries) {
+    entries = [];
+    merchantLedger.set(customerId, entries);
+  }
+  entries.push({ amountRemaining: amount, atMs });
+}
+
+function eligibleCredit(entries, nowMs) {
+  return entries
+    .filter((e) => nowMs - e.atMs >= OUTBOUND_MIN_PURCHASE_AGE_MS)
+    .reduce((sum, e) => sum + e.amountRemaining, 0);
+}
+
+function pickRefundableCustomer(merchantAccount, nowMs) {
+  const merchantLedger = purchaseLedger.get(merchantAccount);
+  if (!merchantLedger) return null;
+  const eligible = [];
+  for (const [customerId, entries] of merchantLedger.entries()) {
+    const credit = eligibleCredit(entries, nowMs);
+    if (credit >= MIN_REFUND_CREDIT) eligible.push([customerId, credit]);
+  }
+  if (eligible.length === 0) return null;
+  return eligible[Math.floor(Math.random() * eligible.length)];
+}
+
+// Consumes refund credit oldest-purchase-first, matching how a real customer's actual purchase
+// history would be drawn down.
+function consumeRefundCredit(merchantAccount, customerId, amount, nowMs) {
+  const entries = purchaseLedger.get(merchantAccount).get(customerId);
+  let remaining = amount;
+  for (const entry of entries) {
+    if (remaining <= 0) break;
+    if (nowMs - entry.atMs < OUTBOUND_MIN_PURCHASE_AGE_MS) continue;
+    const take = Math.min(entry.amountRemaining, remaining);
+    entry.amountRemaining -= take;
+    remaining -= take;
+  }
+}
+
+function merchantOutboundEventReady(merchantAccount, nowMs) {
+  const last = lastMerchantOutboundEventMs.get(merchantAccount) || 0;
+  return nowMs - last >= MIN_MERCHANT_OUTBOUND_INTERVAL_MS;
+}
 
 function randomGateway() {
   return GATEWAY_POOL[Math.floor(Math.random() * GATEWAY_POOL.length)];
@@ -183,6 +266,21 @@ async function ensureMerchantAccountsRegistered(baseUrl) {
 // or settles funds out to its bank — the two cases that carry a human-readable `purpose` note,
 // mirroring what a real risk/compliance analyst would actually see in this data (architecture.md
 // Section 1).
+function generateOrdinaryPurchase(customer, merchantAccount, gateway, customerLocation, transactionType, nowMs) {
+  const amount = Math.max(10, jitter(customer.typicalAmount, customer.typicalAmount * 0.3));
+  recordPurchaseCredit(merchantAccount, customer.id, amount, nowMs);
+  return {
+    sender_id: customer.id,
+    receiver_id: merchantAccount,
+    amount: Math.round(amount * 100) / 100,
+    timestamp: new Date().toISOString(),
+    location: customerLocation,
+    device_id: customer.device,
+    merchant_id: gateway,
+    transaction_type: transactionType,
+  };
+}
+
 function generateNormalTransaction() {
   const customer = CUSTOMER_POOL[Math.floor(Math.random() * CUSTOMER_POOL.length)];
   const merchantAccount = randomMerchantAccount();
@@ -191,20 +289,12 @@ function generateNormalTransaction() {
   // independent multi-km random jump every transaction.
   const customerLocation = { lat: jitter(customer.homeLat, 0.0003), lng: jitter(customer.homeLng, 0.0003) };
   const roll = Math.random();
+  const nowMs = Date.now();
 
   if (roll < 0.86) {
-    // Ordinary purchase: customer pays the business.
-    const amount = Math.max(10, jitter(customer.typicalAmount, customer.typicalAmount * 0.3));
-    return {
-      sender_id: customer.id,
-      receiver_id: merchantAccount,
-      amount: Math.round(amount * 100) / 100,
-      timestamp: new Date().toISOString(),
-      location: customerLocation,
-      device_id: customer.device,
-      merchant_id: gateway,
-      transaction_type: 'transfer',
-    };
+    // Ordinary purchase: customer pays the business. Builds this customer's refundable credit
+    // with this merchant (purchaseLedger) so a later refund has real history to draw against.
+    return generateOrdinaryPurchase(customer, merchantAccount, gateway, customerLocation, 'transfer', nowMs);
   }
 
   if (roll < 0.92) {
@@ -213,10 +303,23 @@ function generateNormalTransaction() {
     // touched — setting it to the customer's device previously made every refund look like a
     // "device mismatch" against the business account's own device history (it had never seen
     // the customer's device, and never would).
-    const amount = Math.max(10, jitter(customer.typicalAmount, customer.typicalAmount * 0.2));
+    //
+    // Only refund a customer with real, still-outstanding purchase credit at this merchant
+    // (purchaseLedger), capped at what's left -- refunding a random customer who never bought
+    // anything here isn't "normal" traffic, it's exactly the refund_without_purchase laundering
+    // pattern this system exists to catch. Also respects the outbound cooldown below, same
+    // reasoning as the settlement branch.
+    const refundable = merchantOutboundEventReady(merchantAccount, nowMs) ? pickRefundableCustomer(merchantAccount, nowMs) : null;
+    if (!refundable) {
+      return generateOrdinaryPurchase(customer, merchantAccount, gateway, customerLocation, 'transfer', nowMs);
+    }
+    const [refundCustomerId, credit] = refundable;
+    const amount = Math.min(credit, Math.max(10, jitter(credit * 0.6, credit * 0.2)));
+    consumeRefundCredit(merchantAccount, refundCustomerId, amount, nowMs);
+    lastMerchantOutboundEventMs.set(merchantAccount, nowMs);
     return {
       sender_id: merchantAccount,
-      receiver_id: customer.id,
+      receiver_id: refundCustomerId,
       amount: Math.round(amount * 100) / 100,
       timestamp: new Date().toISOString(),
       merchant_id: gateway,
@@ -226,21 +329,19 @@ function generateNormalTransaction() {
   }
 
   if (roll < 0.98) {
-    // Customer tops up stored/account credit with the business.
-    const amount = Math.max(10, jitter(customer.typicalAmount, customer.typicalAmount * 0.3));
-    return {
-      sender_id: customer.id,
-      receiver_id: merchantAccount,
-      amount: Math.round(amount * 100) / 100,
-      timestamp: new Date().toISOString(),
-      location: customerLocation,
-      device_id: customer.device,
-      merchant_id: gateway,
-      transaction_type: 'deposit',
-    };
+    // Customer tops up stored/account credit with the business -- also real revenue, so it
+    // builds refundable credit the same as an ordinary purchase.
+    return generateOrdinaryPurchase(customer, merchantAccount, gateway, customerLocation, 'deposit', nowMs);
   }
 
-  // The business settles funds out to its own bank account through this gateway.
+  // The business settles funds out to its own bank account through this gateway. Gated by the
+  // same per-merchant outbound cooldown as refunds above -- without it, this and a refund from
+  // the same low-frequency merchant account landing within the same 60 seconds by chance reads
+  // as a burst against that account's own (slow) normal pace to the adaptive velocity rule.
+  if (!merchantOutboundEventReady(merchantAccount, nowMs)) {
+    return generateOrdinaryPurchase(customer, merchantAccount, gateway, customerLocation, 'transfer', nowMs);
+  }
+  lastMerchantOutboundEventMs.set(merchantAccount, nowMs);
   return {
     sender_id: merchantAccount,
     receiver_id: `bank_settlement_${gateway}`,
@@ -252,11 +353,25 @@ function generateNormalTransaction() {
   };
 }
 
+// Roughly one genuine risk burst injected per this many ordinary transactions -- a live demo
+// feed that's 100% clean traffic doesn't show the fraud engine actually doing anything. This
+// reuses triggerOutboundFraudScenario (the same real account-takeover pattern --scenario=
+// outbound-fraud runs standalone) rather than fabricating a shortcut block: every flag it
+// produces is the genuine rule/ML pipeline reacting to a genuinely risky pattern, not simulator
+// noise -- unlike the refund/velocity false positives generateNormalTransaction used to produce
+// on ordinary traffic before this fix (see the purchaseLedger/lastMerchantOutboundEventMs
+// comment above generateNormalTransaction).
+const NORMAL_STREAM_RISK_INJECTION_INTERVAL = 40;
+
 async function runNormalStream(baseUrl, count, rateMs, continuous) {
   console.log(`[normal] streaming ${continuous ? 'continuously' : count + ' transactions'} at ~${rateMs}ms intervals`);
   let sent = 0;
   // eslint-disable-next-line no-constant-condition
   while (continuous || sent < count) {
+    if (sent > 0 && sent % NORMAL_STREAM_RISK_INJECTION_INTERVAL === 0) {
+      console.log('[normal] injecting a genuine account-takeover burst so the live feed shows real detection, not just clean traffic...');
+      await triggerOutboundFraudScenario(baseUrl);
+    }
     const tx = generateNormalTransaction();
     const { status, body } = await postTransaction(baseUrl, tx);
     if (status === 201) {
