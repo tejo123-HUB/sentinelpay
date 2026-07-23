@@ -20,12 +20,40 @@ import math
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-MODEL_PATH = Path(__file__).parent / "model_export" / "model.json"
+MODEL_DIR = Path(__file__).parent / "model_export"
+LEGACY_MODEL_PATH = MODEL_DIR / "model.json"
+CURRENT_POINTER_PATH = MODEL_DIR / "current.json"
+
+
+def resolve_model_path():
+    """Mirrors server/ml/mlClient.js's resolveModelPath(): checks current.json for a
+    GPU-retrained model before falling back to the original static model.json."""
+    try:
+        pointer = json.loads(CURRENT_POINTER_PATH.read_text(encoding="utf-8"))
+        if pointer.get("model_file"):
+            return MODEL_DIR / pointer["model_file"]
+    except (OSError, ValueError, KeyError):
+        pass
+    return LEGACY_MODEL_PATH
 
 
 def load_model():
-    with open(MODEL_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+    model_path = resolve_model_path()
+    with open(model_path, "r", encoding="utf-8") as f:
+        model = json.load(f)
+    if model.get("model_type") == "xgboost":
+        # This fallback's predict() only implements the legacy logistic math (standardize +
+        # dot-product + sigmoid). Silently serving the logistic model.json here while
+        # ML_SERVING_MODE=local (mlClient.js) is scoring against a newer XGBoost export would be a
+        # silent divergence between serving modes -- fail loudly instead, same "no silent
+        # fallback" philosophy as this repo's GPU hard-fail and the Vertex AI stub.
+        raise SystemExit(
+            f"{model_path} is an XGBoost export (model_type=xgboost) -- ml/serve.py's "
+            "python-service fallback does not support XGBoost models yet (only the legacy "
+            "logistic-regression format). Either run with ML_SERVING_MODE=local (native JS "
+            "scoring supports both model types), or point current.json back at a logistic export."
+        )
+    return model
 
 
 def sigmoid(z):
@@ -85,8 +113,9 @@ def main():
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
 
-    if not MODEL_PATH.exists():
-        raise SystemExit(f"Model not found at {MODEL_PATH} - run `python ml/train_model.py` first")
+    model_path = resolve_model_path()
+    if not model_path.exists():
+        raise SystemExit(f"Model not found at {model_path} - run `python ml/train_model.py` first")
 
     Handler.model = load_model()
     # ThreadingHTTPServer, not HTTPServer: the plain single-threaded server processes one

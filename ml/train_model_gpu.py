@@ -135,6 +135,11 @@ def main():
     dtrain = xgb.DMatrix(X_train, label=y_train, feature_names=CANONICAL_FEATURE_NAMES)
     dtest = xgb.DMatrix(X_test, label=y_test, feature_names=CANONICAL_FEATURE_NAMES)
 
+    # Same class-imbalance handling ml/train_model.py gets from LogisticRegression's
+    # class_weight="balanced" -- XGBoost has no such flag, scale_pos_weight (ratio of
+    # negatives to positives in the training split) is its equivalent.
+    pos = int(y_train.sum())
+    scale_pos_weight = float((len(y_train) - pos) / pos) if pos > 0 else 1.0
     params = {
         "tree_method": "hist",
         "device": "cuda",
@@ -142,6 +147,7 @@ def main():
         "max_depth": 4,
         "eta": 0.1,
         "eval_metric": "auc",
+        "scale_pos_weight": scale_pos_weight,
     }
     booster = xgb.train(params, dtrain, num_boost_round=100, evals=[(dtest, "test")], verbose_eval=False)
 

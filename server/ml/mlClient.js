@@ -39,7 +39,24 @@ function loadModel() {
   const modelPath = resolveModelPath();
   if (cachedModel && cachedModelPath === modelPath) return cachedModel;
   const raw = fs.readFileSync(modelPath, 'utf-8');
-  cachedModel = JSON.parse(raw);
+  const model = JSON.parse(raw);
+  if (model.model_type !== 'xgboost') {
+    // extractFeatures()'s output order is only correct if it matches what this model was
+    // actually trained on. Previously enforced by a comment alone (ml/train_model.py's
+    // FEATURE_NAMES vs. server/ml/features.js's extraction order) -- checked here against the
+    // model's own exported feature_names so a drift fails loudly at load time instead of
+    // silently scoring against the wrong feature slots.
+    const expected = extractFeatures.FEATURE_NAMES;
+    const actual = model.feature_names;
+    const matches = Array.isArray(actual) && actual.length === expected.length && actual.every((name, i) => name === expected[i]);
+    if (!matches) {
+      throw new Error(
+        `${modelPath} feature_names ${JSON.stringify(actual)} do not match server/ml/features.js's ` +
+        `FEATURE_NAMES ${JSON.stringify(expected)} -- legacy model scoring would silently use the wrong feature order`
+      );
+    }
+  }
+  cachedModel = model;
   cachedModelPath = modelPath;
   return cachedModel;
 }

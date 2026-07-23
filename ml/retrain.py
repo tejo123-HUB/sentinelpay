@@ -93,6 +93,10 @@ def main():
     dtest = xgb.DMatrix(X_test, label=y_test, feature_names=CANONICAL_FEATURE_NAMES)
 
     previous_booster = load_current_booster()
+    # Same class-imbalance handling as train_model_gpu.py -- kept in sync since retrain.py's
+    # warm-started rounds use the same objective/tree params.
+    pos = int(y_train.sum())
+    scale_pos_weight = float((len(y_train) - pos) / pos) if pos > 0 else 1.0
     params = {
         "tree_method": "hist",
         "device": "cuda",
@@ -100,6 +104,7 @@ def main():
         "max_depth": 4,
         "eta": 0.1,
         "eval_metric": "auc",
+        "scale_pos_weight": scale_pos_weight,
     }
     # xgb_model=previous_booster is the actual online-learning step: additional boosting rounds
     # appended on top of the existing trees, not a from-scratch refit -- what makes this a

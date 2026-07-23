@@ -1,9 +1,21 @@
 // Extracts the same behavioral feature vector ml/train_model.py was trained on. Order must
-// exactly match FEATURE_NAMES in ml/train_model.py.
+// exactly match FEATURE_NAMES in ml/train_model.py -- enforced at load time in
+// server/ml/mlClient.js by comparing FEATURE_NAMES below against the trained model's own
+// exported feature_names, rather than relying on this comment alone.
 const { haversineDistanceKm } = require('../utils/geo');
 const velocity = require('../rules/velocity');
 
 const VELOCITY_WINDOW_MS = velocity.VELOCITY_WINDOW_MS;
+
+// Must exactly match ml/train_model.py's FEATURE_NAMES, in the same order.
+const FEATURE_NAMES = [
+  'velocity_count_60s',
+  'amount_to_avg_ratio',
+  'travel_speed_kmh',
+  'is_new_device',
+  'is_odd_hour',
+  'amount',
+];
 
 /**
  * @param {{ amount: number, timestamp: string, device_id: string, location: {lat,lng}|null }} transaction
@@ -58,3 +70,4 @@ function extractFeatures(transaction, userHistory) {
 }
 
 module.exports = extractFeatures;
+module.exports.FEATURE_NAMES = FEATURE_NAMES;
