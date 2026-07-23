@@ -8,10 +8,15 @@ process.env.DB_PATH = ':memory:';
 process.env.PORT = '0';
 process.env.API_KEY = 'test-key-for-automated-tests';
 
+// Full server-tree cache clear, not just index.js/rateLimit.js/websocket.js: a test below sets
+// API_KEY_VIEWER, which server/middleware/apiKeyAuth.js reads once at module-load time -- same
+// reasoning as tests/aiAssistant.test.js's freshServer.
+const path = require('node:path');
 function freshServer() {
-  delete require.cache[require.resolve('../server/index')];
-  delete require.cache[require.resolve('../server/middleware/rateLimit')];
-  delete require.cache[require.resolve('../server/websocket')];
+  const serverDir = path.join(__dirname, '..', 'server');
+  for (const resolvedPath of Object.keys(require.cache)) {
+    if (resolvedPath.startsWith(serverDir)) delete require.cache[resolvedPath];
+  }
   const { app, server } = require('../server/index');
   return new Promise((resolve) => {
     if (server.listening) return resolve({ app, server });
@@ -192,6 +197,57 @@ test('GET /graph/relationships: an invalid depth value falls back to the default
     const res = await request(server, 'GET', '/graph/relationships?account_id=u_x&depth=99');
     assert.equal(res.status, 200);
     assert.equal(res.body.depth, 1);
+  } finally {
+    server.close();
+  }
+});
+
+// Security fix (full-project review): every route in this file exposes raw cross-account linkage
+// (shared device/IP/identity/bank_account hashes, blocked-payment chains, cluster membership) --
+// comparably sensitive to what earlier audits already elevated above viewer level elsewhere
+// (POST /ai/chat, evidence content, custom-rule internals) -- so a viewer-role key must now be
+// rejected here too, on all three routes, not just allowed through as "any valid key."
+test('GET /graph/relationships, /graph/clusters, /graph/blocked-tree: all require the analyst role, not just any valid key', async () => {
+  process.env.API_KEY_VIEWER = 'test-viewer-key-graph';
+  const { server } = await freshServer();
+  try {
+    const headers = { 'X-API-Key': 'test-viewer-key-graph' };
+    const relationships = await request(server, 'GET', '/graph/relationships?account_id=u_x', null, headers);
+    assert.equal(relationships.status, 403);
+    const clusters = await request(server, 'GET', '/graph/clusters', null, headers);
+    assert.equal(clusters.status, 403);
+    const blockedTree = await request(server, 'GET', '/graph/blocked-tree?account_id=u_x', null, headers);
+    assert.equal(blockedTree.status, 403);
+  } finally {
+    delete process.env.API_KEY_VIEWER;
+    server.close();
+  }
+});
+
+test('GET /graph/blocked-tree: caps the total node count and reports truncated, instead of growing combinatorially', async () => {
+  const { app, server } = await freshServer();
+  try {
+    // Inserted directly (same pattern as tests/aiAssistant.test.js's insertTx) rather than routed
+    // through the scoring pipeline -- what matters here is decision='block' rows existing, not
+    // reproducing whatever rule combination would organically earn one. More than GRAPH_MAX_NODES
+    // (50) distinct blocked counterparties at depth 1 alone already exercises the fix: before it,
+    // nothing capped the total node count across the whole BFS (only per-node-per-level).
+    const db = app.locals.db;
+    const now = new Date('2026-07-18T09:00:00Z').toISOString();
+    db.prepare('INSERT OR IGNORE INTO users (user_id, created_at) VALUES (?, ?)').run('u_blocked_hub', now);
+    for (let i = 0; i < 60; i += 1) {
+      const leaf = `u_blocked_leaf_${i}`;
+      db.prepare('INSERT OR IGNORE INTO users (user_id, created_at) VALUES (?, ?)').run(leaf, now);
+      db.prepare(
+        `INSERT INTO transactions (transaction_id, sender_id, receiver_id, amount, timestamp, transaction_type, fraud_score, decision)
+         VALUES (?, ?, ?, ?, ?, 'transfer', 90, 'block')`
+      ).run(`t_blocked_${i}`, 'u_blocked_hub', leaf, 999999, now);
+    }
+
+    const res = await request(server, 'GET', '/graph/blocked-tree?account_id=u_blocked_hub');
+    assert.equal(res.status, 200);
+    assert.ok(res.body.nodes.length <= 50, `expected at most 50 nodes, got ${res.body.nodes.length}`);
+    assert.equal(res.body.truncated, true);
   } finally {
     server.close();
   }

@@ -13,7 +13,7 @@
 const express = require('express');
 const router = express.Router();
 
-const { requireApiKey } = require('../middleware/apiKeyAuth');
+const { requireApiKey, requireRole } = require('../middleware/apiKeyAuth');
 const { MAX_ID_LENGTH } = require('../validate');
 
 const DEFAULT_CLUSTER_LIMIT = 20;
@@ -93,8 +93,18 @@ function fetchSharedIdentifierLinks(db, accountId) {
   return links;
 }
 
+// Found during a full-project security review: every route in this file was viewer-accessible
+// (requireApiKey only), matching this codebase's general "reads are viewer-open" convention -- but
+// unlike typical read routes (aggregate analytics), these expose raw cross-account linkage (shared
+// device/IP/identity/bank_account hashes, blocked-payment chains, cluster membership lists), which
+// is comparably sensitive to what 17.32 already elevated above viewer level for other routes
+// exposing more than a typical read (evidence content, custom-rule internals, push-subscription
+// management). The demo dashboard is unaffected -- server/index.js always injects the admin
+// API_KEY into the served HTML, never a viewer-scoped one -- this only tightens access for a
+// caller using a separately-configured API_KEY_VIEWER directly against the API.
+
 // GET /graph/relationships?account_id=&depth=1|2 -- Section 17 (Category 4, Graph Intelligence).
-router.get('/graph/relationships', requireApiKey, (req, res) => {
+router.get('/graph/relationships', requireApiKey, requireRole('analyst'), (req, res) => {
   const db = req.app.locals.db;
   const accountId = req.query.account_id;
   const depth = VALID_DEPTHS.includes(Number(req.query.depth)) ? Number(req.query.depth) : 1;
@@ -177,7 +187,7 @@ function enrichNodesWithGraphIntelligence(db, nodes) {
 // GET /graph/clusters?limit=20 -- Continuous Learning Extension, Phase C: the persisted,
 // periodically-discovered mule-ring/community clusters (server/graphIntelligence.js), distinct
 // from GET /graph/relationships' single-account live neighborhood view above.
-router.get('/graph/clusters', requireApiKey, (req, res) => {
+router.get('/graph/clusters', requireApiKey, requireRole('analyst'), (req, res) => {
   const db = req.app.locals.db;
   const requested = Number(req.query.limit);
   const limit = Number.isFinite(requested) && requested > 0 ? Math.min(Math.floor(requested), MAX_CLUSTER_LIMIT) : DEFAULT_CLUSTER_LIMIT;
@@ -197,7 +207,7 @@ router.get('/graph/clusters', requireApiKey, (req, res) => {
 });
 
 // GET /graph/blocked-tree?account_id=... -- Returns a tree of blocked payments
-router.get('/graph/blocked-tree', requireApiKey, (req, res) => {
+router.get('/graph/blocked-tree', requireApiKey, requireRole('analyst'), (req, res) => {
   const db = req.app.locals.db;
   const accountId = req.query.account_id;
 
