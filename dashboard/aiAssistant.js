@@ -87,8 +87,11 @@ function aiFormatMessageText(text) {
   // Format bold text: **text** -> <strong>text</strong>
   escaped = escaped.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
 
-  // Format lists: bullet lists with \n• or \n- or \n*
-  escaped = escaped.replace(/\n[•\-*]\s*(.*?)/g, '<li>$1</li>');
+  // Format lists: bullet lists with \n• or \n- or \n*. Greedy (not lazy) capture: `.` already
+  // stops at the next newline, and a lazy `(.*?)` with nothing anchoring it afterward always
+  // matches zero characters, previously rendering every bullet as an empty <li></li> followed by
+  // unwrapped plain text instead of an actual list item (found during a full-project review).
+  escaped = escaped.replace(/\n[•\-*]\s*(.*)/g, '<li>$1</li>');
 
   // Convert newlines to breaks
   escaped = escaped.replace(/\n/g, '<br>');

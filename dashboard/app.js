@@ -159,6 +159,8 @@ function addTransactionRow(tx, { prepend = true } = {}) {
   const decisionClass = /^[a-z_]+$/.test(tx.decision || '') ? tx.decision : 'unknown';
   row.className = `decision-${decisionClass}`;
 
+  const transactionIdAttr = escapeHtml(tx.transaction_id || '');
+
   row.innerHTML = `
     <td>${formatTime(tx.timestamp || new Date().toISOString())}</td>
     <td>${idLabel}</td>
@@ -169,6 +171,7 @@ function addTransactionRow(tx, { prepend = true } = {}) {
     <td>${Number.isFinite(tx.fraud_score) ? tx.fraud_score : '—'}</td>
     <td class="decision-cell">${decisionLabel}</td>
     <td class="reasons">${reasons}</td>
+    <td>${transactionIdAttr ? `<button type="button" class="ask-ai-btn" data-transaction-id="${transactionIdAttr}">Ask AI</button>` : '—'}</td>
   `;
 
   if (prepend) {
