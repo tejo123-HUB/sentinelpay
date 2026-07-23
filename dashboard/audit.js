@@ -98,7 +98,7 @@ async function refreshAuditTable() {
 
     tbody.innerHTML = '';
     if (transactions.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No matching transactions.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No matching transactions.</td></tr>';
       return;
     }
 
@@ -106,6 +106,7 @@ async function refreshAuditTable() {
       const row = document.createElement('tr');
       const decisionClass = /^[a-z_]+$/.test(tx.decision || '') ? tx.decision : 'unknown';
       row.className = `decision-${decisionClass}`;
+      const transactionIdAttr = escapeHtml(tx.transaction_id || '');
       row.innerHTML = `
         <td>${escapeHtml(new Date(tx.timestamp).toLocaleString())}</td>
         <td>${escapeHtml(resolveCounterpartyId(tx))}</td>
@@ -115,6 +116,7 @@ async function refreshAuditTable() {
         <td>${Number.isFinite(tx.fraud_score) ? tx.fraud_score : '—'}</td>
         <td class="decision-cell">${escapeHtml((tx.decision || '—').replace('_', '-'))}</td>
         <td class="reasons">${escapeHtml((tx.reasons || []).join('; ') || '—')}</td>
+        <td>${transactionIdAttr ? `<button type="button" class="ask-ai-btn" data-transaction-id="${transactionIdAttr}">Ask AI</button>` : '—'}</td>
       `;
       tbody.appendChild(row);
     }

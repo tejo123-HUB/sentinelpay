@@ -24,6 +24,10 @@ const VALID_DEPTHS = [1, 2];
 // reasoning as MULE_SCORE_MAX_RECEIPTS_SCANNED (config.js): an unbounded expansion would grow
 // per-request cost without limit for a genuinely high-degree hub account.
 const GRAPH_MAX_NODES = 50;
+// Defense-in-depth cap on how many persisted clusters one /graph/relationships call scans to
+// annotate nodes -- generous enough to never matter at this project's real scale, but bounds
+// worst-case table growth the same way GRAPH_MAX_NODES bounds worst-case account connectivity.
+const MAX_CLUSTERS_SCANNED = 5000;
 
 // Every query here carries an explicit LIMIT GRAPH_MAX_NODES: GRAPH_MAX_NODES exists precisely to
 // bound worst-case cost for a high-degree hub account or a widely-shared device/IP, and a query
@@ -53,9 +57,14 @@ function fetchTransactionCounterparties(db, accountId) {
 // to this account, ever"), not a real-time scoring check where an old, now-irrelevant device
 // reassignment should stop mattering.
 function fetchSharedIdentifierLinks(db, accountId) {
+  // Found during a full-project security review: this query had no LIMIT, contradicting this
+  // file's own header comment that every query here bounds worst-case cost -- a high-volume
+  // sender account forced a full unbounded scan+DISTINCT on every /graph/relationships call.
+  // Bounding it also transitively bounds findLinked() below, since deviceIds/ipAddresses/etc. can
+  // now never exceed GRAPH_MAX_NODES distinct values.
   const ownValues = db
-    .prepare('SELECT DISTINCT device_id, ip_address, identity_hash, bank_account_hash FROM transactions WHERE sender_id = ?')
-    .all(accountId);
+    .prepare('SELECT DISTINCT device_id, ip_address, identity_hash, bank_account_hash FROM transactions WHERE sender_id = ? LIMIT ?')
+    .all(accountId, GRAPH_MAX_NODES);
 
   const deviceIds = [...new Set(ownValues.map((r) => r.device_id).filter(Boolean))];
   const ipAddresses = [...new Set(ownValues.map((r) => r.ip_address).filter(Boolean))];
@@ -140,7 +149,12 @@ router.get('/graph/relationships', requireApiKey, (req, res) => {
 // and its degree in graph_edges -- cheap reads over the now-persisted tables, additive to the
 // existing live self-join response rather than a replacement for it.
 function enrichNodesWithGraphIntelligence(db, nodes) {
-  const clusterRows = db.prepare('SELECT cluster_id, member_ids_json FROM graph_clusters').all();
+  // Found during a full-project security review: unbounded full-table scan on every
+  // /graph/relationships call. Bounded generously (MAX_CLUSTERS_SCANNED) rather than tightly:
+  // this must still find the correct cluster for any of `nodes` regardless of table size at
+  // real project scale, this is defense-in-depth against pathological growth, not a change meant
+  // to affect normal-scale behavior.
+  const clusterRows = db.prepare('SELECT cluster_id, member_ids_json FROM graph_clusters LIMIT ?').all(MAX_CLUSTERS_SCANNED);
   const clusterByMember = new Map();
   for (const row of clusterRows) {
     let members = [];
@@ -187,7 +201,7 @@ router.get('/graph/blocked-tree', requireApiKey, (req, res) => {
   const db = req.app.locals.db;
   const accountId = req.query.account_id;
 
-  if (typeof accountId !== 'string' || accountId.trim() === '' || accountId.length > 50) {
+  if (typeof accountId !== 'string' || accountId.trim() === '' || accountId.length > MAX_ID_LENGTH) {
     return res.status(400).json({ error: 'account_id is required' });
   }
 
@@ -196,16 +210,31 @@ router.get('/graph/blocked-tree', requireApiKey, (req, res) => {
   const edges = [];
   let currentLevelNodes = [accountId];
   nodes.set(accountId, 0);
+  let truncated = false;
 
-  for (let depth = 0; depth < maxDepth; depth++) {
+  // Found during a full-project security review: each level queried up to 50 rows *per node at
+  // that level* with no cap on the total node count across the whole traversal -- level 1 could
+  // add up to 50 nodes, level 2 up to 50 more for *each* of those (<=2,500), level 3 up to 50 more
+  // for *each* of those (<=125,000), a combinatorial explosion of synchronous SQL statements from
+  // one GET. GRAPH_MAX_NODES now bounds the total node count the same way it already bounds
+  // /graph/relationships, and the traversal stops issuing new queries once the cap is hit.
+  outer: for (let depth = 0; depth < maxDepth; depth++) {
     const nextLevelNodes = [];
     for (const node of currentLevelNodes) {
+      if (nodes.size >= GRAPH_MAX_NODES) {
+        truncated = true;
+        break outer;
+      }
       const txs = db.prepare("SELECT sender_id, receiver_id, amount FROM transactions WHERE (sender_id = ? OR receiver_id = ?) AND decision = 'block' LIMIT 50")
         .all(node, node);
-      
+
       for (const tx of txs) {
         const other = tx.sender_id === node ? tx.receiver_id : tx.sender_id;
         if (!nodes.has(other)) {
+          if (nodes.size >= GRAPH_MAX_NODES) {
+            truncated = true;
+            break;
+          }
           nodes.set(other, depth + 1);
           nextLevelNodes.push(other);
           // Keep edge direction as from sender to receiver
@@ -217,13 +246,13 @@ router.get('/graph/blocked-tree', requireApiKey, (req, res) => {
     currentLevelNodes = nextLevelNodes;
   }
 
-  const resultNodes = Array.from(nodes.entries()).map(([id, level]) => ({ 
-    id, 
-    type: level === 0 ? 'root' : 'blocked', 
-    level 
+  const resultNodes = Array.from(nodes.entries()).map(([id, level]) => ({
+    id,
+    type: level === 0 ? 'root' : 'blocked',
+    level
   }));
 
-  res.json({ root: accountId, nodes: resultNodes, edges });
+  res.json({ root: accountId, nodes: resultNodes, edges, truncated });
 });
 
 module.exports = router;

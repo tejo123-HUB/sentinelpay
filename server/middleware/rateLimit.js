@@ -51,6 +51,55 @@ function checkAndRecord(ip) {
   return true;
 }
 
+// Factory for a second, independent per-IP sliding-window limiter with its own budget/window and
+// its own state map -- for routes whose real-world cost per request is far higher than "normal"
+// traffic (e.g. POST /ai/chat, a real billed LLM API call every time), where the generous global
+// 2000/min budget above (tuned to never throttle normal demo traffic) isn't a meaningful cost
+// guard. Found during a full-project security review: no route had a stricter budget than the
+// global one, so a single valid analyst-role key could trigger up to MAX_PER_WINDOW billed calls
+// per minute from one IP with zero dedicated throttle.
+function createLimiter(maxPerWindow, windowMs) {
+  const hits = new Map();
+
+  function check(ip) {
+    const key = ip || 'unknown';
+    const now = Date.now();
+    const windowStart = now - windowMs;
+
+    let timestamps = hits.get(key);
+    if (!timestamps) {
+      timestamps = [];
+      hits.set(key, timestamps);
+    }
+    while (timestamps.length > 0 && timestamps[0] < windowStart) timestamps.shift();
+
+    if (timestamps.length >= maxPerWindow) return false;
+    timestamps.push(now);
+    return true;
+  }
+
+  function middleware(req, res, next) {
+    const ip = req.ip || (req.socket && req.socket.remoteAddress);
+    if (!check(ip)) {
+      return res.status(429).json({ error: 'Too many requests, slow down' });
+    }
+    next();
+  }
+
+  const cleanup = setInterval(() => {
+    const cutoff = Date.now() - windowMs;
+    for (const [ip, timestamps] of hits) {
+      while (timestamps.length > 0 && timestamps[0] < cutoff) timestamps.shift();
+      if (timestamps.length === 0) hits.delete(ip);
+    }
+  }, windowMs);
+  if (typeof cleanup.unref === 'function') cleanup.unref();
+
+  middleware.checkAndRecord = check;
+  middleware.MAX_PER_WINDOW = maxPerWindow;
+  return middleware;
+}
+
 // /health is deliberately exempt: it's a liveness check meant to be cheap and always answerable
 // (e.g. by a process monitor or load balancer polling it frequently) — throttling it would defeat
 // its purpose and doesn't protect anything sensitive (it does no DB work, returns a static body).
@@ -84,3 +133,4 @@ module.exports = rateLimit;
 module.exports.checkAndRecord = checkAndRecord;
 module.exports.MAX_PER_WINDOW = MAX_PER_WINDOW;
 module.exports.WINDOW_MS = WINDOW_MS;
+module.exports.createLimiter = createLimiter;
