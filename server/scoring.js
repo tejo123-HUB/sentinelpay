@@ -60,7 +60,13 @@ function computeFraudScore(ruleResults, structuringLookup, mlProbability, fraudL
     RULE_SCORE_CAP
   );
 
-  const clampedProbability = Math.max(0, Math.min(mlProbability || 0, 1));
+  // Number.isFinite (not `|| 0`) is required here: `NaN || 0` does happen to fall back to 0, but
+  // a truthy non-numeric value (a string, an object -- e.g. an ML backend returning malformed
+  // JSON) survives `|| 0` and then poisons Math.min/Math.max into NaN, which silently defeats
+  // every downstream floor (CRITICAL_SEVERITY_FLOOR, STRUCTURING_ALERT_FLOOR, BLACKLIST_FLOOR all
+  // use Math.max, and Math.max(NaN, x) is NaN). Defense in depth alongside the mlClient-side check.
+  const safeProbability = Number.isFinite(mlProbability) ? mlProbability : 0;
+  const clampedProbability = Math.max(0, Math.min(safeProbability, 1));
   const mlContribution = clampedProbability * ML_MAX_CONTRIBUTION;
 
   let score = Math.max(0, Math.min(100, ruleWeightSum + mlContribution));

@@ -317,6 +317,29 @@ test('computeMuleScore: still correctly counts an outflow that shares the exact 
   assert.equal(score.qualifyingCycles, 1, 'the same-millisecond outflow should still count toward the ratio');
 });
 
+test('computeMuleScore: a confirmed mule stays flagged even after its incriminating receipts age out of the scanned window (regression)', () => {
+  // MULE_SCORE_MAX_RECEIPTS_SCANNED only scans the most recent 50 receipts. A launderer who
+  // qualifies once (recorded permanently via recordConfirmedMule, same as
+  // server/routes/transactions.js does after a live isMule hit) could previously "wash" that
+  // history clean by padding it with 50+ ordinary receipts, pushing the qualifying cycle out of
+  // the live-scanned window and silencing muleReceiverRisk.js's Critical-severity flag.
+  const { computeMuleScore, recordConfirmedMule } = require('../server/muleScore');
+  const db = buildTestDb();
+  insertUser(db, 'u_aged_mule');
+  recordConfirmedMule(db, 'u_aged_mule', 2, NOW_MS - 24 * 60 * 60 * 1000);
+
+  // 60 ordinary receipts, none followed by a matching outflow, all more recent than the confirmed
+  // record -- these fill (and exceed) the 50-receipt scan window on their own.
+  for (let i = 0; i < 60; i++) {
+    insertTransaction(db, { senderId: 'm_other', receiverId: 'u_aged_mule', amount: 10, msAgo: (59 - i) * 1000 });
+  }
+
+  const score = computeMuleScore(db, 'u_aged_mule', NOW_MS);
+
+  assert.equal(score.isMule, true, 'a previously-confirmed mule must not silently stop qualifying once its receipts age out of the scan window');
+  assert.equal(score.qualifyingCycles, 2);
+});
+
 // ---- getOutboundContext: Section 15.16 Features 4/8/10/11 ----
 
 function insertMerchantLogin(db, { merchantId, deviceId, country = null, msAgo }) {

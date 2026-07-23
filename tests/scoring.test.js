@@ -228,3 +228,26 @@ test('decision: threshold boundaries are exact', () => {
   assert.equal(decide(80), 'step_up');
   assert.equal(decide(81), 'block');
 });
+
+// ---- Regression: a malformed ML probability must not poison the score to NaN ----
+// `NaN || 0` happens to fall back to 0, but a truthy non-numeric value (a string, an object --
+// e.g. a compromised/misbehaving ML backend returning malformed JSON) survives `|| 0` and then
+// poisons Math.min/Math.max into NaN, which silently defeats every downstream floor (Critical,
+// structuring-alert, blacklist all use Math.max(score, FLOOR), and Math.max(NaN, x) is NaN).
+
+test('scoring: a non-numeric ML probability does not poison the score to NaN', () => {
+  const ruleResults = [ruleResult(true, 50, 'Receiver is a Suspected Mule Account', 'Critical', 'mule_receiver_risk')];
+  const { score } = computeFraudScore(ruleResults, { active: false, alert: null }, 'not-a-number');
+
+  assert.ok(Number.isFinite(score), `expected a finite score, got ${score}`);
+  assert.ok(score >= computeFraudScore.CRITICAL_SEVERITY_FLOOR, `Critical floor must still apply, got ${score}`);
+  assert.equal(decide(score), 'block');
+});
+
+test('scoring: an object as the ML probability does not poison the score to NaN', () => {
+  const structuringLookup = { active: true, alert: { reason: 'known ring' } };
+  const { score } = computeFraudScore([], structuringLookup, {});
+
+  assert.ok(Number.isFinite(score), `expected a finite score, got ${score}`);
+  assert.ok(score >= computeFraudScore.STRUCTURING_ALERT_FLOOR, `structuring floor must still apply, got ${score}`);
+});

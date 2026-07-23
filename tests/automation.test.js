@@ -50,6 +50,28 @@ test('autoWhitelistTrustedAccount: does not whitelist an account that is already
   assert.equal(check.whitelisted, false);
 });
 
+test('autoWhitelistTrustedAccount: does not override an existing watchlist entry (regression)', () => {
+  // An analyst's own watchlist decision (unrelated to mule detection, a plain POST /fraud-lists
+  // entry) must not be silently promoted to/overridden by an auto-whitelist just because the
+  // account later racks up enough rule-clean outbound transactions -- that would defeat the
+  // analyst's suspicion call the moment a transaction only trips a High- (not Critical-)severity
+  // detector, since scoring.js's WHITELIST_CEILING only backs off for Critical flags/active
+  // structuring alerts.
+  const db = buildTestDb();
+  const nowIso = new Date().toISOString();
+  db.prepare('INSERT INTO fraud_lists (entry_id, list_type, account_id, reason, created_at) VALUES (?, ?, ?, ?, ?)').run(
+    'fl_watch_1',
+    'watchlist',
+    'u_watched',
+    'analyst suspicion',
+    nowIso
+  );
+  autoWhitelistTrustedAccount(db, 'u_watched', AUTO_WHITELIST.MIN_TXN_COUNT + 50, 0);
+  const check = checkFraudLists(db, 'u_watched', 'u_watched');
+  assert.equal(check.watchlisted, true);
+  assert.equal(check.whitelisted, false);
+});
+
 test('autoWhitelistTrustedAccount: is idempotent (a second call does not create a duplicate entry)', () => {
   const db = buildTestDb();
   autoWhitelistTrustedAccount(db, 'u_trusted2', AUTO_WHITELIST.MIN_TXN_COUNT, 0);

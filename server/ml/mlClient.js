@@ -111,6 +111,14 @@ async function scoreViaHttpService(transaction, userHistory) {
   });
   if (!res.ok) throw new Error(`ML service responded with status ${res.status}`);
   const data = await res.json();
+  // A malformed/hostile response (non-numeric, NaN, out-of-range `probability`) must not reach
+  // computeFraudScore(), which uses Math.max/Math.min to blend and floor the score -- any NaN
+  // input there poisons the whole result (Math.max(NaN, ...) is NaN), silently defeating the
+  // Critical/structuring/blacklist floors on every future transaction. Fail closed to the same
+  // neutral-0 fallback the outer catch already uses for other ML errors.
+  if (typeof data.probability !== 'number' || !Number.isFinite(data.probability) || data.probability < 0 || data.probability > 1) {
+    throw new Error(`ML service returned an invalid probability: ${JSON.stringify(data.probability)}`);
+  }
   return data.probability;
 }
 

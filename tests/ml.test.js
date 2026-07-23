@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const net = require('node:net');
 const { DatabaseSync } = require('node:sqlite');
 
+const http = require('node:http');
 const { getFraudProbability, scoreLocal } = require('../server/ml/mlClient');
 const { SCHEMA } = require('../server/db');
 const { updateBaseline } = require('../server/adaptiveBaseline');
@@ -123,5 +124,33 @@ test('getFraudProbability: a hung python-service backend times out and fails ope
     if (originalUrl === undefined) delete process.env.ML_SERVICE_URL;
     else process.env.ML_SERVICE_URL = originalUrl;
     hungServer.close();
+  }
+});
+
+test('getFraudProbability: a malformed python-service probability fails open to 0, not NaN (regression)', async () => {
+  // A compromised or misbehaving ml/serve.py returning a non-numeric/out-of-range `probability`
+  // must not reach computeFraudScore() as NaN -- Math.max(NaN, FLOOR) is NaN, which would
+  // silently defeat every Critical/structuring/blacklist floor for every future transaction.
+  const badServer = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ probability: 'high' }));
+  });
+  await new Promise((resolve) => badServer.listen(0, resolve));
+  const port = badServer.address().port;
+
+  const originalMode = process.env.ML_SERVING_MODE;
+  const originalUrl = process.env.ML_SERVICE_URL;
+  process.env.ML_SERVING_MODE = 'python-service';
+  process.env.ML_SERVICE_URL = `http://127.0.0.1:${port}/predict`;
+
+  try {
+    const p = await getFraudProbability(cleanTransaction, cleanHistory);
+    assert.equal(p, 0, 'a malformed probability should fail open to neutral 0, not propagate as NaN');
+  } finally {
+    if (originalMode === undefined) delete process.env.ML_SERVING_MODE;
+    else process.env.ML_SERVING_MODE = originalMode;
+    if (originalUrl === undefined) delete process.env.ML_SERVICE_URL;
+    else process.env.ML_SERVICE_URL = originalUrl;
+    badServer.close();
   }
 });

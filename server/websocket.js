@@ -52,13 +52,21 @@ function attachWebSocketServer(server) {
   // same per-IP counter as the HTTP API (rateLimit.checkAndRecord) rather than its own independent
   // budget, so splitting a flood across HTTP and WS doesn't effectively double an attacker's
   // allowance.
+  // wss.clients only gains an entry once a handshake fully completes, but verifyClient runs
+  // *during* the handshake -- a burst of concurrent connection attempts can all read the same
+  // under-the-cap wss.clients.size before any of them finishes and gets counted, letting the cap
+  // be briefly exceeded (a classic check-then-act race). pendingConnections reserves a slot the
+  // moment a client passes the check, so the count used by the next concurrent check already
+  // reflects handshakes still in flight, not just ones that have already completed.
+  let pendingConnections = 0;
+
   function verifyClient(info, callback) {
     const ip = info.req.socket && info.req.socket.remoteAddress;
     if (!rateLimit.checkAndRecord(ip)) {
       return callback(false, 429, 'Too Many Requests');
     }
 
-    if (wss.clients.size >= MAX_CONCURRENT_CONNECTIONS) {
+    if (wss.clients.size + pendingConnections >= MAX_CONCURRENT_CONNECTIONS) {
       return callback(false, 503, 'Too Many Connections');
     }
 
@@ -69,6 +77,7 @@ function attachWebSocketServer(server) {
     if (!provided || !resolveRole(provided)) {
       return callback(false, 401, 'Unauthorized');
     }
+    pendingConnections += 1;
     callback(true);
   }
 
@@ -87,6 +96,10 @@ function attachWebSocketServer(server) {
   });
 
   wss.on('connection', (ws) => {
+    // The handshake this reservation was guarding is now complete -- wss.clients already counts
+    // this connection, so release the pending slot to avoid double-counting it forever.
+    pendingConnections = Math.max(0, pendingConnections - 1);
+
     // Heartbeat state: starts alive, flipped back to true on every pong, checked (and flipped to
     // false again) by the interval below.
     ws.isAlive = true;

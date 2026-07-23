@@ -19,18 +19,12 @@
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css"
     integrity="sha384-sHL9NAb7lN7rfvG5lfHpm643Xkcjzp4jFvuavGOndn6pjVqS6ny56CAt3nsEVT4H" crossorigin="anonymous" />
   <!--
-    IBM Plex Sans/Mono — chosen deliberately over the more common Inter/system-font default:
-    it's IBM's own enterprise/technical design-system typeface, reads as a considered choice for
-    a fraud-ops console rather than a generic SaaS-template font. Loaded as pinned Fontsource npm
-    packages via jsdelivr (exact versions below), not fonts.googleapis.com — Google Fonts' CSS
-    endpoint varies its response by requesting user-agent, which is fundamentally incompatible
-    with a fixed SRI hash; these per-weight package files are immutable at their pinned version,
-    so they can carry the same SRI guarantee as every other asset here. Only the weights actually
-    used in style.css are loaded. (SRI on a CSS file's own bytes doesn't extend to the @font-face
-    src files it references, same as leaflet.css above — an accepted, existing limit of CSS SRI
-    in this project, not a lesser standard applied only here.)
+    Plus Jakarta Sans / JetBrains Mono, loaded from Google Fonts' CSS endpoint. No SRI hash here
+    (unlike leaflet.css/chart.js above): that endpoint varies its response by request user-agent,
+    which is fundamentally incompatible with a fixed SRI hash — an accepted, existing gap for this
+    one asset, not an oversight. security_headers.js's CSP explicitly allows fonts.googleapis.com
+    (style-src) and fonts.gstatic.com (font-src) to make this load.
   -->
-  <!-- Gen Z Modern Typography -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">

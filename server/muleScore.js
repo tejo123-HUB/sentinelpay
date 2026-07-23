@@ -40,10 +40,25 @@ function computeMuleScore(db, accountId, nowMs) {
     }
   }
 
+  let isMule = qualifyingCycles >= MULE_DETECTION.MULE_MIN_QUALIFYING_CYCLES;
+  if (!isMule) {
+    // A previously-confirmed mule (recordConfirmedMule, below) must not silently stop qualifying
+    // just because its incriminating receipts aged out of the MULE_SCORE_MAX_RECEIPTS_SCANNED
+    // window -- otherwise muleReceiverRisk.js's Critical-severity flag (weight 50) permanently
+    // downgrades to entityReputationRisk's High-severity MULE_SCORE_FLOOR (weight 30) the moment a
+    // launderer pads their receipt history with enough ordinary payments to push the confirmed
+    // cycles out of the scanned window.
+    const confirmed = db.prepare('SELECT qualifying_cycles FROM mule_accounts WHERE account_id = ?').get(accountId);
+    if (confirmed) {
+      isMule = true;
+      qualifyingCycles = Math.max(qualifyingCycles, confirmed.qualifying_cycles);
+    }
+  }
+
   return {
     qualifyingCycles,
     receiptsScanned: receipts.length,
-    isMule: qualifyingCycles >= MULE_DETECTION.MULE_MIN_QUALIFYING_CYCLES,
+    isMule,
   };
 }
 

@@ -91,7 +91,13 @@ function autoWhitelistTrustedAccount(db, accountId, txnCount, reputationScore) {
   if (txnCount < AUTO_WHITELIST.MIN_TXN_COUNT || reputationScore > AUTO_WHITELIST.MAX_REPUTATION_SCORE) return;
 
   const existing = checkFraudLists(db, accountId, accountId);
-  if (existing.blacklisted || existing.whitelisted) return; // already whitelisted, or a confirmed bad actor shouldn't be auto-whitelisted regardless of a since-diluted score
+  // Also bail on an existing watchlist entry: that's an analyst's own suspicion call (unrelated
+  // to mule detection -- a plain POST /fraud-lists entry), and it must not be silently overridden
+  // by this account later accumulating enough rule-clean outbound transactions to qualify for
+  // auto-whitelist. Whitelisting here would cap the score at WHITELIST_CEILING (scoring.js)
+  // whenever no Critical-severity rule or active structuring alert fires, defeating the analyst's
+  // decision on any transaction that only trips High-severity detectors.
+  if (existing.blacklisted || existing.whitelisted || existing.watchlisted) return;
 
   const entryId = `fl_${crypto.randomUUID()}`;
   const nowIso = new Date().toISOString();
