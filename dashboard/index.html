@@ -131,8 +131,15 @@
           for the actual size — the standard, documented Chart.js pattern), rather than fighting
           its own JS-set inline canvas styles with CSS !important.
         -->
-        <div class="decision-chart-frame">
-          <canvas id="decision-chart" width="72" height="72"></canvas>
+        <div class="decision-chart-wrap">
+          <div class="decision-chart-frame">
+            <canvas id="decision-chart" width="72" height="72"></canvas>
+          </div>
+          <div class="decision-chart-legend">
+            <span><i class="legend-dot legend-allow"></i>Allow</span>
+            <span><i class="legend-dot legend-stepup"></i>Step-Up</span>
+            <span><i class="legend-dot legend-block"></i>Block</span>
+          </div>
         </div>
       </div>
       <div class="table-scroll">

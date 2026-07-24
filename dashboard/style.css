@@ -545,11 +545,25 @@ body {
 /* Gives Chart.js's responsive canvas a fixed box to fill (see the comment on this element in
    index.html) — without it the donut chart grows to fill most of the panel header instead of
    staying a compact glance-able indicator next to the title. */
+.decision-chart-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
 .decision-chart-frame {
   position: relative;
   width: 72px;
   height: 72px;
   flex-shrink: 0;
+}
+
+.decision-chart-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.75rem;
+  color: var(--text-dim);
 }
 
 /* ---- Live transactions table ---- */
