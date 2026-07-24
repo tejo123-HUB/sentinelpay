@@ -15,6 +15,7 @@
 //   node simulator/simulate_transactions.js --scenario=structuring
 //   node simulator/simulate_transactions.js --scenario=odd-hour       (inbound, no longer blocks — see above)
 //   node simulator/simulate_transactions.js --scenario=outbound-fraud
+//   node simulator/simulate_transactions.js --scenario=step-up
 //   node simulator/simulate_transactions.js --scenario=refund-fraud
 //   node simulator/simulate_transactions.js --scenario=merchant-takeover
 //   node simulator/simulate_transactions.js --scenario=mule
@@ -363,14 +364,59 @@ function generateNormalTransaction() {
 // comment above generateNormalTransaction).
 const NORMAL_STREAM_RISK_INJECTION_INTERVAL = 40;
 
+// Roughly one genuine step-up case per this many ordinary transactions -- deliberately more
+// frequent than NORMAL_STREAM_RISK_INJECTION_INTERVAL above (step_up is meant to be the "unusual
+// but not outright blocked" middle tier, so it should show up more often than a full block) but
+// still "a few," not constant, so the live donut chart reads as mostly clean traffic with
+// occasional review cases rather than a feed dominated by flags. Not a divisor/multiple of
+// NORMAL_STREAM_RISK_INJECTION_INTERVAL (40), so the two injections never land on the exact same
+// iteration and mask each other.
+const NORMAL_STREAM_STEPUP_INJECTION_INTERVAL = 17;
+
+// Regression (found the same way as the purchaseLedger/lastMerchantOutboundEventMs fixes above --
+// by actually running --scenario=normal --continuous against a live server for several minutes
+// and inspecting what it produced): repeatedly picking a merchant at random for the
+// account-takeover burst above lets the *same* merchant get hit several times within
+// server/structuring/splitDetection.js's 10-minute window. Each hit is individually small (5
+// rapid payouts under its 50,000 single-transaction exemption, ~3,550 total -- below its 20,000
+// threshold on its own), but splitDetection.js sums *all* of a sender's qualifying transfers in
+// the window, with no notion of "these came from N separate scripted events." A few repeat hits
+// on one merchant is enough to cross both its count and total thresholds, which
+// server/structuring/backgroundJob.js turns into a structuring_alerts row, which
+// server/autoFraudListing.js then auto-blacklists -- and once an account is blacklisted,
+// scoring.js's BLACKLIST_FLOOR (95) forces *every* future transaction touching it to block,
+// inbound included. Verified live: an unthrottled continuous run cascaded to 108/157 processed
+// transactions blocked within a few minutes, almost all of it innocent inbound customer purchases
+// to one poisoned merchant, not the scripted attacks themselves. Spreading repeat hits across
+// different merchants (this cooldown) keeps each merchant's own rolling total comfortably under
+// splitDetection's threshold instead of concentrating it on whichever account chance happens to
+// pick twice in a row.
+const OUTBOUND_FRAUD_MERCHANT_COOLDOWN_MS = 11 * 60 * 1000; // comfortably above splitDetection.js's own 10-minute SPLIT_WINDOW_MS
+const lastOutboundFraudHitMs = new Map(); // merchantAccount -> when it last took the account-takeover burst
+
+function pickMerchantAvoidingRecentAttack(nowMs) {
+  const eligible = MERCHANT_RECEIVER_POOL.filter((id) => nowMs - (lastOutboundFraudHitMs.get(id) || 0) >= OUTBOUND_FRAUD_MERCHANT_COOLDOWN_MS);
+  if (eligible.length === 0) return null; // every merchant was hit recently -- skip this cycle rather than pile onto one
+  return eligible[Math.floor(Math.random() * eligible.length)];
+}
+
 async function runNormalStream(baseUrl, count, rateMs, continuous) {
   console.log(`[normal] streaming ${continuous ? 'continuously' : count + ' transactions'} at ~${rateMs}ms intervals`);
   let sent = 0;
   // eslint-disable-next-line no-constant-condition
   while (continuous || sent < count) {
     if (sent > 0 && sent % NORMAL_STREAM_RISK_INJECTION_INTERVAL === 0) {
-      console.log('[normal] injecting a genuine account-takeover burst so the live feed shows real detection, not just clean traffic...');
-      await triggerOutboundFraudScenario(baseUrl);
+      const target = pickMerchantAvoidingRecentAttack(Date.now());
+      if (!target) {
+        console.log('[normal] skipping this account-takeover injection -- every merchant was hit within the last structuring window');
+      } else {
+        lastOutboundFraudHitMs.set(target, Date.now());
+        console.log('[normal] injecting a genuine account-takeover burst so the live feed shows real detection, not just clean traffic...');
+        await triggerOutboundFraudScenario(baseUrl, target);
+      }
+    } else if (sent > 0 && sent % NORMAL_STREAM_STEPUP_INJECTION_INTERVAL === 0) {
+      console.log('[normal] injecting a genuine step-up case so the live feed shows the review tier too, not just allow/block...');
+      await triggerNewVendorStepUpScenario(baseUrl);
     }
     const tx = generateNormalTransaction();
     const { status, body } = await postTransaction(baseUrl, tx);
@@ -602,8 +648,13 @@ async function triggerOddHourScenario(baseUrl) {
 // attacked the merchant from the customer side, no longer scored — see triggerFraudScenario
 // above). Triggers velocity + device mismatch + impossible travel from the existing rule set,
 // plus payoutToNewReceiver.js and outboundFanOutBurst.js from the new outbound-only detectors.
-async function triggerOutboundFraudScenario(baseUrl) {
-  const sender = randomMerchantAccount(); // one of the business's own accounts, "compromised"
+//
+// @param {string} [senderOverride] - use this account as the "compromised" sender instead of
+// picking randomly. runNormalStream's periodic injection passes one explicitly (see
+// pickMerchantAvoidingRecentAttack below) to keep repeat attacks spread across different
+// merchants; standalone `--scenario=outbound-fraud` runs leave this unset and pick randomly.
+async function triggerOutboundFraudScenario(baseUrl, senderOverride) {
+  const sender = senderOverride || randomMerchantAccount(); // one of the business's own accounts, "compromised"
   const gateway = randomGateway();
   const homeLat = 16.5062;
   const homeLng = 80.648;
@@ -648,6 +699,116 @@ async function triggerOutboundFraudScenario(baseUrl) {
     console.warn('[outbound-fraud] WARNING: expected a block decision, got:', finalResult.body && finalResult.body.decision);
   }
   return finalResult;
+}
+
+// Each merchant's one recurring "regular vendor" for triggerNewVendorStepUpScenario below --
+// created once per merchant, on that merchant's first step-up injection, and reused on every
+// later one. Two reasons this is stable rather than a fresh randomId() per call: (1) it's more
+// realistic (a business has a handful of vendors it pays repeatedly, not a new one every time),
+// and (2) it avoids repeatedly re-priming a "known receiver" relationship from scratch, which
+// used to add two extra small transfers per injection -- see the structuring note below for why
+// that count mattered.
+const stepUpVendorForMerchant = new Map(); // merchantAccount -> vendor u_ id
+
+// Demonstrates a genuinely moderate risk case landing in decision.js's step_up band -- not an
+// attack, just an unusually large one-off vendor payment relative to this specific merchant
+// account's own typical send size. Empirically tuned (verified live against a running server,
+// not just reasoned about statically): a payout sized to trip only amountAnomaly.js's z-score
+// check (weight 45, Medium) -- landing at 45 + up to 30 points of ML contribution, i.e. 45-75,
+// comfortably inside the 40-80 step_up band and nowhere near the block threshold.
+//
+// Getting there cleanly required real care, or this collides with *other* detectors and forces a
+// block instead:
+//   1. The payout amount is deliberately kept >= server/structuring/splitDetection.js's
+//      SINGLE_TX_ALERT_THRESHOLD (50,000) -- below that, this counts as a small "transfer" that
+//      the structuring background job accumulates *across every future call of this function*
+//      against the same sender within its 10-minute window (splitDetection.js has no concept of
+//      "this was one scripted demo event," it just sees N small transfers summing past 20,000
+//      from one sender within 10 minutes and calls it structuring). The original, naive version
+//      of this scenario paid a brand-new random vendor 28k-36k -- individually
+//      harmless, but a merchant that happened to also draw a triggerOutboundFraudScenario burst
+//      (rapid small payouts to several fresh receivers -- see above) within the same 10-minute
+//      window crossed splitDetection's thresholds, got auto-blacklisted
+//      (server/autoFraudListing.js floors BLACKLIST_FLOOR=95 on *every* future transaction touching
+//      that account, inbound included), and then a large share of all subsequent traffic through
+//      that one merchant started blocking -- verified live: a 200-transaction continuous run
+//      cascaded to 108/157 processed transactions blocked before this fix. Paying >=50,000
+//      instead exempts this transaction from splitDetection.js entirely (transactions.js excludes
+//      anything at/above SINGLE_TX_ALERT_THRESHOLD, the exact size structuring is designed to
+//      evade by splitting -- a single big transfer isn't a split).
+//   2. The vendor relationship (stepUpVendorForMerchant, above) is established once and reused,
+//      so newVendorRisk.js/payoutToNewReceiver.js never fire here (receiver already known) even
+//      though the amount is now past their own 50,000 step-up tier.
+//   3. A handful of ordinary customer purchases *into* this merchant first (scaled to the
+//      payout amount), so rollingInboundTotal comfortably covers >1.5x the final payout --
+//      otherwise outboundRatioAnomaly.js piles on another 35 points and, combined with
+//      amountAnomaly's 45, tips the combined score into block.
+async function triggerNewVendorStepUpScenario(baseUrl) {
+  const sender = randomMerchantAccount();
+  const gateway = randomGateway();
+
+  let vendor = stepUpVendorForMerchant.get(sender);
+  const isFirstForThisMerchant = !vendor;
+  if (!vendor) {
+    vendor = randomId('u_vendor_regular');
+    stepUpVendorForMerchant.set(sender, vendor);
+  }
+
+  const amount = Math.round((55000 + Math.random() * 20000) * 100) / 100; // 55,000-75,000: at/above splitDetection's 50,000 exemption line, nowhere near newVendorRisk's 200,000 block tier (moot anyway once the vendor is known)
+
+  console.log(
+    `[step-up] priming ${sender} with inbound revenue${isFirstForThisMerchant ? ' and a known-vendor relationship' : ''} before the step-up payout...`
+  );
+
+  // Phase 1: inbound revenue, comfortably more than 1.5x the eventual payout, from distinct
+  // one-off customers (fraud/AML scoring is outbound-only, so these always just auto-allow).
+  for (let i = 0; i < 6; i += 1) {
+    await postTransaction(baseUrl, {
+      sender_id: randomId('u_stepup_customer'),
+      receiver_id: sender,
+      amount: amount / 3 + Math.random() * (amount / 6),
+      timestamp: new Date().toISOString(),
+      merchant_id: gateway,
+      transaction_type: 'transfer',
+    });
+  }
+
+  // Phase 2 (only needed once per merchant): two small payouts to the vendor so it's already a
+  // known receiver by the time the large payout below goes out -- see point 2 above.
+  if (isFirstForThisMerchant) {
+    for (let i = 0; i < 2; i += 1) {
+      await postTransaction(baseUrl, {
+        sender_id: sender,
+        receiver_id: vendor,
+        amount: 1500 + Math.random() * 1000,
+        timestamp: new Date().toISOString(),
+        merchant_id: gateway,
+        purpose: `Vendor payout - partial installment #${Math.floor(1000 + Math.random() * 9000)}`,
+        transaction_type: 'transfer',
+      });
+      await sleep(200);
+    }
+  }
+
+  console.log(`[step-up] scripted large payout from ${sender} to regular vendor ${vendor}: ₹${amount}`);
+
+  const result = await postTransaction(baseUrl, {
+    sender_id: sender,
+    receiver_id: vendor,
+    amount,
+    timestamp: new Date().toISOString(),
+    merchant_id: gateway,
+    purpose: `Vendor payout - invoice #${Math.floor(100000 + Math.random() * 900000)}`,
+    transaction_type: 'transfer',
+  });
+
+  console.log('[step-up] result:', result.body);
+  if (result.body && result.body.decision === 'step_up') {
+    console.log('[step-up] OK: large payout to a regular vendor was correctly stepped-up');
+  } else {
+    console.warn('[step-up] WARNING: expected a step_up decision, got:', result.body && result.body.decision);
+  }
+  return result;
 }
 
 // Demonstrates refundWithoutPurchase.js: a business account issues a large refund-purpose
@@ -783,6 +944,8 @@ async function main() {
     await triggerOddHourScenario(args.baseUrl);
   } else if (args.scenario === 'outbound-fraud') {
     await triggerOutboundFraudScenario(args.baseUrl);
+  } else if (args.scenario === 'step-up') {
+    await triggerNewVendorStepUpScenario(args.baseUrl);
   } else if (args.scenario === 'refund-fraud') {
     await triggerRefundFraudScenario(args.baseUrl);
   } else if (args.scenario === 'merchant-takeover') {
@@ -795,12 +958,13 @@ async function main() {
     await triggerStructuringScenario(args.baseUrl);
     await triggerOddHourScenario(args.baseUrl);
     await triggerOutboundFraudScenario(args.baseUrl);
+    await triggerNewVendorStepUpScenario(args.baseUrl);
     await triggerRefundFraudScenario(args.baseUrl);
     await triggerMerchantTakeoverScenario(args.baseUrl);
     await triggerMuleScenario(args.baseUrl);
   } else {
     console.error(
-      `Unknown scenario "${args.scenario}". Use normal | fraud | structuring | odd-hour | outbound-fraud | refund-fraud | merchant-takeover | mule | all.`
+      `Unknown scenario "${args.scenario}". Use normal | fraud | structuring | odd-hour | outbound-fraud | step-up | refund-fraud | merchant-takeover | mule | all.`
     );
     process.exitCode = 1;
   }
@@ -821,6 +985,7 @@ module.exports = {
   triggerStructuringScenario,
   triggerOddHourScenario,
   triggerOutboundFraudScenario,
+  triggerNewVendorStepUpScenario,
   triggerRefundFraudScenario,
   triggerMerchantTakeoverScenario,
   triggerMuleScenario,
