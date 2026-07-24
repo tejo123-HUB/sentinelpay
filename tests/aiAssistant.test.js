@@ -8,6 +8,7 @@ const { DatabaseSync } = require('node:sqlite');
 const http = require('node:http');
 
 delete process.env.ANTHROPIC_API_KEY;
+delete process.env.GEMINI_API_KEY;
 
 const {
   parseNaturalLanguageQuery,
@@ -16,6 +17,7 @@ const {
   generateReportNarrative,
   answerDeterministically,
   llmConfigured,
+  callLlm,
 } = require('../server/aiAssistant');
 const { SCHEMA } = require('../server/db');
 
@@ -244,6 +246,82 @@ test('answerDeterministically: falls back to a categorized help message for an u
 
 test('llmConfigured: false with no ANTHROPIC_API_KEY set', () => {
   assert.equal(llmConfigured(), false);
+});
+
+test('llmConfigured: true with only GEMINI_API_KEY set', () => {
+  process.env.GEMINI_API_KEY = 'test-fake-gemini-key';
+  try {
+    assert.equal(llmConfigured(), true);
+  } finally {
+    delete process.env.GEMINI_API_KEY;
+  }
+});
+
+test('callLlm: prefers Gemini over Claude when both keys are configured', async () => {
+  process.env.GEMINI_API_KEY = 'test-fake-gemini-key';
+  process.env.ANTHROPIC_API_KEY = 'test-fake-anthropic-key';
+  const originalFetch = global.fetch;
+  const calledUrls = [];
+  global.fetch = async (url, opts) => {
+    calledUrls.push(String(url));
+    assert.ok(String(url).includes('generativelanguage.googleapis.com'), 'expected the Gemini endpoint, not Claude');
+    assert.equal(opts.headers['x-goog-api-key'], 'test-fake-gemini-key');
+    assert.ok(!opts.headers['x-api-key'], 'must not send the Anthropic auth header on a Gemini call');
+    return {
+      ok: true,
+      json: async () => ({ candidates: [{ content: { parts: [{ text: 'Gemini reply.' }] } }] }),
+    };
+  };
+
+  try {
+    const reply = await callLlm('system prompt', 'user message');
+    assert.equal(reply, 'Gemini reply.');
+    assert.equal(calledUrls.length, 1, 'Claude must never be called when Gemini already answered');
+  } finally {
+    global.fetch = originalFetch;
+    delete process.env.GEMINI_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+  }
+});
+
+test('callLlm: falls through to Claude when Gemini is configured but its call fails', async () => {
+  process.env.GEMINI_API_KEY = 'test-fake-gemini-key';
+  process.env.ANTHROPIC_API_KEY = 'test-fake-anthropic-key';
+  const originalFetch = global.fetch;
+  global.fetch = async (url) => {
+    if (String(url).includes('generativelanguage.googleapis.com')) {
+      return { ok: false };
+    }
+    return {
+      ok: true,
+      json: async () => ({ content: [{ text: 'Claude fallback reply.' }] }),
+    };
+  };
+
+  try {
+    const reply = await callLlm('system prompt', 'user message');
+    assert.equal(reply, 'Claude fallback reply.');
+  } finally {
+    global.fetch = originalFetch;
+    delete process.env.GEMINI_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+  }
+});
+
+test('callLlm: returns null when the only configured provider fails, no throw', async () => {
+  process.env.GEMINI_API_KEY = 'test-fake-gemini-key';
+  const originalFetch = global.fetch;
+  global.fetch = async () => {
+    throw new Error('network down');
+  };
+
+  try {
+    const reply = await callLlm('system prompt', 'user message');
+    assert.equal(reply, null);
+  } finally {
+    global.fetch = originalFetch;
+    delete process.env.GEMINI_API_KEY;
+  }
 });
 
 // ---- routes ----

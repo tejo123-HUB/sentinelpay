@@ -55,10 +55,10 @@ router.post('/ai/search', requireApiKey, (req, res) => {
 // mechanism rather than two near-identical endpoints, this project's established convention e.g.
 // GET /analytics/top-risky's single dimension-parameterized route).
 // Security fix (post-merge audit): analyst-or-above, not just any valid key -- when
-// ANTHROPIC_API_KEY is configured this makes a real, billed outbound call to the Claude API on
-// every invocation, the same "real-world consequence, not just a read" reasoning that already
-// gates POST /notifications/push-subscriptions above viewer level. /ai/search stays viewer-level:
-// it's regex-only, no external call, no cost.
+// GEMINI_API_KEY or ANTHROPIC_API_KEY is configured this makes a real, billed outbound call to
+// the Gemini or Claude API on every invocation, the same "real-world consequence, not just a
+// read" reasoning that already gates POST /notifications/push-subscriptions above viewer level.
+// /ai/search stays viewer-level: it's regex-only, no external call, no cost.
 router.post('/ai/chat', requireApiKey, requireRole('analyst'), aiChatRateLimit, async (req, res) => {
   const db = req.app.locals.db;
   const { message, case_id, history } = req.body || {};

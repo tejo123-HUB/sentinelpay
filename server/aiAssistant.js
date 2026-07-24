@@ -4,14 +4,16 @@
 // GET /merchants/:id/risk-forecast in server/routes/entityIntelligence.js -- server/forecasting.js
 // -- not duplicated here.)
 //
-// PROD: Claude API (Anthropic) for genuinely free-form natural-language understanding and
-// generation -- DEMO: every function here has a real, deterministic, rule-based implementation
-// that requires no API key and always works, matching this project's `// PROD: X -- DEMO: Y`
-// convention (mlClient.js's ML_SERVING_MODE=vertex stub, notifications.js's per-channel env-var
-// gates). When ANTHROPIC_API_KEY is set, callLlm() genuinely calls the Claude API to produce a
-// richer answer; on any failure (missing key, network error, bad response) it falls back to the
-// deterministic path rather than erroring -- a demo running with no API key configured is not a
-// degraded experience, it's the default one.
+// PROD/current: Google Gemini API (`GEMINI_API_KEY`) is the preferred LLM provider for genuinely
+// free-form natural-language understanding and generation, with the Claude API (`ANTHROPIC_API_KEY`)
+// as an alternative and every function here also having a real, deterministic, rule-based
+// implementation that requires no API key at all and always works -- matching this project's
+// `// PROD: X -- DEMO: Y` convention (mlClient.js's ML_SERVING_MODE=vertex stub, notifications.js's
+// per-channel env-var gates). When GEMINI_API_KEY is set, callLlm() genuinely calls the Gemini API
+// (generativelanguage.googleapis.com) to produce a richer answer; if only ANTHROPIC_API_KEY is set,
+// it calls Claude instead; on any failure (missing key, network error, bad response) it falls back
+// to the deterministic path rather than erroring -- a demo running with no API key configured is
+// not a degraded experience, it's the default one.
 const { FRAUD_SIGNATURES } = require('./fraudSignatures');
 const { computeReputationScore } = require('./reputation');
 const decide = require('./decision');
@@ -19,11 +21,48 @@ const computeFraudScore = require('./scoring');
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 const ANTHROPIC_MODEL = 'claude-sonnet-5';
+const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
 const LLM_TIMEOUT_MS = 8000;
 const LLM_MAX_TOKENS = 600;
 
 function llmConfigured() {
-  return !!process.env.ANTHROPIC_API_KEY;
+  return !!(process.env.GEMINI_API_KEY || process.env.ANTHROPIC_API_KEY);
+}
+
+/**
+ * Calls the Google Gemini API with a system prompt and a user message. Returns null on any
+ * failure -- callers always have a fallback (Claude, then the deterministic path) and must never
+ * surface a raw API error to the dashboard. Auth via the `x-goog-api-key` header rather than the
+ * `?key=` query-string form the docs also support, so the key never ends up in a URL/access log.
+ * @param {string} systemPrompt
+ * @param {string} userMessage
+ * @returns {Promise<string|null>}
+ */
+async function callGeminiLlm(systemPrompt, userMessage) {
+  if (!process.env.GEMINI_API_KEY) return null;
+  try {
+    const res = await fetch(`${GEMINI_API_URL}/${GEMINI_MODEL}:generateContent`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': process.env.GEMINI_API_KEY,
+      },
+      body: JSON.stringify({
+        system_instruction: { parts: [{ text: systemPrompt }] },
+        contents: [{ role: 'user', parts: [{ text: userMessage }] }],
+        generationConfig: { maxOutputTokens: LLM_MAX_TOKENS },
+      }),
+      signal: AbortSignal.timeout(LLM_TIMEOUT_MS),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const parts = data.candidates?.[0]?.content?.parts || [];
+    const text = parts.map((p) => p.text || '').join('').trim();
+    return text || null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -34,8 +73,8 @@ function llmConfigured() {
  * @param {string} userMessage
  * @returns {Promise<string|null>}
  */
-async function callLlm(systemPrompt, userMessage) {
-  if (!llmConfigured()) return null;
+async function callClaudeLlm(systemPrompt, userMessage) {
+  if (!process.env.ANTHROPIC_API_KEY) return null;
   try {
     const res = await fetch(ANTHROPIC_API_URL, {
       method: 'POST',
@@ -59,6 +98,25 @@ async function callLlm(systemPrompt, userMessage) {
   } catch {
     return null;
   }
+}
+
+/**
+ * Dispatches to whichever LLM provider is configured -- Gemini preferred when both keys are set,
+ * since it's the primary provider for this project, falling through to Claude if Gemini is
+ * configured but its call fails (network error, bad response) and a Claude key is also available.
+ * Returns null (never throws) if no provider is configured or every configured provider's call
+ * fails, so callers can always fall back to the deterministic path.
+ * @param {string} systemPrompt
+ * @param {string} userMessage
+ * @returns {Promise<string|null>}
+ */
+async function callLlm(systemPrompt, userMessage) {
+  if (process.env.GEMINI_API_KEY) {
+    const reply = await callGeminiLlm(systemPrompt, userMessage);
+    if (reply) return reply;
+  }
+  if (process.env.ANTHROPIC_API_KEY) return callClaudeLlm(systemPrompt, userMessage);
+  return null;
 }
 
 // ---- Natural Language Fraud Search ----
@@ -588,6 +646,8 @@ async function answerChatMessage(db, message, caseContext, history = []) {
 module.exports = {
   llmConfigured,
   callLlm,
+  callGeminiLlm,
+  callClaudeLlm,
   parseNaturalLanguageQuery,
   executeNaturalLanguageSearch,
   generateFraudInsights,
