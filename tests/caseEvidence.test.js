@@ -215,3 +215,64 @@ test('GET /cases/:caseId/evidence/:evidenceId/content: 404s for an unknown evide
     server.close();
   }
 });
+
+// Google Cloud Storage integration (24 July 2026): when GCS_BUCKET_NAME is configured, evidence
+// content genuinely round-trips through @google-cloud/storage's Bucket/File API rather than the
+// local filesystem. A real GCS project isn't available in this test environment, so this injects
+// a fake bucket via caseEvidence.js's _setGcsBucketForTests() test seam (the same "swap out the
+// thing that talks to the network" approach this project already uses via global.fetch
+// monkeypatching elsewhere) -- what's under test is that the route/module actually call
+// file().save()/download() with the right object name, not the real GCS network behavior.
+test('POST/GET evidence: uses the configured GCS bucket (save/download) instead of the filesystem when GCS_BUCKET_NAME is set', async () => {
+  process.env.GCS_BUCKET_NAME = 'test-fake-bucket';
+  const { server } = await freshServer();
+  const caseEvidenceModule = require('../server/caseEvidence');
+
+  const store = new Map();
+  const savedCalls = [];
+  const downloadCalls = [];
+  const fakeBucket = {
+    file(objectName) {
+      return {
+        save: async (buffer) => {
+          savedCalls.push(objectName);
+          store.set(objectName, buffer);
+        },
+        download: async () => {
+          downloadCalls.push(objectName);
+          if (!store.has(objectName)) {
+            const err = new Error('not found');
+            err.code = 404;
+            throw err;
+          }
+          return [store.get(objectName)];
+        },
+      };
+    },
+  };
+  caseEvidenceModule._setGcsBucketForTests(fakeBucket);
+
+  try {
+    const caseId = await createCase(server);
+    const content = Buffer.from('gcs-backed evidence bytes');
+    const uploadRes = await request(server, 'POST', `/cases/${caseId}/evidence`, {
+      filename: 'gcs-file.bin',
+      content_base64: content.toString('base64'),
+    });
+    assert.equal(uploadRes.status, 201);
+    assert.equal(savedCalls.length, 1);
+    assert.equal(savedCalls[0], uploadRes.body.evidence_id);
+    // Never written to the local filesystem path when GCS is configured.
+    assert.ok(!store.has('nonexistent'));
+
+    const downloadRes = await request(server, 'GET', `/cases/${caseId}/evidence/${uploadRes.body.evidence_id}/content`);
+    assert.equal(downloadRes.status, 200);
+    assert.equal(downloadRes.raw.toString('utf-8'), content.toString('utf-8'));
+    assert.equal(downloadCalls.length, 1);
+    assert.equal(downloadCalls[0], uploadRes.body.evidence_id);
+  } finally {
+    caseEvidenceModule._setGcsBucketForTests(null);
+    delete process.env.GCS_BUCKET_NAME;
+    server.close();
+  }
+});

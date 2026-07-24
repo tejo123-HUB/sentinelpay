@@ -1,9 +1,14 @@
-// PROD: Vertex AI edge-deployed model — DEMO: local inference of scikit-learn-trained
-// logistic-regression weights (exported by ml/train_model.py to ml/model_export/model.json),
-// run natively in this Node process. Chosen over spawning/managing a live Python sidecar for
-// the demo default, since a second process is one more thing that can fail mid-demo — but the
-// weights are genuinely trained (see ml/train_model.py), and ml/serve.py exists as a real,
-// runnable fallback for ML_SERVING_MODE=python-service. See architecture.md Section 9.
+// Demo default (ML_SERVING_MODE=local): local inference of scikit-learn-trained logistic-
+// regression weights (exported by ml/train_model.py to ml/model_export/model.json), run natively
+// in this Node process. Chosen over spawning/managing a live Python sidecar for the demo default,
+// since a second process is one more thing that can fail mid-demo — but the weights are
+// genuinely trained (see ml/train_model.py), and ml/serve.py exists as a real, runnable fallback
+// for ML_SERVING_MODE=python-service.
+//
+// ML_SERVING_MODE=vertex (24 July 2026): a real, working Vertex AI online-prediction call, not a
+// documented stand-in — see scoreViaVertexAi() below and architecture.md Section 9's Google Cloud
+// integration note. Requires a model already deployed to a Vertex AI Endpoint (out of scope for
+// this repo to provision).
 const fs = require('node:fs');
 const path = require('node:path');
 const extractFeatures = require('./features');
@@ -122,10 +127,85 @@ async function scoreViaHttpService(transaction, userHistory) {
   return data.probability;
 }
 
-async function scoreViaVertexAi() {
-  // PROD path — not implemented in this demo build (no GCP project provisioned in this
-  // environment). Kept as an explicit, honest stub rather than a silent fallback.
-  throw new Error('Vertex AI serving mode is not implemented in the demo build');
+const VERTEX_AI_TIMEOUT_MS = 3000;
+
+// Lazily required (not at top of file) for two reasons: the common ML_SERVING_MODE=local path
+// shouldn't pay the cold-start cost of loading this SDK's gRPC/protobuf dependency tree, and it
+// makes the client constructor mockable from tests without requiring real GCP credentials at
+// module-load time.
+let cachedVertexClient = null;
+let cachedVertexClientLocation = null;
+function getVertexClient(location) {
+  if (cachedVertexClient && cachedVertexClientLocation === location) return cachedVertexClient;
+  const { PredictionServiceClient } = require('@google-cloud/aiplatform').v1;
+  // Vertex AI's regional REST/gRPC surface requires the client to target that region's endpoint
+  // host explicitly -- the default (global) host will not resolve a regional Endpoint resource.
+  cachedVertexClient = new PredictionServiceClient({ apiEndpoint: `${location}-aiplatform.googleapis.com` });
+  cachedVertexClientLocation = location;
+  return cachedVertexClient;
+}
+
+// Test-only seam, same reasoning as caseEvidence.js's _setGcsBucketForTests: the aiplatform SDK
+// talks gRPC, not fetch, so global.fetch monkeypatching (this project's usual approach) doesn't
+// reach it -- an explicit injection point stands in for a real client in tests.
+function _setVertexClientForTests(client, location = null) {
+  cachedVertexClient = client;
+  cachedVertexClientLocation = location;
+}
+
+/**
+ * PROD/current: a real, working Vertex AI online-prediction call -- not a documented stand-in.
+ * Requires a model already deployed to a Vertex AI Endpoint (out of scope for this repo to
+ * provision) and authenticates via standard GOOGLE_APPLICATION_CREDENTIALS Application Default
+ * Credentials, same convention as the Cloud Storage integration in server/caseEvidence.js. Fails
+ * fast with a clear config error (no network attempt) when the required env vars are missing --
+ * getFraudProbability()'s outer catch turns that into the same neutral-0 fail-open fallback as
+ * every other ML backend error, so an unconfigured `vertex` mode behaves exactly as it did before
+ * this integration existed (see tests/ml.test.js's "fails open to 0" regression test).
+ *
+ * Feature contract: instances are the same ordered feature vector extractFeatures() produces
+ * elsewhere in this file (see ml/train_model.py's FEATURE_NAMES), sent as a single flat array of
+ * numbers per instance; the deployed model is expected to return one scalar fraud-probability
+ * value per instance in `predictions`.
+ * @param {object} transaction
+ * @param {object} userHistory
+ * @returns {Promise<number>}
+ */
+async function scoreViaVertexAi(transaction, userHistory) {
+  const projectId = process.env.VERTEX_AI_PROJECT_ID;
+  const location = process.env.VERTEX_AI_LOCATION;
+  const endpointId = process.env.VERTEX_AI_ENDPOINT_ID;
+  if (!projectId || !location || !endpointId) {
+    throw new Error(
+      'Vertex AI serving mode requires VERTEX_AI_PROJECT_ID, VERTEX_AI_LOCATION, and VERTEX_AI_ENDPOINT_ID to be set'
+    );
+  }
+
+  const { helpers } = require('@google-cloud/aiplatform');
+  const client = getVertexClient(location);
+  const endpoint = `projects/${projectId}/locations/${location}/endpoints/${endpointId}`;
+  const features = extractFeatures(transaction, userHistory);
+  const instance = helpers.toValue(features);
+
+  const [response] = await client.predict(
+    { endpoint, instances: [instance] },
+    { timeout: VERTEX_AI_TIMEOUT_MS }
+  );
+
+  const predictions = response.predictions || [];
+  if (predictions.length === 0) throw new Error('Vertex AI returned no predictions');
+  // helpers.fromValue() only decodes struct-shaped (object) protobuf Values, not scalars -- our
+  // documented contract is a single scalar numberValue per instance, so read it directly; if a
+  // model instead returns an object (e.g. { probability: 0.42 }), fall back to decoding that.
+  const raw = predictions[0];
+  const probability = typeof raw.numberValue === 'number' ? raw.numberValue : helpers.fromValue(raw)?.probability;
+
+  // Same "never let a malformed/hostile response poison computeFraudScore()'s Math.max/Math.min
+  // blend" reasoning as scoreViaHttpService above.
+  if (typeof probability !== 'number' || !Number.isFinite(probability) || probability < 0 || probability > 1) {
+    throw new Error(`Vertex AI returned an invalid probability: ${JSON.stringify(probability)}`);
+  }
+  return probability;
 }
 
 /**
@@ -150,4 +230,4 @@ async function getFraudProbability(transaction, userHistory, db) {
   }
 }
 
-module.exports = { getFraudProbability, scoreLocal };
+module.exports = { getFraudProbability, scoreLocal, _setVertexClientForTests };

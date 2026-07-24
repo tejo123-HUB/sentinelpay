@@ -47,25 +47,54 @@ real thing:
 
 | Concern | DEMO (this build, runs today) | PROD (`architecture.md` Section 5) | What changes to get there |
 |---|---|---|---|
-| Datastore | SQLite, single file (`server/db.js`) | Cloud Spanner | Swap `node:sqlite`'s `DatabaseSync` for the Spanner Node client; the schema (Section 6) and every parameterized query pattern carry over directly — no query logic redesign needed, since this project never used SQLite-specific syntax beyond `PRAGMA`/`node:sqlite`'s API surface |
-| ML inference | Local process (`ml/serve.py`, scikit-learn-trained logistic regression) over HTTP | Vertex AI edge-deployed endpoint | Set `ML_SERVING_MODE=vertex` + `VERTEX_AI_ENDPOINT_URL`/`VERTEX_AI_API_KEY` — `server/ml/mlClient.js` already branches on this env var; no application code change |
+| Datastore | SQLite, single file (`server/db.js`), still the only primary/tested data layer | Cloud Spanner | `server/spannerPoc.js` (24 July 2026) is a real, working `@google-cloud/spanner` client — schema DDL, insert, and query — proven against a real Spanner instance via `npm run spanner:poc`, but deliberately **not** wired in as the primary database: a full dialect migration across every query in this codebase was assessed as too risky this late in a 525+-test build. Treat it as a proof that the integration works, not a drop-in replacement yet |
+| ML inference | Local process (`ml/serve.py`, scikit-learn-trained logistic regression) over HTTP | Vertex AI online-prediction endpoint | Genuinely implemented (24 July 2026) — set `ML_SERVING_MODE=vertex` + `VERTEX_AI_PROJECT_ID`/`VERTEX_AI_LOCATION`/`VERTEX_AI_ENDPOINT_ID` + `GOOGLE_APPLICATION_CREDENTIALS`, pointed at a model you've already deployed to a Vertex AI Endpoint (provisioning that endpoint is outside this repo's scope) — `server/ml/mlClient.js`'s `scoreViaVertexAi` makes a real `PredictionServiceClient.predict()` call, no longer a stub |
 | Dashboard auth | Shared API key handed to the dashboard page at load time (`server/middleware/apiKeyAuth.js`) | Real user auth (SSO/session) behind a backend-for-frontend that holds the key server-side | Requires standing up a login system this build has never had (an explicitly declined scope item, `architecture.md` Section 16 Category 20) |
-| API host | Node process directly on a VM/laptop | Cloud Run (stateless HTTP container, scales to zero) | Containerize (`Dockerfile` not yet written — see Section 4 below), point at a real Spanner instance, no code change otherwise |
+| API host | Node process directly on a VM/laptop | Cloud Run (stateless HTTP container, scales to zero) | A real, working `Dockerfile` + `.dockerignore` now ship in the repo root — see Section 4 below. Point `DB_PATH` at persistent storage (or use the Cloud Spanner proof-of-concept module, `server/spannerPoc.js`) for anything beyond a demo deploy |
+| Evidence storage | Local filesystem, `data/evidence/` (`server/caseEvidence.js`) | Cloud Storage | Genuinely implemented (24 July 2026) — set `GCS_BUCKET_NAME` + `GOOGLE_APPLICATION_CREDENTIALS`; `writeEvidenceFile`/`readEvidenceFile`/`deleteEvidenceFile` transparently switch to the `@google-cloud/storage` SDK, no route/schema change |
 | Notification credentials | Real webhooks/Twilio/SMTP, but operator-supplied via `.env` | Same, ideally via Secret Manager rather than plaintext `.env` on the host | Swap the `.env` read for a Secret Manager fetch at boot; `server/notifications.js`'s channel logic is unaffected |
 
-## 4. Containerizing for Cloud Run (not yet built)
+## 4. Containerizing for Cloud Run
 
-No `Dockerfile` exists in this repository yet — this build has only ever been run as a bare Node
-process (local dev, or a demo VM). A future pass adding one would need:
+A real `Dockerfile` + `.dockerignore` ship in the repo root (24 July 2026) — `node:22-slim` base
+(matches this project's `engines.node >= 22.5.0` requirement for `node:sqlite`), installs
+production dependencies only via `npm ci --omit=dev` against the committed lockfile, copies just
+`server/`, `dashboard/`, and the committed `ml/model_export/model.json` (training scripts,
+`ml/.venv`, tests, and dev scripts are excluded), runs as the non-root `node` user, and listens on
+`$PORT` (Cloud Run injects `8080`; `server/index.js` already resolves `PORT`/`HOST` this way — no
+application code change was needed).
 
-- Base image: `node:22-slim` (matches this project's `engines.node >= 22.5.0` requirement for `node:sqlite`).
-- `DB_PATH` pointed at a Cloud Run-mountable volume, or — if moving straight to Spanner per Section 3 above — no local file at all.
-- `PORT` read from Cloud Run's injected `$PORT` (already how `server/index.js` resolves it).
-- Secrets (`API_KEY`, notification credentials) injected via Cloud Run's Secret Manager integration, not baked into the image.
+Build and run locally to verify before deploying:
 
-This is scoped out deliberately rather than half-built: a real containerization pass deserves its
-own verified `Dockerfile` + `.dockerignore` + a genuine deployed test, not a guessed-at config file
-nobody has run.
+```bash
+docker build -t sentinelpay .
+docker run -p 8080:8080 --env-file .env sentinelpay
+```
+
+Deploy to Cloud Run (requires the `gcloud` CLI, a GCP project with billing enabled, and the Cloud
+Run + Artifact Registry APIs turned on — none of which this repository can provision for you):
+
+```bash
+gcloud builds submit --tag gcr.io/YOUR_PROJECT_ID/sentinelpay
+gcloud run deploy sentinelpay \
+  --image gcr.io/YOUR_PROJECT_ID/sentinelpay \
+  --region us-central1 \
+  --allow-unauthenticated \
+  --set-env-vars API_KEY=YOUR_REAL_KEY,GEMINI_API_KEY=YOUR_KEY \
+  --set-secrets GOOGLE_APPLICATION_CREDENTIALS=sentinelpay-gcp-sa:latest
+```
+
+Notes:
+- `--allow-unauthenticated` matches this project's own API-key auth model (Section 2) — Cloud Run
+  IAM auth is a separate, stricter option if you don't want the service publicly reachable at all.
+- Prefer `--set-secrets` (Secret Manager) over `--set-env-vars` for anything sensitive
+  (`API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`'s key material, notification credentials) — the
+  example above puts `API_KEY`/`GEMINI_API_KEY` inline only for brevity.
+- The container's local filesystem (SQLite `DB_PATH`, evidence uploads when `GCS_BUCKET_NAME` is
+  unset) is ephemeral on Cloud Run — fine for a short-lived demo, not for anything you need to
+  persist. Point `GCS_BUCKET_NAME` at a real bucket for evidence, and treat `DB_PATH`'s SQLite file
+  as scratch space unless/until this deployment moves to the Spanner proof-of-concept module
+  (`server/spannerPoc.js`, Section 3 above) becoming the primary datastore.
 
 ## 5. Health checks and observability
 
