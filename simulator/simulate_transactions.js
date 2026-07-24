@@ -703,12 +703,19 @@ async function triggerOutboundFraudScenario(baseUrl, senderOverride) {
 
 // Each merchant's one recurring "regular vendor" for triggerNewVendorStepUpScenario below --
 // created once per merchant, on that merchant's first step-up injection, and reused on every
-// later one. Two reasons this is stable rather than a fresh randomId() per call: (1) it's more
-// realistic (a business has a handful of vendors it pays repeatedly, not a new one every time),
-// and (2) it avoids repeatedly re-priming a "known receiver" relationship from scratch, which
-// used to add two extra small transfers per injection -- see the structuring note below for why
-// that count mattered.
-const stepUpVendorForMerchant = new Map(); // merchantAccount -> vendor u_ id
+// later one -- including the *gateway* it's paid through, not just the vendor id. Three reasons
+// this is stable rather than freshly randomized per call: (1) it's more realistic (a business
+// pays a given vendor through the same payment gateway every time, not a different one each
+// invoice), (2) it avoids repeatedly re-priming a "known receiver" relationship from scratch,
+// which used to add two extra small transfers per injection -- see the structuring note below for
+// why that count mattered, and (3) server/rules/crossGatewayStructuring.js flags a receiver paid
+// through >=2 distinct gateways once the cumulative total crosses 30,000 within an hour --
+// randomizing the gateway per call (the original version of this fix) meant the *second* time any
+// given merchant was picked for injection, if chance landed on a different gateway than the
+// first, that vendor relationship permanently tripped this detector on every future payout (each
+// payout alone is >30,000), stacking with amountAnomaly and reliably pushing the score into
+// block -- verified live in a 10+ minute soak run. One vendor, one gateway, forever avoids that.
+const stepUpVendorForMerchant = new Map(); // merchantAccount -> { vendor: u_ id, gateway: string }
 
 // Demonstrates a genuinely moderate risk case landing in decision.js's step_up band -- not an
 // attack, just an unusually large one-off vendor payment relative to this specific merchant
@@ -745,14 +752,16 @@ const stepUpVendorForMerchant = new Map(); // merchantAccount -> vendor u_ id
 //      amountAnomaly's 45, tips the combined score into block.
 async function triggerNewVendorStepUpScenario(baseUrl) {
   const sender = randomMerchantAccount();
-  const gateway = randomGateway();
 
-  let vendor = stepUpVendorForMerchant.get(sender);
-  const isFirstForThisMerchant = !vendor;
-  if (!vendor) {
-    vendor = randomId('u_vendor_regular');
-    stepUpVendorForMerchant.set(sender, vendor);
+  let vendorInfo = stepUpVendorForMerchant.get(sender);
+  const isFirstForThisMerchant = !vendorInfo;
+  if (!vendorInfo) {
+    // The gateway is picked once here and reused for every future payout to this vendor -- see
+    // the crossGatewayStructuring.js note above for why randomizing it per call was a bug.
+    vendorInfo = { vendor: randomId('u_vendor_regular'), gateway: randomGateway() };
+    stepUpVendorForMerchant.set(sender, vendorInfo);
   }
+  const { vendor, gateway } = vendorInfo;
 
   const amount = Math.round((55000 + Math.random() * 20000) * 100) / 100; // 55,000-75,000: at/above splitDetection's 50,000 exemption line, nowhere near newVendorRisk's 200,000 block tier (moot anyway once the vendor is known)
 
@@ -761,20 +770,23 @@ async function triggerNewVendorStepUpScenario(baseUrl) {
   );
 
   // Phase 1: inbound revenue, comfortably more than 1.5x the eventual payout, from distinct
-  // one-off customers (fraud/AML scoring is outbound-only, so these always just auto-allow).
+  // one-off customers (fraud/AML scoring is outbound-only, so these always just auto-allow). The
+  // gateway here is just which gateway the customer happened to pay through -- unrelated to the
+  // stable vendor-payout gateway above, so a fresh random one each time is fine (and realistic).
   for (let i = 0; i < 6; i += 1) {
     await postTransaction(baseUrl, {
       sender_id: randomId('u_stepup_customer'),
       receiver_id: sender,
       amount: amount / 3 + Math.random() * (amount / 6),
       timestamp: new Date().toISOString(),
-      merchant_id: gateway,
+      merchant_id: randomGateway(),
       transaction_type: 'transfer',
     });
   }
 
-  // Phase 2 (only needed once per merchant): two small payouts to the vendor so it's already a
-  // known receiver by the time the large payout below goes out -- see point 2 above.
+  // Phase 2 (only needed once per merchant): two small payouts to the vendor, through the same
+  // gateway the final payout will use, so it's already a known receiver by the time the large
+  // payout below goes out -- see point 2 above.
   if (isFirstForThisMerchant) {
     for (let i = 0; i < 2; i += 1) {
       await postTransaction(baseUrl, {
