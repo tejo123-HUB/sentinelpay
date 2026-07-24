@@ -2023,3 +2023,88 @@ tr.decision-step_up {
     transform: none;
   }
 }
+
+/* ==========================================================================
+   Dark Theme (Black Mode) Overrides
+   ========================================================================== */
+[data-theme="dark"] {
+  /* Dark Modern Glassmorphic Theme */
+  --bg: #09090b;            /* Deep obsidian base */
+  --surface: rgba(24, 24, 27, 0.75);       /* Dark translucent glass */
+  --surface-sunken: rgba(9, 9, 11, 0.6);   /* Deeper well */
+  --surface-strong: rgba(39, 39, 42, 0.95); /* Elevated card faces */
+
+  --border: rgba(255, 255, 255, 0.08);     /* Subtle light borders for dark mode */
+  --border-strong: rgba(255, 255, 255, 0.15);
+  --border-3d: rgba(255, 255, 255, 0.04);          
+  --border-3d-active: rgba(255, 255, 255, 0.08);
+
+  --text: #f8fafc;          /* Off-white for high contrast */
+  --text-dim: #94a3b8;      /* Slate 400 for secondary text */
+  --text-faint: #475569;    /* Slate 600 for tertiary text */
+  --gridline: rgba(255, 255, 255, 0.1);    /* Faint gridlines */
+
+  /* Re-tune status text colors for readability on dark surfaces */
+  --allow-text: #34d399;    /* Emerald 400 */
+  --stepup-text: #fbbf24;   /* Amber 400 */
+  --block-text: #f472b6;    /* Pink 400 */
+  --struct-text: #a78bfa;   /* Violet 400 */
+
+  /* Dark mode specific shadows */
+  --shadow-3d: 0 20px 40px -10px rgba(0, 0, 0, 0.5), inset 0 2px 4px rgba(255, 255, 255, 0.05), inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+  --shadow-3d-hover: 0 30px 60px -15px rgba(139, 92, 246, 0.15), inset 0 2px 6px rgba(255, 255, 255, 0.1), inset 0 0 0 1px rgba(255, 255, 255, 0.1);
+  --shadow-3d-btn: 0 8px 20px -6px rgba(0, 0, 0, 0.4), inset 0 1px 2px rgba(255, 255, 255, 0.1);
+  --shadow-3d-btn-hover: 0 12px 28px -6px rgba(139, 92, 246, 0.3), inset 0 1px 2px rgba(255, 255, 255, 0.15);
+  --shadow-3d-btn-active: 0 2px 8px -2px rgba(0, 0, 0, 0.4), inset 0 1px 1px rgba(255, 255, 255, 0.05);
+
+  --shadow-xs: 0 2px 4px rgba(0,0,0,0.2);
+  --shadow-sm: 0 4px 12px rgba(0,0,0,0.3);
+  --shadow-md: 0 12px 32px rgba(0,0,0,0.4);
+  --shadow-lg: 0 24px 48px rgba(0,0,0,0.5);
+}
+
+/* Adjust mesh gradient opacity for dark mode body */
+[data-theme="dark"] body {
+  background-image:
+    radial-gradient(at 40% 20%, hsla(28, 100%, 74%, 0.05) 0px, transparent 50%),
+    radial-gradient(at 80% 0%, hsla(189, 100%, 56%, 0.05) 0px, transparent 50%),
+    radial-gradient(at 0% 50%, hsla(355, 100%, 93%, 0.08) 0px, transparent 50%),
+    radial-gradient(at 80% 50%, hsla(340, 100%, 76%, 0.05) 0px, transparent 50%),
+    radial-gradient(at 0% 100%, hsla(22, 100%, 77%, 0.05) 0px, transparent 50%),
+    radial-gradient(at 80% 100%, hsla(242, 100%, 70%, 0.05) 0px, transparent 50%),
+    radial-gradient(at 0% 0%, hsla(343, 100%, 76%, 0.05) 0px, transparent 50%);
+}
+
+/* Specific component overrides for better dark mode visibility */
+[data-theme="dark"] .topbar {
+  background: rgba(9, 9, 11, 0.6);
+}
+
+[data-theme="dark"] .glass-panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-3d);
+}
+
+[data-theme="dark"] .ai-widget-panel {
+  background: var(--surface-strong);
+  border: 1px solid var(--border-strong);
+}
+
+[data-theme="dark"] .search-bar {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border);
+}
+
+[data-theme="dark"] .search-bar:focus-within {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: var(--accent);
+}
+
+[data-theme="dark"] .btn-outline {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+[data-theme="dark"] .btn-outline:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
