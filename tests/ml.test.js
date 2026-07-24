@@ -4,7 +4,7 @@ const net = require('node:net');
 const { DatabaseSync } = require('node:sqlite');
 
 const http = require('node:http');
-const { getFraudProbability, scoreLocal } = require('../server/ml/mlClient');
+const { getFraudProbability, scoreLocal, _setVertexClientForTests } = require('../server/ml/mlClient');
 const { SCHEMA } = require('../server/db');
 const { updateBaseline } = require('../server/adaptiveBaseline');
 
@@ -83,16 +83,85 @@ test('getFraudProbability: resolves to a number in [0, 1] under the default loca
   assert.ok(p >= 0 && p <= 1);
 });
 
-test('getFraudProbability: fails open to 0 when ML_SERVING_MODE is an unimplemented backend', async () => {
+test('getFraudProbability: fails open to 0 when ML_SERVING_MODE=vertex is unconfigured (regression: must not attempt a real network call)', async () => {
   const db = buildTestDb();
   const original = process.env.ML_SERVING_MODE;
   process.env.ML_SERVING_MODE = 'vertex';
+  delete process.env.VERTEX_AI_PROJECT_ID;
+  delete process.env.VERTEX_AI_LOCATION;
+  delete process.env.VERTEX_AI_ENDPOINT_ID;
   try {
     const p = await getFraudProbability(cleanTransaction, cleanHistory, db);
     assert.equal(p, 0);
   } finally {
     if (original === undefined) delete process.env.ML_SERVING_MODE;
     else process.env.ML_SERVING_MODE = original;
+  }
+});
+
+// Google Cloud Vertex AI integration (24 July 2026): scoreViaVertexAi() now makes a real
+// PredictionServiceClient.predict() call when configured. No live Vertex AI endpoint is available
+// in this test environment, so these tests inject a fake client via mlClient.js's
+// _setVertexClientForTests() seam (same reasoning as caseEvidence.js's _setGcsBucketForTests --
+// the aiplatform SDK talks gRPC, not fetch, so this project's usual global.fetch monkeypatching
+// doesn't reach it).
+test('getFraudProbability: ML_SERVING_MODE=vertex genuinely calls PredictionServiceClient.predict with the feature vector', async () => {
+  const { helpers } = require('@google-cloud/aiplatform');
+  const db = buildTestDb();
+  const original = process.env.ML_SERVING_MODE;
+  process.env.ML_SERVING_MODE = 'vertex';
+  process.env.VERTEX_AI_PROJECT_ID = 'test-project';
+  process.env.VERTEX_AI_LOCATION = 'us-central1';
+  process.env.VERTEX_AI_ENDPOINT_ID = '1234567890';
+
+  let capturedRequest = null;
+  const fakeClient = {
+    predict: async (request) => {
+      capturedRequest = request;
+      return [{ predictions: [helpers.toValue(0.42)] }];
+    },
+  };
+  _setVertexClientForTests(fakeClient, 'us-central1');
+
+  try {
+    const p = await getFraudProbability(cleanTransaction, cleanHistory, db);
+    assert.equal(p, 0.42);
+    assert.equal(capturedRequest.endpoint, 'projects/test-project/locations/us-central1/endpoints/1234567890');
+    assert.equal(capturedRequest.instances.length, 1);
+    const expectedFeatures = require('../server/ml/features')(cleanTransaction, cleanHistory);
+    assert.deepEqual(capturedRequest.instances[0], helpers.toValue(expectedFeatures));
+  } finally {
+    if (original === undefined) delete process.env.ML_SERVING_MODE;
+    else process.env.ML_SERVING_MODE = original;
+    delete process.env.VERTEX_AI_PROJECT_ID;
+    delete process.env.VERTEX_AI_LOCATION;
+    delete process.env.VERTEX_AI_ENDPOINT_ID;
+    _setVertexClientForTests(null);
+  }
+});
+
+test('getFraudProbability: ML_SERVING_MODE=vertex fails open to 0 on an out-of-range predicted probability (regression: must not poison scoring)', async () => {
+  const { helpers } = require('@google-cloud/aiplatform');
+  const db = buildTestDb();
+  const original = process.env.ML_SERVING_MODE;
+  process.env.ML_SERVING_MODE = 'vertex';
+  process.env.VERTEX_AI_PROJECT_ID = 'test-project';
+  process.env.VERTEX_AI_LOCATION = 'us-central1';
+  process.env.VERTEX_AI_ENDPOINT_ID = '1234567890';
+
+  const fakeClient = { predict: async () => [{ predictions: [helpers.toValue(42)] }] };
+  _setVertexClientForTests(fakeClient, 'us-central1');
+
+  try {
+    const p = await getFraudProbability(cleanTransaction, cleanHistory, db);
+    assert.equal(p, 0);
+  } finally {
+    if (original === undefined) delete process.env.ML_SERVING_MODE;
+    else process.env.ML_SERVING_MODE = original;
+    delete process.env.VERTEX_AI_PROJECT_ID;
+    delete process.env.VERTEX_AI_LOCATION;
+    delete process.env.VERTEX_AI_ENDPOINT_ID;
+    _setVertexClientForTests(null);
   }
 });
 

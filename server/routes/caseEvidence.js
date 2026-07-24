@@ -33,7 +33,7 @@ function serializeEvidence(row) {
 
 // POST /cases/:caseId/evidence { filename, mime_type?, content_base64, uploaded_by? } --
 // analyst-or-above, same role floor as every other case-mutating route in routes/cases.js.
-router.post('/cases/:caseId/evidence', requireApiKey, requireRole('analyst'), (req, res) => {
+router.post('/cases/:caseId/evidence', requireApiKey, requireRole('analyst'), async (req, res) => {
   const db = req.app.locals.db;
   const existingCase = db.prepare('SELECT 1 FROM cases WHERE case_id = ?').get(req.params.caseId);
   if (!existingCase) {
@@ -65,7 +65,11 @@ router.post('/cases/:caseId/evidence', requireApiKey, requireRole('analyst'), (r
   const evidenceId = `ev_${crypto.randomUUID()}`;
   const nowIso = new Date().toISOString();
 
-  writeEvidenceFile(evidenceId, buffer);
+  try {
+    await writeEvidenceFile(evidenceId, buffer);
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to store evidence content' });
+  }
   db.prepare(
     'INSERT INTO case_evidence (evidence_id, case_id, filename, mime_type, size_bytes, uploaded_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
   ).run(evidenceId, req.params.caseId, filename, typeof mime_type === 'string' ? mime_type : null, buffer.length, typeof uploaded_by === 'string' ? uploaded_by : null, nowIso);
@@ -103,7 +107,7 @@ function contentDispositionHeader(filename) {
 // this route streams the actual attached content (screenshots, documents an analyst uploaded to
 // an investigation) -- the same elevated floor the upload route (POST, above) already requires,
 // which a read-only viewer key shouldn't bypass just because reading is "only" a GET.
-router.get('/cases/:caseId/evidence/:evidenceId/content', requireApiKey, requireRole('analyst'), (req, res) => {
+router.get('/cases/:caseId/evidence/:evidenceId/content', requireApiKey, requireRole('analyst'), async (req, res) => {
   const db = req.app.locals.db;
   const row = db
     .prepare('SELECT * FROM case_evidence WHERE case_id = ? AND evidence_id = ?')
@@ -114,9 +118,9 @@ router.get('/cases/:caseId/evidence/:evidenceId/content', requireApiKey, require
 
   let buffer;
   try {
-    buffer = readEvidenceFile(row.evidence_id);
+    buffer = await readEvidenceFile(row.evidence_id);
   } catch (err) {
-    return res.status(500).json({ error: 'Evidence content is missing on disk' });
+    return res.status(500).json({ error: 'Evidence content is missing' });
   }
 
   res.set('Content-Disposition', contentDispositionHeader(row.filename));

@@ -26,11 +26,13 @@ function securityHeaders(req, res, next) {
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('Content-Security-Policy', CSP);
-  // PROD: fronted by GCP load balancer/Cloud Run TLS termination -- DEMO: Express serves plain
-  // HTTP on localhost by default (server/index.js), so this header is inert until deployed behind
-  // TLS, exactly like every other host that sends HSTS unconditionally (the header is a no-op
-  // over plain HTTP). Without it, a real deployment behind TLS would otherwise ship with no
-  // downgrade protection at all, letting a network attacker strip HTTPS on a client's first visit.
+  // PROD: fronted by Cloud Run's own TLS termination -- genuinely deployable there now via the
+  // repo-root Dockerfile (24 July 2026, see deployment-guide.md Section 4), no app code change
+  // needed. DEMO: Express still serves plain HTTP on localhost by default (server/index.js), so
+  // this header is inert until deployed behind TLS, exactly like every other host that sends HSTS
+  // unconditionally (the header is a no-op over plain HTTP). Without it, a real deployment behind
+  // TLS would otherwise ship with no downgrade protection at all, letting a network attacker strip
+  // HTTPS on a client's first visit.
   res.setHeader('Strict-Transport-Security', 'max-age=63072000; includeSubDomains');
   next();
 }

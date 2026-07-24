@@ -12,7 +12,8 @@
     "loadtest": "node simulator/loadTest.js",
     "seed": "node scripts/generate_demo_data.js",
     "demo": "node scripts/demo.js",
-    "generate-vapid-keys": "node scripts/generate_vapid_keys.js"
+    "generate-vapid-keys": "node scripts/generate_vapid_keys.js",
+    "spanner:poc": "node scripts/spanner_poc_demo.js"
   },
   "license": "MIT",
   "private": true,
@@ -20,6 +21,9 @@
     "node": ">=22.5.0"
   },
   "dependencies": {
+    "@google-cloud/aiplatform": "^3.35.0",
+    "@google-cloud/spanner": "^7.13.0",
+    "@google-cloud/storage": "^7.14.0",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "ws": "^8.18.0"
