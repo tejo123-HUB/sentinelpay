@@ -5,10 +5,13 @@
 let analyticsInitialized = false;
 let analyticsTrendChart = null;
 
-// Same validated status palette as app.js's CHART_COLORS/audit.js's AUDIT_CHART_COLORS --
-// duplicated per file since each renders to its own <canvas> and can't share CSS custom
-// properties directly.
-const ANALYTICS_CHART_COLORS = { allow: '#0ca30c', stepup: '#e0940a', block: '#d03b3b' };
+// Colors are read live from style.css's custom properties via app.js's chartPalette()/cssVar()
+// helpers (window.sentinelpayChartPalette/sentinelpayCssVar) rather than a second hardcoded hex
+// set per theme -- the earlier hardcoded set here (#898781 ticks, #52514e legend text) was tuned
+// only for the light theme and never updated for dark mode, so it rendered as low-contrast dark
+// gray on the dark theme's near-black canvas background -- effectively invisible axis/legend
+// text, the same class of bug the style.css dark-theme pass fixed. Reading live means this can't
+// drift out of sync with either theme again.
 const ANALYTICS_HEATMAP_DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const ANALYTICS_HEATMAP_EXPORT_LIMIT = 2000; // bounds the client-side heatmap computation
 
@@ -23,10 +26,27 @@ function analyticsLineDataset(label, color, extra = {}) {
     pointRadius: 0,
     pointHoverRadius: 5,
     pointHoverBackgroundColor: color,
-    pointHoverBorderColor: '#fcfcfb',
+    pointHoverBorderColor: window.sentinelpayCssVar('--surface-strong'),
     pointHoverBorderWidth: 2,
     pointHitRadius: 10,
     ...extra,
+  };
+}
+
+function analyticsTrendChartOptions() {
+  const p = window.sentinelpayChartPalette();
+  return {
+    responsive: true,
+    maintainAspectRatio: false,
+    interaction: { mode: 'index', intersect: false },
+    scales: {
+      x: { ticks: { color: p.textFaint, font: { size: 11 } }, grid: { color: p.gridline } },
+      y: { beginAtZero: true, ticks: { color: p.textFaint, font: { size: 11 }, precision: 0 }, grid: { color: p.gridline } },
+    },
+    plugins: {
+      legend: { labels: { color: p.textDim, usePointStyle: true, pointStyle: 'circle', padding: 16, font: { size: 12, weight: '600' } } },
+      tooltip: window.sentinelpayChartTooltip(),
+    },
   };
 }
 
@@ -34,43 +54,42 @@ function initAnalyticsTrendChart() {
   if (typeof Chart === 'undefined') return null;
   const ctx = document.getElementById('analytics-trend-chart');
   if (!ctx) return null;
+  const p = window.sentinelpayChartPalette();
   return new Chart(ctx, {
     type: 'line',
     data: {
       labels: [],
       datasets: [
-        analyticsLineDataset('Allow', ANALYTICS_CHART_COLORS.allow),
-        analyticsLineDataset('Step-Up', ANALYTICS_CHART_COLORS.stepup),
-        analyticsLineDataset('Block', ANALYTICS_CHART_COLORS.block),
+        analyticsLineDataset('Allow', p.allow),
+        analyticsLineDataset('Step-Up', p.stepup),
+        analyticsLineDataset('Block', p.block),
         // Predictive Fraud Forecasting (Partial-Feature Completion Pass): a dashed continuation
         // of the flagged-transaction trend, from GET /analytics/forecast's linear projection --
         // visually distinct (dashed, no fill) from the three solid historical series above.
-        analyticsLineDataset('Forecast (flagged)', '#7a6fd1', { borderDash: [6, 4], backgroundColor: 'transparent' }),
+        analyticsLineDataset('Forecast (flagged)', p.accent, { borderDash: [6, 4], backgroundColor: 'transparent' }),
       ],
     },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      interaction: { mode: 'index', intersect: false },
-      scales: {
-        x: { ticks: { color: '#898781', font: { size: 11 } }, grid: { color: '#e1e0d9' } },
-        y: { beginAtZero: true, ticks: { color: '#898781', font: { size: 11 }, precision: 0 }, grid: { color: '#e1e0d9' } },
-      },
-      plugins: {
-        legend: { labels: { color: '#52514e', usePointStyle: true, pointStyle: 'circle', padding: 16, font: { size: 12, weight: '600' } } },
-        tooltip: {
-          backgroundColor: '#ffffff',
-          titleColor: '#0b0b0b',
-          bodyColor: '#52514e',
-          borderColor: 'rgba(11,11,11,0.1)',
-          borderWidth: 1,
-          padding: 10,
-          cornerRadius: 8,
-        },
-      },
-    },
+    options: analyticsTrendChartOptions(),
   });
 }
+
+// Chart.js bakes colors into the instance at creation and never re-reads CSS on its own -- called
+// on sentinelpay:theme-changed (below) to keep an already-open Analytics tab in sync with a
+// theme toggle instead of only picking up the new palette on the next full chart rebuild.
+function restyleAnalyticsTrendChart() {
+  if (!analyticsTrendChart) return;
+  const p = window.sentinelpayChartPalette();
+  const colors = [p.allow, p.stepup, p.block, p.accent];
+  analyticsTrendChart.data.datasets.forEach((dataset, i) => {
+    dataset.borderColor = colors[i];
+    dataset.pointHoverBackgroundColor = colors[i];
+    dataset.pointHoverBorderColor = p.surface;
+    if (i < 3) dataset.backgroundColor = `${colors[i]}1a`;
+  });
+  Object.assign(analyticsTrendChart.options, analyticsTrendChartOptions());
+  analyticsTrendChart.update();
+}
+document.addEventListener('sentinelpay:theme-changed', restyleAnalyticsTrendChart);
 
 function trendLabelFormatter(bucket) {
   return (isoString) => {

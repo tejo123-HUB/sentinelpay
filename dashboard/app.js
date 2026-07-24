@@ -51,23 +51,49 @@ function resolveCounterpartyId(tx) {
 
 let decisionChart = null;
 
-// Validated status palette (dataviz skill's validate_palette.js against this dashboard's light
-// surface #fcfcfb, see style.css's file header for the full reasoning) — the MARK step, kept as
-// one source of truth with style.css's --allow/--stepup/--block custom properties, duplicated
-// here only because Chart.js renders to a <canvas>, which can't read CSS custom properties
-// directly.
-const CHART_COLORS = { allow: '#0ca30c', stepup: '#fab219', block: '#d03b3b' };
-const CHART_SURFACE = '#fcfcfb'; // matches style.css's --surface, used as the donut's slice-gap ring color
-const CHART_TOOLTIP = {
-  backgroundColor: '#ffffff',
-  titleColor: '#0b0b0b',
-  bodyColor: '#52514e',
-  borderColor: 'rgba(11,11,11,0.1)',
-  borderWidth: 1,
-  padding: 10,
-  cornerRadius: 8,
-  displayColors: true,
-};
+// Chart.js renders to a <canvas>, which can't read CSS custom properties directly the way the
+// rest of the DOM does — but JS can, via getComputedStyle, at the moment a chart's colors are
+// actually needed. Reading live here (rather than duplicating a parallel hardcoded hex per theme,
+// the pattern that caused the dark-mode contrast bugs this pass fixed) means Chart.js always
+// matches style.css's --allow/--stepup/--block/etc., in whichever theme is currently active, with
+// nothing to keep manually in sync. Shared on window so map.js/audit.js/analytics.js/graph.js
+// (same global scope, loaded after this file) can reuse it instead of re-deriving their own.
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+window.sentinelpayCssVar = cssVar;
+
+function chartPalette() {
+  return {
+    allow: cssVar('--allow'),
+    stepup: cssVar('--stepup'),
+    block: cssVar('--block'),
+    struct: cssVar('--struct'),
+    accent: cssVar('--accent'),
+    surface: cssVar('--surface-strong'),
+    text: cssVar('--text'),
+    textDim: cssVar('--text-dim'),
+    textFaint: cssVar('--text-faint'),
+    border: cssVar('--border'),
+    gridline: cssVar('--gridline'),
+  };
+}
+window.sentinelpayChartPalette = chartPalette;
+
+function chartTooltipOptions() {
+  const p = chartPalette();
+  return {
+    backgroundColor: p.surface,
+    titleColor: p.text,
+    bodyColor: p.textDim,
+    borderColor: p.border,
+    borderWidth: 1,
+    padding: 10,
+    cornerRadius: 8,
+    displayColors: true,
+  };
+}
+window.sentinelpayChartTooltip = chartTooltipOptions;
 
 // Animates a stat-tile value counting up/down to its new total over a short, professional beat
 // rather than snapping — the kind of restrained micro-interaction real ops dashboards use.
@@ -98,6 +124,7 @@ function initChart() {
   if (typeof Chart === 'undefined') return;
   const ctx = document.getElementById('decision-chart');
   if (!ctx) return;
+  const p = chartPalette();
   decisionChart = new Chart(ctx, {
     type: 'doughnut',
     data: {
@@ -105,23 +132,35 @@ function initChart() {
       datasets: [
         {
           data: [0, 0, 0],
-          backgroundColor: [CHART_COLORS.allow, CHART_COLORS.stepup, CHART_COLORS.block],
+          backgroundColor: [p.allow, p.stepup, p.block],
           // A real border (not 0) drawn in the surface color is how Chart.js implements the
           // "surface gap" between adjacent donut slices (marks-and-anatomy.md) — it isn't an
           // outline stroke added *around* each mark, it's the surface color showing through
           // between them, which is the correct mechanism for separating touching marks.
-          borderColor: CHART_SURFACE,
+          borderColor: p.surface,
           borderWidth: 3,
           hoverOffset: 6,
         },
       ],
     },
     options: {
-      plugins: { legend: { display: false }, tooltip: CHART_TOOLTIP },
+      plugins: { legend: { display: false }, tooltip: chartTooltipOptions() },
       cutout: '68%',
       animation: { duration: 300, easing: 'easeOutQuart' },
     },
   });
+}
+
+// Re-applies the live theme's colors to the already-built donut chart — called on the
+// sentinelpay:theme-changed event (below) rather than only at init, since Chart.js bakes colors
+// into the chart instance once at creation and never re-reads CSS on its own.
+function restyleChart() {
+  if (!decisionChart) return;
+  const p = chartPalette();
+  decisionChart.data.datasets[0].backgroundColor = [p.allow, p.stepup, p.block];
+  decisionChart.data.datasets[0].borderColor = p.surface;
+  decisionChart.options.plugins.tooltip = chartTooltipOptions();
+  decisionChart.update();
 }
 
 function updateChart() {
@@ -417,16 +456,27 @@ function initTabs() {
 // Applies site-wide via a `data-theme` attribute on <html> -- style.css's `[data-theme="dark"]`
 // block overrides the same custom properties every existing component already reads (--bg,
 // --surface, --text, --allow, etc.), so no component-level dark-mode logic is needed anywhere
-// else. Preference persisted in localStorage; defaults to the OS-level prefers-color-scheme on
-// first visit, same convention as style.css's own `@media (prefers-color-scheme: dark)` fallback
-// for a user who never touches the toggle at all.
+// else for plain CSS. Preference persisted in localStorage; defaults to the OS-level
+// prefers-color-scheme on first visit for a user who never touches the toggle at all (checked
+// directly in initThemeToggle below, not via a CSS `@media (prefers-color-scheme)` block --
+// style.css has no such block, since the toggle always needs to be able to override the OS
+// setting and a `data-theme` attribute already covers both cases).
+//
+// Chart.js/canvas-drawn content (app.js's own donut, analytics.js/audit.js's trend charts,
+// graph.js's node labels) can't pick up CSS custom property changes on their own, so this also
+// fires a `sentinelpay:theme-changed` event every listener of that kind hooks into to re-read the
+// live palette (chartPalette() above) and redraw.
 const THEME_STORAGE_KEY = 'sentinelpay-theme';
+const THEME_CHANGE_EVENT = 'sentinelpay:theme-changed';
 
 function applyTheme(theme) {
   document.documentElement.setAttribute('data-theme', theme);
   const icon = document.querySelector('.theme-toggle-icon');
   if (icon) icon.textContent = theme === 'dark' ? '◑' : '◐';
+  document.dispatchEvent(new CustomEvent(THEME_CHANGE_EVENT, { detail: { theme } }));
 }
+
+document.addEventListener(THEME_CHANGE_EVENT, restyleChart);
 
 function initThemeToggle() {
   const stored = localStorage.getItem(THEME_STORAGE_KEY);
@@ -515,8 +565,11 @@ async function initPushNotifications() {
 }
 
 initTabs();
+// Theme must be applied before any chart reads CSS custom properties for its initial colors --
+// otherwise a page load that resolves to dark (stored preference or OS prefers-color-scheme)
+// would still build the donut with light-theme colors for one frame before the next redraw.
+initThemeToggle();
 initChart();
 initBusinessAccountsControl();
-initThemeToggle();
 initPushNotifications();
 loadBusinessAccounts().then(loadInitialData).then(connect);

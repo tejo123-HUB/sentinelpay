@@ -332,12 +332,19 @@ function drawGraph() {
 
     graphCtx.save();
     graphCtx.globalAlpha = reveal;
-    graphCtx.fillStyle = '#3a3a38';
+    // Dark near-black fill + a light halo reads fine on this canvas's light-theme surface, but is
+    // effectively a dark label drawn inside a bright white blob once the canvas background itself
+    // goes dark (style.css's --surface-sunken) -- checked live, not assumed. Flipped per theme:
+    // dark mode gets a light fill + a dark halo instead, the same "halo behind label" mechanism,
+    // just inverted for a dark surface. graphCtx.canvas has no dark-mode-only DOM/CSS to read, so
+    // this checks the same `data-theme` attribute style.css keys off of directly (cheap: one DOM
+    // attribute read per frame, not a getComputedStyle call).
+    const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+    graphCtx.fillStyle = isDark ? '#f8fafc' : '#3a3a38';
     graphCtx.font = (isTreeMode && node.type === 'root') ? 'bold 12px "IBM Plex Sans", sans-serif' : '11px "IBM Plex Sans", sans-serif';
     const label = node.id.length > 18 ? `${node.id.slice(0, 16)}…` : node.id;
-    // A thin white halo behind the label keeps it legible over the floor grid/edges at any zoom.
     graphCtx.lineWidth = 3;
-    graphCtx.strokeStyle = 'rgba(255,255,255,0.85)';
+    graphCtx.strokeStyle = isDark ? 'rgba(9,9,11,0.85)' : 'rgba(255,255,255,0.85)';
     graphCtx.strokeText(label, node.x + radius + 4, node.y + 4);
     graphCtx.fillText(label, node.x + radius + 4, node.y + 4);
     graphCtx.restore();

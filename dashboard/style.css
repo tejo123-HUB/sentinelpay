@@ -977,59 +977,14 @@ tr.decision-step_up {
    Section 15.16, Feature 15 — dark mode, Analytics tab, heatmap, print export
    ========================================================================== */
 
-/* Dark mode: same custom-property override strategy documented in the file header, applied via
-   a `data-theme` attribute (app.js's initThemeToggle) instead of only `prefers-color-scheme`, so
-   the toggle can override the OS setting. Status hues/surfaces are the same values already
-   validated by the dataviz skill's validator against a dark card surface in the project's
-   original dark theme (architecture.md Section 15.8) — reused verbatim here, not re-invented,
-   since re-running the validator for this pass was out of scope. */
-[data-theme='dark'] {
-  --bg: #e2e8f0;            /* Cool gray-slate background */
-  --surface: #ffffff;
-  --surface-sunken: #f1f5f9;
-  --surface-strong: #ffffff;
-  --border: #cbd5e1;
-  --border-strong: #94a3b8;
-  --border-3d: #94a3b8;
-  --border-3d-active: #64748b;
-  --text: #0f172a;
-  --text-dim: #475569;
-  --text-faint: #64748b;
-  --gridline: #e2e8f0;
-
-  --allow: #10b981;
-  --allow-text: #047857;
-  --allow-wash: #ecfdf5;
-  --stepup: #f59e0b;
-  --stepup-text: #b45309;
-  --stepup-wash: #fffbeb;
-  --block: #ef4444;
-  --block-text: #b91c1c;
-  --block-wash: #fff1f2;
-  --struct: #0284c7;        /* Sky-600 */
-  --struct-text: #0369a1;   /* Sky-700 */
-  --struct-wash: #e0f2fe;   /* Sky-100 */
-
-  --accent: #0284c7;        /* Sky-600 */
-  --accent-strong: #0369a1; /* Sky-700 */
-  --accent-wash: #e0f2fe;   /* Sky-100 */
-
-  /* Volumetric 3D shadows & bevel offsets */
-  --shadow-3d: 0 4px 0 0 var(--border-3d), 0 8px 16px rgba(15, 23, 42, 0.06);
-  --shadow-3d-hover: 0 6px 0 0 var(--border-3d), 0 12px 24px rgba(15, 23, 42, 0.1);
-  --shadow-3d-btn: 0 4px 0 0 var(--accent-strong), 0 6px 12px rgba(2, 132, 199, 0.15);
-  --shadow-3d-btn-hover: 0 5px 0 0 var(--accent-strong), 0 8px 16px rgba(2, 132, 199, 0.2);
-  --shadow-3d-btn-active: 0 1px 0 0 var(--accent-strong), 0 2px 4px rgba(2, 132, 199, 0.1);
-}
-
-[data-theme='dark'] .topbar {
-  background: rgba(226, 232, 240, 0.86);
-}
-
-/* Leaflet's default tiles are a light basemap by design; no filter/inversion needed for Cool Ice White theme */
-[data-theme='dark'] .leaflet-tile-pane {
-  filter: none;
-}
+/* Dark mode ("Black Mode") overrides live in one place, near the end of this file (see "Dark
+   Theme (Black Mode) Overrides"), not here — an earlier pass added a `[data-theme='dark']`
+   override right here that actually set *light*, white-surface values (a leftover "Cool Ice
+   White" re-skin mistakenly left wired to the dark-mode attribute), which fought with the real
+   Black Mode block for every custom property it didn't itself redeclare and made several text/
+   background pairs fall well under WCAG AA contrast. Removed rather than fixed in place, since
+   having two `[data-theme='dark']` custom-property blocks in one file is itself the bug — a future
+   dark-mode tweak belongs in the one consolidated block, not a second new one here. */
 
 .topbar-actions {
   display: flex;
@@ -2036,19 +1991,59 @@ tr.decision-step_up {
 
   --border: rgba(255, 255, 255, 0.08);     /* Subtle light borders for dark mode */
   --border-strong: rgba(255, 255, 255, 0.15);
-  --border-3d: rgba(255, 255, 255, 0.04);          
+  --border-3d: rgba(255, 255, 255, 0.04);
   --border-3d-active: rgba(255, 255, 255, 0.08);
 
   --text: #f8fafc;          /* Off-white for high contrast */
-  --text-dim: #94a3b8;      /* Slate 400 for secondary text */
-  --text-faint: #475569;    /* Slate 600 for tertiary text */
+  --text-dim: #94a3b8;      /* Slate 400 for secondary text, ~6.98:1 on the surfaces above */
+  /* Was #475569 (Slate 600) -- darker than --text-dim, the inverse of the intended hierarchy on
+     a near-black background, and only ~2.36:1 against these surfaces (fails WCAG AA's 4.5:1 for
+     normal text outright). This token is used everywhere as small/uppercase label text
+     (.stat-label, .empty-state, .graph-hint, .heatmap-hint, panel hints, etc.) so at the old
+     value it read as effectively invisible -- the exact bug this pass fixes. #7d8aa0 computes to
+     ~4.85:1 against these surfaces (checked via the standard relative-luminance formula, same
+     "validated, not eyeballed" convention Section 15.8/15.14 used for the mark palette), dimmer
+     than --text-dim as intended while still clearing AA. */
+  --text-faint: #7d8aa0;
   --gridline: rgba(255, 255, 255, 0.1);    /* Faint gridlines */
 
-  /* Re-tune status text colors for readability on dark surfaces */
+  /* Status quartet, re-tuned for dark surfaces. Each pair is the same MARK/TEXT two-step pattern
+     documented in this file's header (canonical hue for dots/bars/marks, a lighter TEXT step for
+     when the color renders as actual text), plus a MARK-hued WASH step for when a status color is
+     a page background with its own TEXT sitting on top (decision-table rows, alert cards) --
+     needed here because the mark, one of two colors used as text, and the wash background all
+     have to be mutually consistent, unlike the light theme where only text-on-white needed
+     checking. --block/--struct also switch hue back to this project's own Bento palette (hot pink
+     / electric violet, `:root` above) instead of the unrelated sky-blue an earlier, since-removed
+     "Cool Ice White" override had left them defaulting to -- that mismatch is also why
+     --struct-text (violet) and the old --struct mark (blue) didn't visually match each other.
+     Every TEXT-on-WASH pair below was checked past 4.5:1 against these surfaces: allow ~7.4:1,
+     step-up ~8.0:1, block ~5.7:1, struct ~5.6:1. */
   --allow-text: #34d399;    /* Emerald 400 */
+  --allow-wash: rgba(16, 185, 129, 0.16);
   --stepup-text: #fbbf24;   /* Amber 400 */
+  --stepup-wash: rgba(245, 158, 11, 0.16);
+  --block: #ec4899;         /* Hot Pink -- matches --block-text's hue family (was sky-blue #ef4444's leftover, mismatched) */
   --block-text: #f472b6;    /* Pink 400 */
+  --block-wash: rgba(236, 72, 153, 0.16);
+  --struct: #8b5cf6;        /* Electric Violet -- matches --struct-text's hue family (was sky-blue #0284c7, mismatched) */
   --struct-text: #a78bfa;   /* Violet 400 */
+  --struct-wash: rgba(139, 92, 246, 0.16);
+
+  /* Accent: Electric Violet, same hue as --struct and as this theme's own light-mode accent
+     (`:root` above) -- restores the brand's actual accent identity instead of the unrelated
+     sky-blue the removed "Cool Ice White" block had left it defaulting to, so light/dark mode
+     read as the same product rather than two different color schemes. --accent-wash stays a pale,
+     mostly-opaque lavender (not a dark translucent tint) because it's always used as a chip/badge
+     *background* with the dark --accent-strong as the text on top (.business-account-chip,
+     .ai-badge, .ask-ai-btn, .push-toggle:hover, .ai-suggestion-chip:hover) -- a translucent violet
+     over this theme's near-black surface stays dark and drops that pairing to ~2.6:1, so instead
+     of tinting the page background, it stays a deliberately light pill floating on the dark UI
+     (~5:1 against --accent-strong, checked), the same "chip is its own light surface" look these
+     badges already have in the light theme.  */
+  --accent: #8b5cf6;
+  --accent-strong: #7c3aed;
+  --accent-wash: #f5f3ff;
 
   /* Dark mode specific shadows */
   --shadow-3d: 0 20px 40px -10px rgba(0, 0, 0, 0.5), inset 0 2px 4px rgba(255, 255, 255, 0.05), inset 0 0 0 1px rgba(255, 255, 255, 0.05);
@@ -2078,6 +2073,15 @@ tr.decision-step_up {
 /* Specific component overrides for better dark mode visibility */
 [data-theme="dark"] .topbar {
   background: rgba(9, 9, 11, 0.6);
+}
+
+/* OpenStreetMap's default tiles are a light basemap by design (Section 15.8's original dark
+   theme covered this same ground) -- inverting lightness then rotating hue back gives a dark map
+   from the same light tile source without a second CDN dependency for dark tiles. Scoped to the
+   tile pane only, not `.leaflet-container`, so marker/popup panes (re-themed via CSS custom
+   properties above) keep their true status colors instead of also being inverted. */
+[data-theme="dark"] .leaflet-tile-pane {
+  filter: invert(1) hue-rotate(180deg) brightness(0.95) contrast(0.9);
 }
 
 [data-theme="dark"] .glass-panel {

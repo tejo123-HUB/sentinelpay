@@ -3,11 +3,11 @@
 let auditChart = null;
 let auditInitialized = false;
 
-// Same validated status palette as app.js's CHART_COLORS (dataviz skill's validate_palette.js
-// against this dashboard's light surface, see style.css's file header) — duplicated per file
-// since each renders to its own <canvas> and can't share CSS custom properties.
-const AUDIT_CHART_COLORS = { allow: '#0ca30c', stepup: '#e0940a', block: '#d03b3b' };
-
+// Colors are read live from style.css's custom properties via app.js's chartPalette()/cssVar()
+// helpers (window.sentinelpayChartPalette/sentinelpayCssVar) instead of a second hardcoded hex
+// set — the previous hardcoded set (#898781 ticks, #52514e legend text, tuned for the light
+// theme only) rendered as low-contrast dark gray on this chart's canvas once the dark theme's
+// near-black background was behind it, same bug class as analytics.js's trend chart.
 function auditLineDataset(label, color) {
   return {
     label,
@@ -19,9 +19,32 @@ function auditLineDataset(label, color) {
     pointRadius: 0, // quiet until hovered — the point only appears on interaction
     pointHoverRadius: 5,
     pointHoverBackgroundColor: color,
-    pointHoverBorderColor: '#fcfcfb',
+    pointHoverBorderColor: window.sentinelpayCssVar('--surface-strong'),
     pointHoverBorderWidth: 2,
     pointHitRadius: 10,
+  };
+}
+
+function auditChartOptions() {
+  const p = window.sentinelpayChartPalette();
+  return {
+    responsive: true,
+    maintainAspectRatio: false,
+    interaction: { mode: 'index', intersect: false },
+    scales: {
+      x: { ticks: { color: p.textFaint, font: { size: 11 } }, grid: { color: p.gridline } },
+      y: {
+        beginAtZero: true,
+        ticks: { color: p.textFaint, font: { size: 11 }, precision: 0 },
+        grid: { color: p.gridline },
+      },
+    },
+    plugins: {
+      legend: {
+        labels: { color: p.textDim, usePointStyle: true, pointStyle: 'circle', padding: 16, font: { size: 12, weight: '600' } },
+      },
+      tooltip: window.sentinelpayChartTooltip(),
+    },
   };
 }
 
@@ -29,45 +52,37 @@ function initAuditChart() {
   if (typeof Chart === 'undefined') return null;
   const ctx = document.getElementById('audit-trend-chart');
   if (!ctx) return null;
+  const p = window.sentinelpayChartPalette();
   return new Chart(ctx, {
     type: 'line',
     data: {
       labels: [],
       datasets: [
-        auditLineDataset('Allow', AUDIT_CHART_COLORS.allow),
-        auditLineDataset('Step-Up', AUDIT_CHART_COLORS.stepup),
-        auditLineDataset('Block', AUDIT_CHART_COLORS.block),
+        auditLineDataset('Allow', p.allow),
+        auditLineDataset('Step-Up', p.stepup),
+        auditLineDataset('Block', p.block),
       ],
     },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      interaction: { mode: 'index', intersect: false },
-      scales: {
-        x: { ticks: { color: '#898781', font: { size: 11 } }, grid: { color: '#e1e0d9' } },
-        y: {
-          beginAtZero: true,
-          ticks: { color: '#898781', font: { size: 11 }, precision: 0 },
-          grid: { color: '#e1e0d9' },
-        },
-      },
-      plugins: {
-        legend: {
-          labels: { color: '#52514e', usePointStyle: true, pointStyle: 'circle', padding: 16, font: { size: 12, weight: '600' } },
-        },
-        tooltip: {
-          backgroundColor: '#ffffff',
-          titleColor: '#0b0b0b',
-          bodyColor: '#52514e',
-          borderColor: 'rgba(11,11,11,0.1)',
-          borderWidth: 1,
-          padding: 10,
-          cornerRadius: 8,
-        },
-      },
-    },
+    options: auditChartOptions(),
   });
 }
+
+// Same rationale as analytics.js's restyleAnalyticsTrendChart: Chart.js never re-reads CSS on its
+// own, so a theme toggle while the Audit tab is already open needs an explicit repaint.
+function restyleAuditChart() {
+  if (!auditChart) return;
+  const p = window.sentinelpayChartPalette();
+  const colors = [p.allow, p.stepup, p.block];
+  auditChart.data.datasets.forEach((dataset, i) => {
+    dataset.borderColor = colors[i];
+    dataset.backgroundColor = `${colors[i]}1a`;
+    dataset.pointHoverBackgroundColor = colors[i];
+    dataset.pointHoverBorderColor = p.surface;
+  });
+  Object.assign(auditChart.options, auditChartOptions());
+  auditChart.update();
+}
+document.addEventListener('sentinelpay:theme-changed', restyleAuditChart);
 
 async function refreshAuditSummary() {
   try {
